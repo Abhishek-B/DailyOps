@@ -637,7 +637,7 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
 /* ========================================================================== 
    DAILYOPS — DAILY OPERATIONS  ·  demo build
    REAL NOW: auth, profile, organisation role, venues, today's shift operations,
-   and today's daily task status are loaded from Supabase.
+   today's routine/one-off tasks, and today's task status are loaded from Supabase.
    DEMO/LOCAL STILL: recurring templates, rosters, historical days, CSV history, and
    notifications remain in localStorage until their later migration phases.
    Sections: icons · utils · store/seed · notifier · render · actions · init
@@ -1224,6 +1224,7 @@ function localDemoDayForVenue(context, date) {
 function applyRemoteTaskRow(task, row) {
   task.id = row.id;
   task.tplId = row.template_task_id || null;
+  task.sortOrder = row.sort_order;
   task.title = row.title;
   task.detail = row.detail || '';
   task.critical = !!row.critical;
@@ -1236,6 +1237,41 @@ function applyRemoteTaskRow(task, row) {
   task.note = row.note || '';
   task.reason = row.reason || '';
   return task;
+}
+
+function nextRemoteSortOrder(list) {
+  return list.tasks.reduce((max, task, index) => {
+    const order = Number.isFinite(task.sortOrder) ? task.sortOrder : index;
+    return Math.max(max, order);
+  }, -1) + 1;
+}
+
+async function insertRemoteDailyTask(list, fields) {
+  const payload = {
+    checklist_id: list.id,
+    template_task_id: fields.templateTaskId || null,
+    sort_order: fields.sortOrder,
+    title: fields.title,
+    detail: fields.detail || null,
+    critical: !!fields.critical,
+    source: fields.source,
+    status: 'pending',
+    added_by: AUTH.profile.id,
+    added_at: new Date().toISOString(),
+    note: null,
+    reason: null
+  };
+  const { data, error } = await DB.from('daily_tasks')
+    .insert(payload)
+    .select(REMOTE_TASK_SELECT)
+    .single();
+  if (error) throw error;
+  return applyRemoteTaskRow({}, data);
+}
+
+function routineTaskKey(task) {
+  const normalise = value => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  return normalise(task.title);
 }
 
 function mapRemoteDay(context, date, checklists, tasks) {
@@ -1999,7 +2035,7 @@ function pageManagerToday() {
 
   const rows = L.tasks.map(t => taskRowHtml(t, {
     listKey: lk, locked: L.submitted,
-    side: t.source === 'adhoc' ? `<span class="task-side"><span class="btn btn-sm btn-icon btn-ghost" data-act="del-task" data-list="${lk}" data-id="${t.id}" title="Remove this one-off task">${ic('trash', 14)}</span></span>` : ''
+    side: t.source === 'adhoc' && !L.submitted ? `<span class="task-side"><span class="btn btn-sm btn-icon btn-ghost" data-act="del-task" data-list="${lk}" data-id="${t.id}" title="Remove this one-off task">${ic('trash', 14)}</span></span>` : ''
   })).join('');
 
   return `
@@ -2043,7 +2079,7 @@ function pageManagerToday() {
         <div class="card-foot row" style="gap:8px">
           <button class="btn btn-sm" data-act="review" data-list="${lk}">${ic('note', 15)} Review notes &amp; reasons</button>
           <button class="btn btn-sm" data-act="add-task" data-list="${lk}">${ic('plus', 15)} Add a one-off task</button>
-          <button class="btn btn-sm btn-ghost" data-act="sync-tpl" data-list="${lk}">${ic('reset', 15)} Re-apply template</button>
+          <button class="btn btn-sm btn-ghost" data-act="sync-tpl" data-list="${lk}">${ic('reset', 15)} Re-apply routine tasks</button>
           ${L.submitted ? `<button class="btn btn-sm btn-ghost" data-act="reopen" data-list="${lk}">Reopen</button>` : ''}
         </div>
       </div>
@@ -2062,7 +2098,7 @@ function pageManagerToday() {
       </div>
 
       <div class="card">
-        <div class="card-head"><div class="h3">Demo controls</div></div>
+        <div class="card-head"><div class="h3">Operation controls</div></div>
         <div class="card-body row wrap" style="gap:8px">
           <button class="btn btn-sm" data-act="eod">${ic('send', 15)} Force end-of-day report</button>
           <button class="btn btn-sm" data-act="tick-all" data-list="${lk}">${ic('check', 15)} Tick everything on ${esc(m.full)}</button>
@@ -2549,10 +2585,9 @@ function openReview(lk) {
 
 /* ---- add a one-off task to today --------------------------------------- */
 function openAddTask(lk) {
-  if (isSupabaseMode()) {
-    toast('One-off task creation is deferred while today\'s operations use Supabase.', 'warn');
-    return;
-  }
+  if (!isMgr()) { toast('Only a venue manager can add a one-off task.', 'warn'); return; }
+  const current = today().lists[lk];
+  if (current.submitted) { toast('Reopen the shift before adding a task.', 'warn'); return; }
   const m = LIST_META[lk];
   openModal(`
     <div class="modal-head"><div style="flex:1">
@@ -2585,18 +2620,41 @@ function openAddTask(lk) {
       const sw = root.querySelector('#nt-crit');
       sw.onclick = () => { crit = !crit; sw.classList.toggle('is-on', crit); };
       root.querySelector('#nt-title').focus();
-      root.querySelector('[data-x=save]').onclick = () => {
+      const saveButton = root.querySelector('[data-x=save]');
+      let saving = false;
+      saveButton.onclick = async () => {
+        if (saving) return;
         const title = root.querySelector('#nt-title').value.trim();
         if (!title) { toast('Give the task a name', 'warn'); return; }
-        const day = today();
-        day.lists[list].tasks.push({
-          id: uid('x'), tplId: null, title, detail: root.querySelector('#nt-detail').value.trim(),
-          critical: crit, source: 'adhoc', addedBy: me().id, addedAt: new Date().toISOString(),
-          status: 'pending', doneBy: null, doneAt: null, note: '', reason: ''
-        });
-        day.lists[list].completeNotified = false;
-        R.list = list; save(); closeModal(); render();
-        toast(`Added to today's ${LIST_META[list].full.toLowerCase()}`, 'ok');
+        const detail = root.querySelector('#nt-detail').value.trim();
+        const day = today(), target = day.lists[list];
+        if (target.submitted) { toast('Reopen the shift before adding a task.', 'warn'); return; }
+        saving = true;
+        saveButton.disabled = true;
+        try {
+          if (isSupabaseMode()) {
+            const task = await insertRemoteDailyTask(target, {
+              sortOrder: nextRemoteSortOrder(target), title, detail, critical: crit, source: 'adhoc'
+            });
+            target.tasks.push(task);
+          } else {
+            target.tasks.push({
+              id: uid('x'), tplId: null, title, detail,
+              critical: crit, source: 'adhoc', addedBy: me().id, addedAt: new Date().toISOString(),
+              status: 'pending', doneBy: null, doneAt: null, note: '', reason: ''
+            });
+            target.completeNotified = false;
+            save();
+          }
+          R.list = list;
+          closeModal(); render();
+          toast(`Added to today's ${LIST_META[list].full.toLowerCase()}`, 'ok');
+        } catch (error) {
+          console.error(`[${isSupabaseMode() ? 'supabase' : 'demo'}] one-off task insert failed`, { checklistId: target.id, title, error });
+          toast('Could not add that one-off task. Please try again.', 'warn');
+          saveButton.disabled = false;
+          saving = false;
+        }
       };
     }
   });
@@ -2891,7 +2949,7 @@ function toggleTask(lk, id) {
 
 function syncTemplate(lk) {
   if (isSupabaseMode()) {
-    toast('Template sync is deferred while today\'s operations use Supabase.', 'warn');
+    reapplyRemoteRoutineTasks(lk);
     return;
   }
   const day = today(), L = day.lists[lk], tpl = TPL()[lk];
@@ -2906,6 +2964,63 @@ function syncTemplate(lk) {
   L.completeNotified = false;
   save(); runTriggers(); render();
   toast(`${LIST_META[lk].full} synced with the template`, 'ok');
+}
+
+/* Temporary Step 9 bridge: local routine definitions can add missing remote
+   daily tasks, but they never replace today's Supabase state. Step 10 will
+   replace this path with Supabase-backed recurring templates. */
+async function reapplyRemoteRoutineTasks(lk) {
+  if (!isMgr()) { toast('Only a venue manager can re-apply routine tasks.', 'warn'); return; }
+  const day = today(), L = day.lists[lk];
+  if (L.submitted) { toast('Reopen the shift before re-applying routine tasks.', 'warn'); return; }
+  const lockKey = `reapply:${L.id}`;
+  if (REMOTE_MUTATIONS.has(lockKey)) return;
+  const routine = (TPL()[lk] || []);
+  // Match against every existing task so a same-named one-off is not
+  // duplicated by this temporary compatibility action.
+  const existing = new Set(L.tasks.map(routineTaskKey));
+  const missing = [];
+  routine.forEach(task => {
+    const key = routineTaskKey(task);
+    if (existing.has(key)) return;
+    existing.add(key);
+    missing.push(task);
+  });
+  if (!missing.length) {
+    toast(`${LIST_META[lk].full} is already up to date`, 'ok');
+    return;
+  }
+
+  REMOTE_MUTATIONS.add(lockKey);
+  let added = 0;
+  try {
+    let sortOrder = nextRemoteSortOrder(L);
+    for (const task of missing) {
+      // Local template IDs are not live template_tasks IDs, so leave the
+      // snapshot reference null until the recurring-template migration.
+      const remoteTask = await insertRemoteDailyTask(L, {
+        sortOrder: sortOrder++,
+        title: task.title,
+        detail: task.detail || '',
+        critical: !!task.critical,
+        source: 'template',
+        templateTaskId: null
+      });
+      L.tasks.push(remoteTask);
+      added++;
+    }
+    await loadSupabaseToday();
+    render();
+    toast(`${plural(added, 'routine task')} added to ${LIST_META[lk].full}`, 'ok');
+  } catch (error) {
+    console.error('[supabase] routine task re-apply failed', { checklistId: L.id, listType: lk, error });
+    try { await loadSupabaseToday(); }
+    catch (reloadError) { console.error('[supabase] routine task re-apply resync failed', reloadError); }
+    render();
+    toast('Could not re-apply routine tasks. Please try again.', 'warn');
+  } finally {
+    REMOTE_MUTATIONS.delete(lockKey);
+  }
 }
 
 /* pulling someone off shift has to clear them from every venue, not just this one */
@@ -2933,6 +3048,34 @@ async function reopenList(lk) {
   }
   L.submitted = false; L.submittedBy = null; L.submittedAt = null;
   save(); render(); toast(`${LIST_META[lk].full} reopened`);
+}
+
+async function removeRemoteAdhocTask(lk, taskId) {
+  if (!isMgr()) { toast('Only a venue manager can remove a one-off task.', 'warn'); return; }
+  const day = today(), L = day.lists[lk], task = L.tasks.find(item => item.id === taskId);
+  if (!task || task.source !== 'adhoc') { toast('Only one-off tasks can be removed.', 'warn'); return; }
+  if (L.submitted) { toast('Reopen the shift before removing a task.', 'warn'); return; }
+  const lockKey = `delete:${taskId}`;
+  if (REMOTE_MUTATIONS.has(lockKey)) return;
+  REMOTE_MUTATIONS.add(lockKey);
+  try {
+    const { data, error } = await DB.from('daily_tasks')
+      .delete()
+      .eq('id', taskId)
+      .eq('source', 'adhoc')
+      .select('id')
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) throw new Error('The one-off task was not deleted; RLS may have denied the operation.');
+    L.tasks = L.tasks.filter(item => item.id !== taskId);
+    render();
+    toast('One-off task removed', 'ok');
+  } catch (error) {
+    console.error('[supabase] one-off task delete failed', { taskId, checklistId: L.id, error });
+    toast('Could not remove that one-off task. Please try again.', 'warn');
+  } finally {
+    REMOTE_MUTATIONS.delete(lockKey);
+  }
 }
 
 function coverShift(lk) {
@@ -2970,8 +3113,10 @@ function handleAct(act, ds) {
     case 'review':    openReview(ds.list); break;
     case 'add-task':  openAddTask(ds.list || R.list); break;
     case 'del-task': {
-      if (isSupabaseMode()) { toast('Removing daily tasks is deferred while today\'s operations use Supabase.', 'warn'); break; }
+      if (isSupabaseMode()) { removeRemoteAdhocTask(ds.list, ds.id); break; }
       const L = day.lists[ds.list];
+      const task = L.tasks.find(item => item.id === ds.id);
+      if (!task || task.source !== 'adhoc') { toast('Only one-off tasks can be removed.', 'warn'); break; }
       L.tasks = L.tasks.filter(t => t.id !== ds.id);
       save(); runTriggers(); render(); toast('Task removed'); break;
     }

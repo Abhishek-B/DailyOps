@@ -16,7 +16,7 @@ Supabase currently supplies authentication, organisation/venue identity, and tod
 - the user's organisation memberships and organisation names; and
 - the venues returned by the deployed RLS policies;
 - today's `public.daily_checklists` Opening/Closing Shift rows; and
-- today's `public.daily_tasks` status, completion attribution/timestamps, notes, and incomplete reasons.
+- today's `public.daily_tasks` routine and one-off tasks, status, completion attribution/timestamps, notes, and incomplete reasons.
 
 Recurring shift-task templates, roster data, history, CSV export, and simulated notifications remain localStorage-backed. Production defaults to Supabase mode. The original demo can be enabled explicitly with `DEMO_MODE: true`.
 
@@ -60,7 +60,9 @@ Recurring shift-task templates, roster assignments, history, notifications, and 
 
 For each accessible real venue, the app loads today's `public.daily_checklists` rows for `list_type = open` and `list_type = close`, representing the Opening and Closing Shifts, then loads their `public.daily_tasks`. A manager can temporarily bootstrap missing rows: the legacy instance rows are inserted with the schema's unique `(venue_id, work_date, list_type)` key, and empty task lists are seeded from the matching local demo template. The seed tasks intentionally have `template_task_id = null`; this is temporary phase-1 bootstrap data until recurring shift-task snapshots are migrated. Repeated page loads see the existing rows/tasks and do not seed them again. Employees cannot bootstrap missing rows; RLS remains the boundary and they see an explicit initialisation message.
 
-Task changes use the schema's existing `pending`, `done`, `blocked`, `na`, and `skipped` values. Completion writes `completed_by` and `completed_at`; reopening clears those fields. Notes, reasons, and shift submission metadata are written to Supabase. One-off task creation, template sync/copy, reset, notifications, rosters, and history remain deferred or local/demo.
+Task changes use the schema's existing `pending`, `done`, `blocked`, `na`, and `skipped` values. Completion writes `completed_by` and `completed_at`; reopening clears those fields. Notes, reasons, and shift submission metadata are written to Supabase. Managers can add and remove `source = adhoc` one-off tasks, while routine tasks remain non-deletable. Re-apply routine tasks is a temporary local-template bridge that only adds missing tasks and preserves existing state. Notifications, rosters, history, and authoritative recurring templates remain deferred or local/demo.
+
+Before testing one-off deletion, apply `supabase/migrations/005_allow_managers_delete_adhoc_daily_tasks.sql` in the Supabase SQL Editor. It adds only a manager-scoped delete policy for `source = 'adhoc'` daily tasks.
 
 ### Create the first manager account
 

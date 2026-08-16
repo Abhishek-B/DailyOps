@@ -67,7 +67,7 @@ Important deployed enums include `app_role` (`manager`, `employee`), `checklist_
 
 The schema also contains SECURITY DEFINER access helpers, task/checklist update guards, and `ensure_daily_checklists(uuid, date)`. These helpers and guards remain part of the RLS boundary and are not renamed by this cleanup.
 
-Migration history currently consists of `001_initial_schema.sql`, `002_add_platform_role.sql`, `003_grant_helper_function_execute.sql`, and `004_grant_can_update_task_execute.sql`. No terminology migration was created; already-applied schema migrations remain immutable.
+Migration history currently consists of `001_initial_schema.sql`, `002_add_platform_role.sql`, `003_grant_helper_function_execute.sql`, `004_grant_can_update_task_execute.sql`, and `005_allow_managers_delete_adhoc_daily_tasks.sql`. Already-applied schema migrations remain immutable.
 
 ## 6. What is live/real today
 
@@ -84,13 +84,18 @@ Migration history currently consists of `001_initial_schema.sql`, `002_add_platf
 - Completion attribution and timestamps through `completed_by` and `completed_at`.
 - Task notes and incomplete reasons through `note` and `reason`.
 - Operation submission metadata through `submitted`, `submitted_by`, and `submitted_at`.
+- Manager-created one-off tasks in `daily_tasks`, including title, detail, critical flag, `source = 'adhoc'`, ordering, and `added_by`/`added_at`.
+- Manager deletion of one-off tasks only; routine daily tasks remain protected from deletion by RLS.
+- Manager re-application of missing routine tasks to today's Supabase operation, without replacing existing state or removing one-off tasks. This remains a temporary local-template compatibility bridge.
+- Manager task controls for individual updates, notes/reasons, bulk completion, one-off tasks, shift submission, and reopening.
+- Today's progress, outstanding, critical-outstanding, per-shift progress, and submitted counts from the in-memory view loaded from Supabase `daily_tasks` and `daily_checklists`.
 
 ## 7. What is still local/demo/deferred
 
 **DEMO/LOCAL STILL**
 
 - Recurring template editing and template management UI. The Supabase template tables exist, but the current frontend template source remains local/demo data.
-- Temporary phase-1 task bootstrap source: missing manager-created daily operation tasks are seeded from the matching local demo template, with `template_task_id` intentionally null.
+- Temporary task bootstrap/re-apply source: missing manager-created daily operation tasks and missing routine tasks are seeded from the matching local demo template, with `template_task_id` intentionally null.
 - Roster management and roster CSV import.
 - Historical days, reporting, and CSV history export.
 - Simulated notification inbox and notification previews.
@@ -102,12 +107,12 @@ Migration history currently consists of `001_initial_schema.sql`, `002_add_platf
 - Edge Functions.
 - Scheduled end-of-day processing.
 - Full venue, employee, organisation-membership, and roster administration from the frontend.
-- Production template snapshots and explicit template synchronisation.
+- Supabase-backed recurring template snapshots and authoritative template synchronisation. Step 9's re-apply action is only a temporary local-definition bridge.
 - Offline/PWA support and evidence/photo attachments.
 
 ## 8. Completed milestones
 
-Steps 1–8 are complete in the current migration history and frontend implementation:
+Steps 1–9 are complete in the current migration history and frontend implementation:
 
 1. Initial multi-organisation Postgres schema, indexes, constraints, triggers, and RLS model.
 2. Additive `platform_role` schema migration for platform-level `user`/`admin` status.
@@ -117,6 +122,7 @@ Steps 1–8 are complete in the current migration history and frontend implement
 6. Real venue selection/persistence with a temporary local demo bridge for still-deferred template/roster/history screens.
 7. Today's Supabase daily operation instances and task rows, including idempotent manager bootstrap for missing Opening/Closing rows.
 8. Supabase task status, completion metadata, notes, incomplete reasons, and operation submission/review flow.
+9. Today's complete Supabase operation workflow: one-off tasks, safe routine re-apply, manager controls, shift submission/reopening, and real progress/critical counts.
 
 The repository does not use a separate generated milestone registry; this list reflects the current project history and implementation state.
 
@@ -125,26 +131,26 @@ The repository does not use a separate generated milestone registry; this list r
 - Live tables, enum values, foreign keys, RLS policies, triggers, and adapter constants retain legacy `checklist` naming.
 - `docs/original-peachy-demo.html` remains a historical reference artifact and is not the production application.
 - The current operational type model is still hard-coded to `open` and `close` in the deployed enum and several frontend loops. Additional operation sections need an additive design before implementation.
-- Missing daily rows/tasks use temporary manager-only bootstrap logic from local demo templates. The unique daily-row constraint makes repeated page loads idempotent, but broader concurrent initialisation should eventually move to the server-side helper/template path.
+- Missing daily rows/tasks and Step 9 routine re-apply use temporary manager-only local-template bridge logic. The unique daily-row constraint makes repeated page loads idempotent; broader concurrent initialisation and template synchronisation should eventually move to the server-side helper/template path.
+- The temporary re-apply matcher uses a normalised task title because local template IDs are not live `template_tasks` IDs. Step 10 should replace this with stable Supabase template-task identity.
 - Deferred template, roster, history, and notification screens still depend on the localStorage state and temporary real-venue-to-demo-context mapping.
 - Realtime is not implemented, so another browser's task changes are not pushed into an already-open screen.
 - There is no production notification backend or scheduled end-of-day job.
-- RLS helper EXECUTE grants were initially missing in the live project and were corrected in migrations `003_grant_helper_function_execute.sql` and `004_grant_can_update_task_execute.sql`. Keep these grants and verify them when provisioning another Supabase project.
+- RLS helper EXECUTE grants were initially missing in the live project and were corrected in migrations `003_grant_helper_function_execute.sql` and `004_grant_can_update_task_execute.sql`. The one-off delete capability is isolated in `005_allow_managers_delete_adhoc_daily_tasks.sql`. Keep these grants/policies and verify them when provisioning another Supabase project.
 - The frontend has been validated through repository/static checks and the existing development workflow; a full authenticated browser regression suite is still follow-up work.
 
 ## 10. Next milestones
 
 Use this order for the next phases:
 
-1. Finish today's workflow completely.
-2. Supabase-backed recurring shift templates.
-3. Roster, employees, and venue memberships.
-4. History, reporting, and CSV.
-5. Realtime.
-6. Notifications.
-7. Scheduled end-of-day processing.
-8. Final security testing.
-9. Custom domain and polish.
+1. Supabase-backed recurring shift templates.
+2. Roster, employees, and venue memberships.
+3. History, reporting, and CSV.
+4. Realtime.
+5. Notifications.
+6. Scheduled end-of-day processing.
+7. Final security testing.
+8. Custom domain and polish.
 
 ## 11. Git workflow
 
