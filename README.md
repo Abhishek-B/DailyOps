@@ -4,15 +4,17 @@ DailyOps is a framework-free, multi-venue opening/closing checklist app. It rema
 
 ## Current phase
 
-Supabase currently supplies authentication and organisation/venue identity:
+Supabase currently supplies authentication, organisation/venue identity, and today's live checklist instance:
 
 - email/password sign-in and sign-out;
 - persisted sessions across browser refreshes; and
 - the signed-in user's `public.profiles` row;
 - the user's organisation memberships and organisation names; and
-- the venues returned by the deployed RLS policies.
+- the venues returned by the deployed RLS policies;
+- today's `public.daily_checklists` open/close rows; and
+- today's `public.daily_tasks` status, completion attribution/timestamps, notes, and incomplete reasons.
 
-Checklist templates, daily tasks, roster data, history, CSV export, and simulated notifications remain localStorage-backed. Production defaults to Supabase mode. The original demo can be enabled explicitly with `DEMO_MODE: true`.
+Checklist templates, roster data, history, CSV export, and simulated notifications remain localStorage-backed. Production defaults to Supabase mode. The original demo can be enabled explicitly with `DEMO_MODE: true`.
 
 ## Supabase frontend auth setup
 
@@ -40,7 +42,7 @@ In the Supabase dashboard:
 2. For local testing, either disable email confirmation or confirm the test user's email.
 3. Under **Authentication > URL Configuration**, allow the local URL used by Live Server, such as `http://127.0.0.1:5500`, and the production URL below.
 
-The app loads the authenticated user's profile with a query constrained to `profiles.id = auth.users.id`, then loads organisation memberships, organisation names, and RLS-filtered venues. It does not query checklist templates, daily tasks, rosters, history, or notifications in this phase.
+The app loads the authenticated user's profile with a query constrained to `profiles.id = auth.users.id`, then loads organisation memberships, organisation names, and RLS-filtered venues. Today's checklist/task data is loaded only after that identity step succeeds.
 
 ## Supabase organisation and venue loading
 
@@ -48,7 +50,13 @@ After authentication, the app reads the signed-in user's rows from `public.organ
 
 The app then queries `public.venues`. RLS is the access boundary: managers receive venues in organisations they manage, while employees receive only venues allowed by the deployed membership policies. The venue switcher uses the real venue name, subtitle, accent, cutoff time, and notification settings. The selected real venue ID is remembered in a user-specific local preference and is restored only if the user still has access.
 
-Checklist templates, daily task instances, roster assignments, history, notifications, and related demo screens still use the existing localStorage state. Real venue rows are mapped to temporary local checklist contexts so real Supabase IDs do not overwrite or get persisted into the old demo state.
+Checklist templates, roster assignments, history, notifications, and related demo screens still use the existing localStorage state. Real venue rows are mapped to temporary local checklist contexts so real Supabase IDs do not overwrite or get persisted into the old demo state. The live daily checklist/task state is kept in a separate in-memory Supabase view and is never silently replaced with local task state.
+
+## Supabase today's checklist loading
+
+For each accessible real venue, the app loads today's `public.daily_checklists` rows for `list_type = open` and `list_type = close`, then loads their `public.daily_tasks`. A manager can temporarily bootstrap missing rows: the checklist rows are inserted with the schema's unique `(venue_id, work_date, list_type)` key, and empty task lists are seeded from the matching local demo template. The seed tasks intentionally have `template_task_id = null`; this is temporary phase-1 bootstrap data until template snapshots are migrated. Repeated page loads see the existing rows/tasks and do not seed them again. Employees cannot bootstrap missing rows; RLS remains the boundary and they see an explicit initialisation message.
+
+Task changes use the schema's existing `pending`, `done`, `blocked`, `na`, and `skipped` values. Completion writes `completed_by` and `completed_at`; reopening clears those fields. Notes, reasons, and checklist submission metadata are written to Supabase. One-off task creation, template sync/copy, reset, notifications, rosters, and history remain deferred or local/demo.
 
 ### Create the first manager account
 
@@ -88,7 +96,9 @@ Use an authenticated browser session or the Supabase client with a test user's s
 ## Intentionally deferred
 
 - organisation and venue administration mutations;
-- database-backed checklist templates, daily checklist snapshots, tasks, rosters, and history;
+- database-backed checklist template administration and template snapshots;
+- roster migration and roster administration;
+- historical days, reporting, and CSV export migration;
 - realtime subscriptions;
 - notification delivery and scheduled jobs;
 - roster CSV import;
