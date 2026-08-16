@@ -8,7 +8,7 @@ DailyOps is a framework-free, multi-venue daily-operations app for opening and c
 
 ## Current phase
 
-Supabase currently supplies authentication, organisation/venue identity, team membership, today's roster, and today's live shift-operation instances:
+Supabase currently supplies authentication, organisation/venue identity, team membership, weekly roster planning, and today's live shift-operation instances:
 
 - email/password sign-in and sign-out;
 - persisted sessions across browser refreshes;
@@ -16,7 +16,8 @@ Supabase currently supplies authentication, organisation/venue identity, team me
 - the user's organisation memberships and organisation names;
 - the venues returned by the deployed RLS policies;
 - organisation members, profiles, active state, and organisation role;
-- employee venue memberships and today's Opening/Closing Shift roster assignments;
+- organisation-wide employee visibility for managers, employee venue memberships, and Opening/Closing Shift roster assignments across the selected week;
+- active platform-admin access across organisations and venues, employee weekly roster/venue visibility, and in-app shift-cover requests for managers;
 - the selected venue's recurring Opening/Closing Shift templates and routine tasks; and
 - today's `public.daily_checklists` Opening/Closing Shift rows and `public.daily_tasks` routine/one-off tasks, status, completion attribution/timestamps, notes, and incomplete reasons.
 
@@ -52,19 +53,19 @@ The app loads the authenticated user's profile with a query constrained to `prof
 
 ## Supabase organisation and venue loading
 
-After authentication, the app reads the signed-in user's rows from `public.organisation_members` and loads the related `public.organisations` rows. The `organisation_members.role` value (`manager` or `employee`) determines the manager or employee UI for the selected venue. `platform_role` is a separate platform-level field and is not used for this decision.
+After authentication, the app reads the signed-in user's rows from `public.organisation_members` and loads the related `public.organisations` rows. For ordinary users, the `organisation_members.role` value (`manager` or `employee`) determines the manager or employee UI for the selected venue. An active profile with `platform_role = 'admin'` is a separate platform-level capability that can manage all organisations/venues through RLS; it does not change ordinary organisation roles.
 
-The app then queries `public.venues`. RLS is the access boundary: managers receive venues in organisations they manage, while employees receive only venues allowed by the deployed membership policies. The venue switcher uses the real venue name, subtitle, accent, cutoff time, and notification settings. The selected real venue ID is remembered in a user-specific local preference and is restored only if the user still has access.
+The app then queries `public.venues`. RLS is the access boundary: ordinary managers receive venues in organisations they manage, active platform admins receive all organisations/venues through the deployed helper functions, and employees receive only venues allowed by the deployed membership policies. Manager-capable users can filter the UI to `All organisations` or one managed organisation; the venue picker and manager group summary include organisation names when more than one organisation is available. The selected organisation and real venue IDs are remembered in user-specific local preferences and restored only if the user still has access.
 
-Team and roster data now load from Supabase. Managers see members in their organisation, manage employee profile active state and `venue_members` access, and assign active employees to today's Opening/Closing Shift through `roster_assignments`. Employees load only their permitted venues and can use the existing secure self-cover action. History, notifications, and related demo screens remain local/deferred. Real venue rows are still mapped to temporary local operations contexts only for those deferred screens, so real Supabase IDs do not overwrite or get persisted into the old demo state.
+Team and roster data now load from Supabase. Managers see every member of the selected organisation regardless of venue; managers of multiple organisations and platform admins can select `All organisations` to see the combined staff and venue scope. Shared employees remain visible with each organisation membership and their weekly assignments are shown across all accessible venues. Managers can manage profile active state and `venue_members` access, and plan Opening/Closing Shift assignments across a seven-day window for every eligible venue in their manager scope. Deactivating an employee or removing venue access clears future roster assignments while retaining historical records. Employees load only their permitted venues, can view their weekly roster across those venues, and can confirm a current self-cover action; confirmation adds the assignment and creates an in-app manager alert without an approval step. History, the older simulated notification inbox, and related demo screens remain local/deferred. Real venue rows are still mapped to temporary local operations contexts only for those deferred screens, so real Supabase IDs do not overwrite or get persisted into the old demo state.
 
 ## Supabase team, venue memberships, and roster
 
 `auth.users` is the login identity, `profiles` is the app profile, `organisation_members` supplies the `manager`/`employee` organisation role, `venue_members` grants employee venue access, and `roster_assignments` records a user assigned to a venue/date/shift. RLS enforces these boundaries; the UI is not the security boundary.
 
-The browser does not create Auth users. For this MVP, create an employee under **Supabase → Authentication → Users**, then run the organisation-membership insert shown by the Team screen (or use the SQL Editor) with that Auth user's UUID. The Auth trigger creates `profiles`; after the membership exists, the manager can refresh the Team screen, assign venues, enable/disable access, and roster the employee. Role changes remain an administrator/manual operation in this pass, and `platform_role` is never edited by the Team UI.
+The browser does not create Auth users or yet assign an unassociated Auth user to an organisation by email. For this MVP, create an employee under **Supabase → Authentication → Users**, then run the organisation-membership insert shown by the Team screen (or use the SQL Editor) with that Auth user's UUID. The Auth trigger creates `profiles`; after the membership exists, the manager can refresh the Team screen, assign or remove venues, enable/disable access, and plan the employee across the weekly roster. Role changes remain an administrator/manual operation, and `platform_role` is never edited by the Team UI. A future manager-scoped Edge Function or SECURITY DEFINER RPC will add the missing email-based organisation-assignment workflow; no service-role key belongs in the browser.
 
-Migrations `supabase/migrations/006_restrict_venue_member_reads.sql`, `007_scope_team_and_roster_writes.sql`, and `008_grant_can_manage_profile_execute.sql` narrow employee membership reads, scope manager-created venue memberships/roster assignments to active employees with access to the target venue, and enable manager profile active-state updates. Apply them after migrations `001` through `005`.
+Migrations `supabase/migrations/006_restrict_venue_member_reads.sql`, `007_scope_team_and_roster_writes.sql`, `008_grant_can_manage_profile_execute.sql`, `009_platform_admin_access.sql`, and `010_add_shift_cover_requests.sql` narrow employee membership reads, scope manager-created venue memberships/roster assignments to active employees with access to the target venue, enable manager profile active-state updates, give active platform admins global management access through RLS helpers, and add venue-scoped in-app cover alerts. Apply them after migrations `001` through `005`.
 
 ## Supabase recurring shift templates
 
@@ -113,7 +114,7 @@ Make sure the exact local origin is included in Supabase **Authentication > URL 
 3. Sign in with the test user and confirm the profile display name appears in the existing user area.
 4. Refresh the page and confirm the session is restored without signing in again.
 5. Select the sign-out action and confirm the app returns to the login screen.
-6. Open Templates and Team. Confirm remote Opening/Closing Shift templates, organisation members, venue memberships, and today's roster load; history and notification changes remain deferred/local.
+6. Open Templates and Team. Confirm remote Opening/Closing Shift templates, every member of the selected organisation, or every managed organisation when `All organisations` is selected, venue memberships, cross-venue assignments, and the seven-day roster planner load; history and notification changes remain deferred/local.
 
 Production URL:
 
@@ -127,7 +128,7 @@ Use an authenticated browser session or the Supabase client with a test user's s
 
 ## Intentionally deferred
 
-- role editing and automated Auth-user invitation/creation;
+- role editing, automated Auth-user invitation/creation, and manager-side assignment of a pre-created Auth user to an organisation by email; the future implementation must use a manager-scoped Edge Function or narrowly scoped SECURITY DEFINER RPC;
 - historical days, reporting, and CSV export migration;
 - realtime subscriptions;
 - notification delivery and scheduled jobs;

@@ -216,6 +216,7 @@ body.mobile-view .statusbar {
 
 /* cross-venue strip */
 .vstrip { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; padding: 15px 17px 17px; }
+.vstrip-group-label { grid-column: 1 / -1; margin-top: 2px; color: var(--muted); font-size: 11.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .vcard { text-align: left; padding: 12px 13px; border-radius: var(--r-md); border: 1px solid var(--line); background: var(--surface-2); transition: border-color .14s, background .14s; min-width: 0; }
 .vcard:hover { border-color: var(--line-2); background: var(--surface-3); }
 .vcard.is-current { border-color: var(--accent); background: var(--accent-soft); }
@@ -553,6 +554,7 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
   .iconbtn { width: 32px; height: 32px; }
   #venue-pick { flex: 1 1 auto; min-width: 0; }
   #venue-pick .pick-name { max-width: none; }
+  #organisation-pick .pick-name { max-width: 105px; }
   .topbar { gap: 4px; padding: 10px 12px; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -594,6 +596,15 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
       </div>
 
       <header class="topbar">
+        <div class="pickwrap" id="organisation-pick" hidden>
+          <div class="logo" aria-hidden="true">O</div>
+          <div class="pick-text">
+            <div class="pick-name" id="organisation-name">Organisation</div>
+            <div class="pick-sub" id="organisation-sub">All organisations</div>
+          </div>
+          <span class="pick-chev" id="organisation-chev"></span>
+          <select id="organisation-switch" aria-label="Filter organisation"></select>
+        </div>
         <div class="pickwrap" id="venue-pick">
           <div class="logo" id="venue-logo" aria-hidden="true">P</div>
           <div class="pick-text">
@@ -636,11 +647,11 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
 <script>
 /* ========================================================================== 
    DAILYOPS — DAILY OPERATIONS  ·  demo build
-   REAL NOW: auth, profile, organisation role, venues, team membership, venue access,
-   today's roster, recurring shift templates, today's shift operations, today's routine/one-off tasks,
-   and today's task status
+   REAL NOW: auth, profile, organisation role, platform-admin access, venues, team membership,
+   venue access, weekly roster planning, employee weekly roster, cover requests, recurring shift templates,
+   today's shift operations, today's routine/one-off tasks, and today's task status
    are loaded from Supabase.
-   DEMO/LOCAL STILL: historical days, CSV history, and notifications remain
+   DEMO/LOCAL STILL: historical days, CSV history, and the simulated notification inbox/delivery remain
    in localStorage until their later migration phases.
    Sections: icons · utils · store/seed · notifier · render · actions · init
    ========================================================================== */
@@ -658,6 +669,7 @@ let AUTH = {
   profile: null,
   organisationMemberships: [],
   organisations: [],
+  selectedOrganisationId: null,
   venueContexts: [],
   selectedVenueId: null,
   ephemeralDemoVenueIds: []
@@ -665,6 +677,9 @@ let AUTH = {
 let SUPABASE_TODAY = { date: null, byVenue: {} };
 let SUPABASE_TEMPLATES = { byVenue: {} };
 let SUPABASE_TEAM = { members: [], profilesById: {}, venueIdsByUser: {} };
+let SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows: [], loading: false, error: null };
+let SUPABASE_MY_ROSTER_WEEK = { start: null, end: null, rows: [], loading: false, error: null };
+let SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
 const REMOTE_MUTATIONS = new Set();
 let AUTH_RESTORE_ID = 0;
 
@@ -687,6 +702,7 @@ const P = {
   up:      '<path d="M18 15l-6-6-6 6"/>',
   down:    '<path d="M6 9l6 6 6-6"/>',
   right:   '<path d="M9 18l6-6-6-6"/>',
+  left:    '<path d="M15 18l-6-6 6-6"/>',
   dl:      '<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>',
   mail:    '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2.5 6.5L12 13l9.5-6.5"/>',
   sms:     '<path d="M21 11.5a8.4 8.4 0 01-9 8.4 9 9 0 01-4.2-1L3 20l1.2-4.5A8.4 8.4 0 0112 3a8.4 8.4 0 019 8.5z"/>',
@@ -744,8 +760,8 @@ const REASONS = {
    SUPABASE BOUNDARY
    The current Supabase slice owns auth, identity, venue access, recurring templates,
    and today's daily-operation/shift-task instance. Team membership, venue membership, and
-   today's roster are also real Supabase data. History and notification data remain explicitly
-   local/demo data.
+   weekly roster planning, employee weekly roster, today's roster, and shift-cover requests are also real Supabase data.
+   History and the simulated notification inbox/delivery remain explicitly local/demo data.
    ========================================================================== */
 
 /* ------------------------------------------------------------- store/seed */
@@ -1074,14 +1090,46 @@ function loadSupabaseVenueContexts(rows) {
   });
   writeStorageJson(mapKey, assignments);
 
-  const savedSelection = (() => {
-    try { return localStorage.getItem(selectionKey); } catch (error) { return null; }
+  const managerOrgIds = new Set(AUTH.organisationMemberships
+    .filter(membership => membership.role === 'manager')
+    .map(membership => membership.organisation_id));
+  const managerContexts = AUTH.venueContexts.filter(context =>
+    !managerOrgIds.size || managerOrgIds.has(context.organisationId)
+  );
+  const organisationIds = [...new Set(managerContexts.map(context => context.organisationId))];
+  const organisationSelectionKey = `dailyops.supabase.organisation-selection.${AUTH.profile.id}`;
+  const savedOrganisation = (() => {
+    try { return localStorage.getItem(organisationSelectionKey); } catch (error) { return null; }
   })();
-  AUTH.selectedVenueId = AUTH.venueContexts.some(v => v.realId === savedSelection)
+  const savedOrganisationId = savedOrganisation && savedOrganisation !== 'all' ? savedOrganisation : null;
+  AUTH.selectedOrganisationId = savedOrganisationId && organisationIds.includes(savedOrganisationId)
+    ? savedOrganisationId
+    : organisationIds.length > 1 ? null : (organisationIds[0] || null);
+  try {
+    localStorage.setItem(organisationSelectionKey, AUTH.selectedOrganisationId || 'all');
+  } catch (error) { console.warn('[store] could not save organisation selection', error); }
+
+  const orgVisibleContexts = AUTH.venueContexts.filter(context =>
+    !managerOrgIds.size || (
+      managerOrgIds.has(context.organisationId)
+      && (!AUTH.selectedOrganisationId || context.organisationId === AUTH.selectedOrganisationId)
+    )
+  );
+  const savedSelection = (() => {
+    try {
+      return localStorage.getItem(`dailyops.supabase.venue-selection.${AUTH.profile.id}.${AUTH.selectedOrganisationId || 'all'}`)
+        || localStorage.getItem(selectionKey);
+    } catch (error) { return null; }
+  })();
+  AUTH.selectedVenueId = orgVisibleContexts.some(v => v.realId === savedSelection)
     ? savedSelection
-    : AUTH.venueContexts[0].realId;
-  try { localStorage.setItem(selectionKey, AUTH.selectedVenueId); }
-  catch (error) { console.warn('[store] could not save venue selection', error); }
+    : (orgVisibleContexts[0] && orgVisibleContexts[0].realId) || null;
+  try {
+    if (AUTH.selectedVenueId) {
+      localStorage.setItem(selectionKey, AUTH.selectedVenueId);
+      localStorage.setItem(`dailyops.supabase.venue-selection.${AUTH.profile.id}.${AUTH.selectedOrganisationId || 'all'}`, AUTH.selectedVenueId);
+    }
+  } catch (error) { console.warn('[store] could not save venue selection', error); }
 }
 
 async function loadAuthenticatedProfile(session) {
@@ -1103,25 +1151,53 @@ async function loadAuthenticatedProfile(session) {
 }
 
 async function loadOrganisationAccess(session) {
-  const { data: membershipRows, error: membershipError } = await DB.from('organisation_members')
-    .select('organisation_id,user_id,role')
-    .eq('user_id', session.user.id);
-  if (membershipError) {
-    console.error('[supabase] organisation membership load failed', membershipError);
-    throw accessError('organisation-load', 'We could not load your DailyOps organisation access.');
-  }
-  if (!membershipRows || !membershipRows.length) {
-    throw accessError('no-membership', 'Your account is signed in, but it is not assigned to a DailyOps organisation yet. Contact an administrator.');
+  const platformAdmin = AUTH.profile.platform_role === 'admin';
+  let membershipRows;
+  let organisationRows;
+
+  if (platformAdmin) {
+    const organisationResult = await DB.from('organisations').select('id,name').order('name');
+    if (organisationResult.error) {
+      console.error('[supabase] platform admin organisation load failed', {
+        organisationError: organisationResult.error
+      });
+      throw accessError('organisation-load', 'We could not load the organisations available to your platform admin account.');
+    }
+    organisationRows = organisationResult.data || [];
+    membershipRows = organisationRows.map(organisation => ({
+      organisation_id: organisation.id,
+      user_id: session.user.id,
+      role: 'manager'
+    }));
+  } else {
+    const membershipResult = await DB.from('organisation_members')
+      .select('organisation_id,user_id,role')
+      .eq('user_id', session.user.id);
+    membershipRows = membershipResult.data;
+    if (membershipResult.error) {
+      console.error('[supabase] organisation membership load failed', membershipResult.error);
+      throw accessError('organisation-load', 'We could not load your DailyOps organisation access.');
+    }
+    if (!membershipRows || !membershipRows.length) {
+      throw accessError('no-membership', 'Your account is signed in, but it is not assigned to a DailyOps organisation yet. Contact an administrator.');
+    }
+
+    const organisationIds = [...new Set(membershipRows.map(row => row.organisation_id))];
+    const organisationResult = await DB.from('organisations')
+      .select('id,name')
+      .in('id', organisationIds);
+    organisationRows = organisationResult.data;
+    if (organisationResult.error || (organisationRows || []).length !== organisationIds.length) {
+      console.error('[supabase] organisation load failed', organisationResult.error || { organisationIds });
+      throw accessError('organisation-load', 'We could not load the organisations attached to your account.');
+    }
   }
 
-  const organisationIds = [...new Set(membershipRows.map(row => row.organisation_id))];
-  const { data: organisationRows, error: organisationError } = await DB.from('organisations')
-    .select('id,name')
-    .in('id', organisationIds);
-  if (organisationError || (organisationRows || []).length !== organisationIds.length) {
-    console.error('[supabase] organisation load failed', organisationError || { organisationIds });
-    throw accessError('organisation-load', 'We could not load the organisations attached to your account.');
+  if (!organisationRows || !organisationRows.length) {
+    throw accessError('no-membership', 'Your account is signed in, but no DailyOps organisations exist yet. Contact an administrator.');
   }
+
+  const organisationIds = [...new Set(organisationRows.map(row => row.id))];
 
   const organisationById = Object.fromEntries(organisationRows.map(row => [row.id, row]));
   AUTH.organisations = organisationRows;
@@ -1151,8 +1227,58 @@ function currentSupabaseOrganisationId() {
     || null;
 }
 
+function currentSupabaseOrganisationIds() {
+  const managedIds = managedOrganisationIds();
+  return AUTH.selectedOrganisationId
+    ? managedIds.filter(id => id === AUTH.selectedOrganisationId)
+    : managedIds;
+}
+
+function currentSupabaseRosterScopeKey() {
+  return currentSupabaseOrganisationIds().slice().sort().join(',') || 'none';
+}
+
 function supabaseMembersForOrganisation(organisationId) {
   return SUPABASE_TEAM.members.filter(member => member.organisationId === organisationId);
+}
+
+function supabaseMembersForCurrentScope() {
+  const organisationIds = new Set(currentSupabaseOrganisationIds());
+  return SUPABASE_TEAM.members.filter(member => organisationIds.has(member.organisationId));
+}
+
+function aggregateSupabaseTeamMembers(members) {
+  const grouped = new Map();
+  members.forEach(member => {
+    let combined = grouped.get(member.id);
+    if (!combined) {
+      combined = {
+        ...member,
+        memberships: [],
+        organisationIds: [],
+        organisationNames: [],
+        explicitVenueIds: [],
+        venueIds: []
+      };
+      grouped.set(member.id, combined);
+    }
+    combined.memberships.push(member);
+    if (!combined.organisationIds.includes(member.organisationId)) {
+      combined.organisationIds.push(member.organisationId);
+      combined.organisationNames.push(organisationName(member.organisationId));
+    }
+    combined.explicitVenueIds = [...new Set([...combined.explicitVenueIds, ...member.explicitVenueIds])];
+    combined.venueIds = [...new Set([...combined.venueIds, ...member.venueIds])];
+    combined.role = combined.memberships.some(row => row.role === 'employee') ? 'employee' : 'manager';
+  });
+  return [...grouped.values()];
+}
+
+function canRosterSupabaseMemberAtVenue(member, context) {
+  const membership = (member.memberships || [member]).find(row =>
+    row.organisationId === context.organisationId && row.role === 'employee'
+  );
+  return !!membership && membership.active && membership.venueIds.includes(context.realId);
 }
 
 function supabaseMemberForUser(userId, organisationId) {
@@ -1207,7 +1333,7 @@ async function loadSupabaseTeam() {
     throw accessError('team-load', 'One or more organisation members do not have a DailyOps profile yet. Contact an administrator.');
   }
 
-  const accessibleVenueIds = venueCatalog().map(context => context.realId);
+  const accessibleVenueIds = AUTH.venueContexts.map(context => context.realId);
   const venueMemberResult = accessibleVenueIds.length
     ? await DB.from('venue_members').select('venue_id,user_id').in('venue_id', accessibleVenueIds)
     : { data: [], error: null };
@@ -1226,7 +1352,7 @@ async function loadSupabaseTeam() {
   const members = memberRows.map(row => {
     const profile = profilesById[row.user_id];
     if (!profile) return null;
-    const organisationVenueIds = venueCatalog()
+    const organisationVenueIds = AUTH.venueContexts
       .filter(context => context.organisationId === row.organisation_id)
       .map(context => context.realId);
     const explicitVenueIds = [...new Set(venueIdsByUser[row.user_id] || [])]
@@ -1371,7 +1497,33 @@ async function loadSupabaseTemplates() {
    The wrapper keeps only deferred history/demo screens keyed to S.days; team,
    roster, templates, and today's operations use their real Supabase IDs. */
 function venueCatalog() {
-  return isSupabaseMode() ? AUTH.venueContexts : S.venues;
+  if (!isSupabaseMode()) return S.venues;
+  const managerOrgIds = new Set(AUTH.organisationMemberships
+    .filter(membership => membership.role === 'manager')
+    .map(membership => membership.organisation_id));
+  return AUTH.venueContexts.filter(context =>
+    !managerOrgIds.size || (
+      managerOrgIds.has(context.organisationId)
+      && (!AUTH.selectedOrganisationId || context.organisationId === AUTH.selectedOrganisationId)
+    )
+  );
+}
+function managedOrganisationIds() {
+  return [...new Set(AUTH.organisationMemberships
+    .filter(membership => membership.role === 'manager')
+    .map(membership => membership.organisation_id))];
+}
+function managedOrganisations() {
+  const ids = new Set(managedOrganisationIds());
+  return AUTH.organisations.filter(organisation => ids.has(organisation.id));
+}
+function organisationName(organisationId) {
+  return (AUTH.organisations.find(organisation => organisation.id === organisationId) || {}).name || 'Organisation';
+}
+function venueDisplayLabel(context) {
+  return AUTH.organisations.length > 1
+    ? `${organisationName(context.organisationId)} · ${context.name}`
+    : context.name;
 }
 function selectedVenueKey() {
   return isSupabaseMode() ? AUTH.selectedVenueId : S.session.venueId;
@@ -1385,12 +1537,73 @@ function selectVenue(id) {
   if (!selected) return false;
   if (isSupabaseMode()) {
     AUTH.selectedVenueId = selected.realId;
-    try { localStorage.setItem(`dailyops.supabase.venue-selection.${AUTH.profile.id}`, selected.realId); }
+    try {
+      localStorage.setItem(`dailyops.supabase.venue-selection.${AUTH.profile.id}`, selected.realId);
+      localStorage.setItem(`dailyops.supabase.venue-selection.${AUTH.profile.id}.${AUTH.selectedOrganisationId || 'all'}`, selected.realId);
+    }
     catch (error) { console.warn('[store] could not save venue selection', error); }
   } else {
     S.session.venueId = selected.id;
   }
   return true;
+}
+
+async function selectOrganisation(id) {
+  if (!isSupabaseMode()) return;
+  const managedIds = new Set(managedOrganisationIds());
+  const nextOrganisationId = id || null;
+  if (nextOrganisationId && !managedIds.has(nextOrganisationId)) return;
+
+  const availableContexts = AUTH.venueContexts.filter(context =>
+    !managedIds.size || managedIds.has(context.organisationId)
+  );
+  const targetContexts = nextOrganisationId
+    ? availableContexts.filter(context => context.organisationId === nextOrganisationId)
+    : availableContexts;
+  if (!targetContexts.length) {
+    toast('That organisation has no accessible venues yet.', 'warn');
+    return;
+  }
+
+  const lockKey = 'organisation-switch';
+  if (REMOTE_MUTATIONS.has(lockKey)) return;
+  REMOTE_MUTATIONS.add(lockKey);
+  const previousOrganisationId = AUTH.selectedOrganisationId;
+  const previousVenueId = AUTH.selectedVenueId;
+  AUTH.selectedOrganisationId = nextOrganisationId;
+  const currentStillVisible = targetContexts.some(context => context.realId === previousVenueId);
+  const savedVenueId = (() => {
+    try {
+      return localStorage.getItem(`dailyops.supabase.venue-selection.${AUTH.profile.id}.${nextOrganisationId || 'all'}`);
+    } catch (error) { return null; }
+  })();
+  AUTH.selectedVenueId = currentStillVisible
+    ? previousVenueId
+    : targetContexts.some(context => context.realId === savedVenueId)
+      ? savedVenueId
+      : targetContexts[0].realId;
+
+  try {
+    localStorage.setItem(`dailyops.supabase.organisation-selection.${AUTH.profile.id}`, nextOrganisationId || 'all');
+    selectVenue(AUTH.selectedVenueId);
+    await loadSupabaseTeam();
+    await loadSupabaseTemplates();
+    await loadSupabaseToday();
+    SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows: [], loading: false, error: null };
+    SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
+    render();
+    if (R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart, true);
+    if (isMgr()) loadSupabaseCoverRequests();
+    toast(`Viewing ${nextOrganisationId ? organisationName(nextOrganisationId) : 'all organisations'}`, 'ok');
+  } catch (error) {
+    AUTH.selectedOrganisationId = previousOrganisationId;
+    AUTH.selectedVenueId = previousVenueId;
+    console.error('[supabase] organisation filter load failed', { organisationId: nextOrganisationId, error });
+    render();
+    toast('Could not load that organisation. Please try again.', 'warn');
+  } finally {
+    REMOTE_MUTATIONS.delete(lockKey);
+  }
 }
 function organisationRoleForVenue(v) {
   return isSupabaseMode() ? (v && v.organisationRole) : null;
@@ -1449,7 +1662,7 @@ const TPL    = vid => {
 const DAYS   = vid => S.days[vid || V().id];
 /* Supabase has already filtered this catalog through the venues RLS policy. */
 const venuesFor = u => !u ? [] : isSupabaseMode()
-  ? AUTH.venueContexts.slice()
+  ? venueCatalog().slice()
   : u.role === 'manager' ? S.venues.slice() : S.venues.filter(v => (u.venues || []).includes(v.id));
 /* keep the selected venue legal for whoever is signed in */
 function ensureVenue() {
@@ -1559,6 +1772,202 @@ async function loadSupabaseRosterForVenue(context, date) {
     assignmentIds[row.shift_type][row.user_id] = row.id;
   });
   return { roster, assignmentIds };
+}
+
+function rosterWeekStartKey(date) {
+  const value = parseKey(date || dayKey());
+  const mondayOffset = (value.getDay() + 6) % 7;
+  value.setDate(value.getDate() - mondayOffset);
+  return dayKey(value);
+}
+
+function rosterWeekDates(start) {
+  const first = parseKey(start || rosterWeekStartKey(dayKey()));
+  return Array.from({ length: 7 }, (_, index) => dayKey(addDays(first, index)));
+}
+
+function rosterVenueName(venueId) {
+  const context = (isSupabaseMode() ? AUTH.venueContexts : venueCatalog())
+    .find(item => isSupabaseMode() ? item.realId === venueId : item.id === venueId);
+  return context ? venueDisplayLabel(context) : 'Unknown venue';
+}
+
+function rosterShiftLabel(shiftType) {
+  return LIST_META[shiftType] ? LIST_META[shiftType].label : shiftType;
+}
+
+async function loadSupabaseRosterWeek(start, force = false) {
+  if (!isSupabaseMode() || !isMgr()) return;
+  const organisationId = currentSupabaseRosterScopeKey();
+  const weekStart = start || rosterWeekStartKey(dayKey());
+  const dates = rosterWeekDates(weekStart);
+  const weekEnd = dates[dates.length - 1];
+  if (!force
+    && SUPABASE_ROSTER_WEEK.organisationId === organisationId
+    && SUPABASE_ROSTER_WEEK.start === weekStart
+    && !SUPABASE_ROSTER_WEEK.error) return;
+
+  SUPABASE_ROSTER_WEEK = {
+    organisationId, start: weekStart, end: weekEnd, rows: [], loading: true, error: null
+  };
+  render();
+  const isCurrentRequest = () => SUPABASE_ROSTER_WEEK.organisationId === organisationId
+    && SUPABASE_ROSTER_WEEK.start === weekStart;
+  try {
+    const venueIds = venueCatalog().map(context => context.realId);
+    const result = venueIds.length
+      ? await DB.from('roster_assignments')
+        .select('id,venue_id,user_id,work_date,shift_type,start_time,end_time')
+        .in('venue_id', venueIds)
+        .gte('work_date', weekStart)
+        .lte('work_date', weekEnd)
+        .order('work_date')
+        .order('venue_id')
+        .order('shift_type')
+      : { data: [], error: null };
+    if (result.error) throw result.error;
+
+    const userIds = [...new Set((result.data || []).map(row => row.user_id))];
+    if (userIds.length) {
+      const profileResult = await DB.from('profiles')
+        .select('id,display_name,email,phone,active')
+        .in('id', userIds);
+      if (profileResult.error) throw profileResult.error;
+      (profileResult.data || []).forEach(profile => { SUPABASE_TEAM.profilesById[profile.id] = profile; });
+    }
+    if (!isCurrentRequest()) return;
+    SUPABASE_ROSTER_WEEK = {
+      organisationId,
+      start: weekStart,
+      end: weekEnd,
+      rows: result.data || [],
+      loading: false,
+      error: null
+    };
+  } catch (error) {
+    if (!isCurrentRequest()) return;
+    console.error('[supabase] roster week load failed', { organisationId, weekStart, weekEnd, error });
+    SUPABASE_ROSTER_WEEK = {
+      organisationId,
+      start: weekStart,
+      end: weekEnd,
+      rows: [],
+      loading: false,
+      error: 'We could not load the organisation roster for this week.'
+    };
+  }
+  render();
+}
+
+async function loadSupabaseMyRosterWeek(start, force = false) {
+  if (!isSupabaseMode() || isMgr()) return;
+  const weekStart = start || rosterWeekStartKey(dayKey());
+  const dates = rosterWeekDates(weekStart);
+  const weekEnd = dates[dates.length - 1];
+  if (!force
+    && SUPABASE_MY_ROSTER_WEEK.start === weekStart
+    && !SUPABASE_MY_ROSTER_WEEK.error) return;
+
+  SUPABASE_MY_ROSTER_WEEK = {
+    start: weekStart, end: weekEnd, rows: [], loading: true, error: null
+  };
+  render();
+  const isCurrentRequest = () => SUPABASE_MY_ROSTER_WEEK.start === weekStart;
+  try {
+    const venueIds = AUTH.venueContexts.map(context => context.realId);
+    const result = venueIds.length
+      ? await DB.from('roster_assignments')
+        .select('id,venue_id,user_id,work_date,shift_type,start_time,end_time')
+        .eq('user_id', AUTH.profile.id)
+        .in('venue_id', venueIds)
+        .gte('work_date', weekStart)
+        .lte('work_date', weekEnd)
+        .order('work_date')
+        .order('venue_id')
+        .order('shift_type')
+      : { data: [], error: null };
+    if (result.error) throw result.error;
+    if (!isCurrentRequest()) return;
+    SUPABASE_MY_ROSTER_WEEK = {
+      start: weekStart,
+      end: weekEnd,
+      rows: result.data || [],
+      loading: false,
+      error: null
+    };
+  } catch (error) {
+    if (!isCurrentRequest()) return;
+    console.error('[supabase] personal roster week load failed', { weekStart, weekEnd, error });
+    SUPABASE_MY_ROSTER_WEEK = {
+      start: weekStart,
+      end: weekEnd,
+      rows: [],
+      loading: false,
+      error: 'We could not load your roster for this week.'
+    };
+  }
+  render();
+}
+
+async function loadSupabaseCoverRequests() {
+  if (!isSupabaseMode() || !isMgr()) return;
+  SUPABASE_COVER_REQUESTS = { rows: [], loading: true, error: null };
+  render();
+  try {
+    const venueIds = venueCatalog()
+      .filter(context => context.organisationRole === 'manager')
+      .map(context => context.realId);
+    const result = venueIds.length
+      ? await DB.from('shift_cover_requests')
+        .select('id,venue_id,user_id,work_date,shift_type,created_at,manager_seen_at,manager_seen_by')
+        .in('venue_id', venueIds)
+        .order('created_at', { ascending: false })
+      : { data: [], error: null };
+    if (result.error) throw result.error;
+    const userIds = [...new Set((result.data || []).map(row => row.user_id))];
+    if (userIds.length) {
+      const profileResult = await DB.from('profiles')
+        .select('id,display_name,email,phone,active')
+        .in('id', userIds);
+      if (profileResult.error) throw profileResult.error;
+      (profileResult.data || []).forEach(profile => { SUPABASE_TEAM.profilesById[profile.id] = profile; });
+    }
+    SUPABASE_COVER_REQUESTS = { rows: result.data || [], loading: false, error: null };
+  } catch (error) {
+    console.error('[supabase] cover request load failed', { error });
+    SUPABASE_COVER_REQUESTS = {
+      rows: [], loading: false,
+      error: 'We could not load shift cover notifications. Apply migration 010 and try again.'
+    };
+  }
+  render();
+}
+
+async function markSupabaseCoverRequests(ids) {
+  const requestIds = (ids || []).filter(Boolean);
+  if (!requestIds.length) return;
+  try {
+    const result = await DB.from('shift_cover_requests')
+      .update({ manager_seen_at: new Date().toISOString(), manager_seen_by: AUTH.profile.id })
+      .in('id', requestIds)
+      .is('manager_seen_at', null)
+      .select('id');
+    if (result.error) throw result.error;
+    await loadSupabaseCoverRequests();
+  } catch (error) {
+    console.error('[supabase] cover request mark-read failed', { requestIds, error });
+    toast('Could not mark that cover notification as read.', 'warn');
+  }
+}
+
+function navigateSupabaseMyRosterWeek(offsetDays) {
+  const current = SUPABASE_MY_ROSTER_WEEK.start || rosterWeekStartKey(dayKey());
+  const next = dayKey(addDays(parseKey(current), offsetDays));
+  loadSupabaseMyRosterWeek(next, true);
+}
+
+function resetSupabaseMyRosterWeek() {
+  loadSupabaseMyRosterWeek(rosterWeekStartKey(dayKey()), true);
 }
 
 function mapRemoteDay(context, date, checklists, tasks, rosterData) {
@@ -1933,7 +2342,10 @@ function cutoffPassed(v) {
   const now = new Date();
   return now.getHours() > h || (now.getHours() === h && now.getMinutes() >= m);
 }
-const unreadCount = () => S.notifications.filter(n => !n.read).length;
+const remoteUnreadCoverCount = () => isSupabaseMode() && AUTH.profile && isMgr()
+  ? SUPABASE_COVER_REQUESTS.rows.filter(row => !row.manager_seen_at).length
+  : 0;
+const unreadCount = () => S.notifications.filter(n => !n.read).length + remoteUnreadCoverCount();
 
 /* ---------------------------------------------------------------- toasts */
 function toast(msg, tone) {
@@ -2022,7 +2434,7 @@ function exportAllVenues() {
 /* ==========================================================================
    RENDER
    ========================================================================== */
-let R = { tab: 'today', list: 'open', historyKey: null };
+let R = { tab: 'today', list: 'open', historyKey: null, rosterWeekStart: rosterWeekStartKey(dayKey()) };
 
 const NAV_MGR = [
   { id:'today',     label:'Today',      icon:'home'  },
@@ -2104,16 +2516,41 @@ function renderChrome() {
   const m = me();
   const mine = venuesFor(m);
   const v = V();
+  const managedOrgs = isSupabaseMode() ? managedOrganisations() : [];
+  const orgPicker = $('#organisation-pick');
+  if (isSupabaseMode() && managedOrgs.length) {
+    const canFilterOrganisations = managedOrgs.length > 1;
+    orgPicker.hidden = false;
+    orgPicker.classList.toggle('is-single', !canFilterOrganisations);
+    orgPicker.title = canFilterOrganisations ? 'Filter organisation' : managedOrgs[0].name;
+    $('#organisation-name').textContent = AUTH.selectedOrganisationId
+      ? organisationName(AUTH.selectedOrganisationId)
+      : 'All organisations';
+    $('#organisation-sub').textContent = canFilterOrganisations
+      ? `${managedOrgs.length} organisations · ${plural(venueCatalog().length, 'venue')} shown`
+      : 'Organisation';
+    $('#organisation-chev').innerHTML = ic('down', 14);
+    $('#organisation-switch').innerHTML = `${canFilterOrganisations
+      ? '<option value="">All organisations</option>'
+      : ''}${managedOrgs.map(organisation =>
+        `<option value="${organisation.id}" ${organisation.id === AUTH.selectedOrganisationId ? 'selected' : ''}>${esc(organisation.name)}</option>`
+      ).join('')}`;
+    $('#organisation-switch').value = AUTH.selectedOrganisationId || '';
+  } else {
+    orgPicker.hidden = true;
+  }
 
   $('#venue-name').textContent = v.name;
-  $('#venue-sub').textContent = v.sub;
+  $('#venue-sub').textContent = AUTH.organisations.length > 1
+    ? `${organisationName(v.organisationId)}${v.sub ? ` · ${v.sub}` : ''}`
+    : v.sub;
   $('#venue-logo').textContent = (v.name.match(/\b[A-Za-z]/g) || ['P']).slice(0, 1).join('').toUpperCase();
   $('#venue-chev').innerHTML = ic('down', 14);
   $('#venue-pick').classList.toggle('is-single', mine.length < 2);
-  $('#venue-pick').title = mine.length < 2 ? v.name : 'Switch venue';
+  $('#venue-pick').title = mine.length < 2 ? venueDisplayLabel(v) : 'Switch venue';
   $('#venue-switch').innerHTML = mine.map(x =>
-    `<option value="${x.id}" ${x.id === v.id ? 'selected' : ''}>${esc(x.name)} — ${esc(x.sub)}</option>`).join('');
-  document.title = `${v.name} — Daily Operations`;
+    `<option value="${x.id}" ${x.id === v.id ? 'selected' : ''}>${esc(venueDisplayLabel(x))}${x.sub ? ` — ${esc(x.sub)}` : ''}</option>`).join('');
+  document.title = `${venueDisplayLabel(v)} — Daily Operations`;
 
   $('#cur-avatar').textContent = initials(m.name);
   $('#cur-avatar').className = 'avatar ' + (m.role === 'manager' ? 'is-mgr' : '');
@@ -2182,6 +2619,44 @@ function render() {
 /* ==========================================================================
    EMPLOYEE VIEW
    ========================================================================== */
+function personalRosterHtml() {
+  if (!isSupabaseMode()) return '';
+  const state = SUPABASE_MY_ROSTER_WEEK;
+  const weekStart = state.start || rosterWeekStartKey(dayKey());
+  const weekDates = rosterWeekDates(weekStart);
+  const accessibleVenues = venueCatalog();
+  const body = state.loading
+    ? `<div class="empty" style="padding:18px">Loading your roster…</div>`
+    : state.error
+      ? `<div class="banner banner-warn">${ic('warn', 17)}<div>${esc(state.error)}<br><button class="btn btn-sm" data-act="my-roster-reload" style="margin-top:9px">Try again</button></div></div>`
+      : `<div class="stack" style="gap:0">${weekDates.map(date => {
+          const assignments = (state.rows || []).filter(row => row.work_date === date);
+          return `<div class="row-b" style="padding:10px 0;border-bottom:1px solid var(--line)">
+            <span style="font-weight:620;min-width:110px">${esc(fmtDateShort(date))}</span>
+            <span class="row wrap" style="justify-content:flex-end;gap:5px;flex:1">
+              ${assignments.length
+                ? assignments.map(row => `<span class="chip chip-info">${esc(rosterVenueName(row.venue_id))} · ${esc(rosterShiftLabel(row.shift_type))}</span>`).join('')
+                : '<span class="tiny mut">Not rostered</span>'}
+            </span>
+          </div>`;
+        }).join('')}</div>`;
+  return `<div class="card">
+    <div class="card-head"><div style="flex:1"><div class="h3">My weekly roster</div>
+      <div class="tiny mut">Your upcoming Opening and Closing Shift assignments across the venues you can access.</div></div>
+      <div class="row" style="gap:5px">
+        <button class="btn btn-sm btn-icon" data-act="my-roster-prev" title="Previous week">${ic('left', 14)}</button>
+        <button class="btn btn-sm" data-act="my-roster-today">This week</button>
+        <button class="btn btn-sm btn-icon" data-act="my-roster-next" title="Next week">${ic('right', 14)}</button>
+      </div></div>
+    <div class="card-foot tiny mut" style="border-top:0;padding-top:0">${esc(fmtDateShort(weekDates[0]))} – ${esc(fmtDateShort(weekDates[6]))}</div>
+    <div class="card-body">${body}</div>
+    <div class="card-foot"><div class="tiny mut" style="margin-bottom:6px">Venues you can access</div>
+      <div class="row wrap" style="gap:5px">${accessibleVenues.length
+        ? accessibleVenues.map(context => `<span class="chip"><span class="venue-dot" style="width:7px;height:7px;background:${venueDotColor(context)}"></span>${esc(context.name)}</span>`).join('')
+        : '<span class="tiny mut">No venue access</span>'}</div></div>
+  </div>`;
+}
+
 function pageEmployee() {
   const day = today();
   const lk = R.list, L = day.lists[lk], m = LIST_META[lk], st = listStats(L);
@@ -2189,6 +2664,7 @@ function pageEmployee() {
   const locked = L.submitted;
   const hour = new Date().getHours();
   const greet = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+  const weeklyRoster = personalRosterHtml();
 
   const segs = ['open','close'].map(k => {
     const s = listStats(day.lists[k]);
@@ -2250,6 +2726,7 @@ function pageEmployee() {
       </div>
       <div class="tiny mut" style="text-align:center">Tap a task to tick it off. Notes and reasons are collected when you submit.</div>
     </div>
+    ${weeklyRoster}
     ${bar}`;
 }
 /* ==========================================================================
@@ -2268,22 +2745,33 @@ function activityFeed(day) {
   return ev.sort((a, b) => new Date(b.at) - new Date(a.at)).slice(0, 14);
 }
 
-/* a one-row roll-up of every site, so the manager isn't blind to the venues
-   they aren't currently looking at. Clicking a card switches venue. */
+/* a grouped roll-up of every accessible site, so the manager isn't blind to
+   venues they aren't currently looking at. Clicking a card switches venue. */
 function venueStripHtml() {
-  if (venueCatalog().length < 2) return '';
+  const venues = venueCatalog().slice().sort((a, b) =>
+    organisationName(a.organisationId).localeCompare(organisationName(b.organisationId))
+      || a.name.localeCompare(b.name)
+  );
+  if (venues.length < 2) return '';
+  const showOrganisation = AUTH.organisations.length > 1;
   return `<div class="card">
     <div class="card-head"><div class="h3">Across the group</div>
-      <span class="tiny mut" style="margin-left:auto">${plural(venueCatalog().length, 'venue')} · today</span></div>
-    <div class="vstrip">${venueCatalog().map(v => {
+      <span class="tiny mut" style="margin-left:auto">${plural(venues.length, 'venue')} · ${showOrganisation && !AUTH.selectedOrganisationId ? 'all organisations' : 'today'}</span></div>
+    <div class="vstrip">${venues.map((v, index) => {
       const d = dayStats(today(v.id));
       const col = venueDotColor(v);
       const cur = v.id === V().id;
       const crit = [...today(v.id).lists.open.tasks, ...today(v.id).lists.close.tasks].filter(t => t.critical && t.status !== 'done').length;
-      return `<button class="vcard ${cur ? 'is-current' : ''}" data-act="goto-venue" data-id="${v.id}">
+      const groupLabel = showOrganisation && (index === 0 || venues[index - 1].organisationId !== v.organisationId)
+        ? `<div class="vstrip-group-label">${esc(organisationName(v.organisationId))}</div>`
+        : '';
+      return `${groupLabel}<button class="vcard ${cur ? 'is-current' : ''}" data-act="goto-venue" data-id="${v.id}">
         <span class="row" style="gap:7px;min-width:0">
           <span class="venue-dot" style="background:${col}"></span>
-          <span class="vcard-name">${esc(v.name)}</span>
+          <span style="min-width:0;flex:1">
+            <span class="vcard-name" style="display:block">${esc(v.name)}</span>
+            ${showOrganisation ? '<span class="tiny mut" style="display:block;margin-top:2px">' + esc(organisationName(v.organisationId)) + '</span>' : ''}
+          </span>
           ${cur ? '<span class="chip chip-accent" style="margin-left:auto">Viewing</span>' : ''}
         </span>
         <span class="vcard-num">${d.done}<span class="mut" style="font-size:13px;font-weight:600">/${d.total}</span></span>
@@ -2464,11 +2952,23 @@ function pageTemplates() {
 function pageSupabaseTeam() {
   const day = today();
   const v = V();
-  const all = supabaseMembersForOrganisation(v.organisationId);
-  const employeesHere = all.filter(member =>
+  const scopeOrganisationIds = currentSupabaseOrganisationIds();
+  const scopeIsAll = !AUTH.selectedOrganisationId && scopeOrganisationIds.length > 1;
+  const all = supabaseMembersForCurrentScope();
+  const groupedMembers = aggregateSupabaseTeamMembers(all);
+  const employees = groupedMembers.filter(member =>
+    member.memberships.some(row => row.role === 'employee')
+  );
+  const currentOrganisationMembers = supabaseMembersForOrganisation(v.organisationId);
+  const employeesHere = currentOrganisationMembers.filter(member =>
     member.role === 'employee' && member.venueIds.includes(v.realId)
   );
   const activeHere = employeesHere.filter(member => member.active);
+  const weekStart = R.rosterWeekStart || rosterWeekStartKey(dayKey());
+  const weekDates = rosterWeekDates(weekStart);
+  const weekState = SUPABASE_ROSTER_WEEK;
+  const weekRows = weekState.organisationId === currentSupabaseRosterScopeKey() && weekState.start === weekStart
+    ? (weekState.rows || []) : [];
 
   const rosterRows = activeHere.length ? activeHere.map(member => `
     <tr>
@@ -2490,37 +2990,91 @@ function pageSupabaseTeam() {
           <span class="venue-dot" style="width:7px;height:7px;background:${assigned ? venueDotColor(context) : 'currentColor'};opacity:${assigned ? 1 : .4}"></span>${esc(context.name)}</button>`;
       }).join('') || '<span class="tiny mut">No venue access</span>';
 
+  const assignmentSummary = member => {
+    const assignments = weekRows.filter(row => row.user_id === member.id)
+      .slice()
+      .sort((a, b) => `${a.work_date}:${a.shift_type}:${a.venue_id}`.localeCompare(`${b.work_date}:${b.shift_type}:${b.venue_id}`));
+    if (!assignments.length) return '<span class="tiny mut">Not rostered this week</span>';
+    const visible = assignments.slice(0, 3).map(row =>
+      `<span class="chip">${esc(fmtDateShort(row.work_date))} · ${esc(rosterVenueName(row.venue_id))} · ${esc(rosterShiftLabel(row.shift_type))}</span>`
+    ).join('');
+    const more = assignments.length > 3 ? `<span class="tiny mut">+${assignments.length - 3} more</span>` : '';
+    return `<div class="row wrap" style="gap:4px">${visible}${more}</div>`;
+  };
+
   const staffRows = all.map(member => `
     <tr>
       <td><div class="row" style="gap:10px">${avatarHtml(member.id)}<div>
         <div style="font-weight:600">${esc(member.displayName)}</div>
-        <div class="tiny mut">${esc(member.email)}</div></div></div></td>
+        <div class="tiny mut">${esc(member.email)}</div>
+        ${scopeIsAll ? '<div class="tiny mut">' + esc(organisationName(member.organisationId)) + '</div>' : ''}
+        </div></div></td>
       <td><div class="row wrap" style="gap:5px">${venueChips(member)}</div></td>
+      <td>${assignmentSummary(member)}</td>
       <td><div class="stack" style="gap:4px"><span class="chip ${member.role === 'manager' ? 'chip-info' : ''}">${member.role === 'manager' ? 'Manager' : 'Employee'}</span>
         <span class="chip ${member.active ? 'chip-ok' : ''} chip-dot">${member.active ? 'Active' : 'Disabled'}</span></div></td>
       <td style="text-align:right"><div class="row" style="gap:4px;justify-content:flex-end">
-        <button class="switch ${member.active ? 'is-on' : ''}" data-act="toggle-user" data-id="${member.id}"
+        <button class="switch ${member.active ? 'is-on' : ''}" data-act="toggle-user" data-id="${member.id}" data-organisation="${member.organisationId}"
           aria-label="Toggle access for ${esc(member.displayName)}" ${member.id === AUTH.profile.id ? 'disabled' : ''}></button>
-        <button class="btn btn-sm btn-icon btn-ghost" data-act="edit-user" data-id="${member.id}" title="Edit profile and access">${ic('pencil', 14)}</button>
+        <button class="btn btn-sm btn-icon btn-ghost" data-act="edit-user" data-id="${member.id}" data-organisation="${member.organisationId}" title="Edit profile and access">${ic('pencil', 14)}</button>
       </div></td>
     </tr>`).join('');
 
-  const managers = all.filter(member => member.role === 'manager');
+  const planningVenues = venueCatalog();
+  const plannerRows = employees.filter(member => member.active).map(member => {
+    const eligibleVenues = planningVenues.filter(context =>
+      canRosterSupabaseMemberAtVenue(member, context)
+    );
+    const cells = weekDates.map(date => {
+      const assignments = weekRows.filter(row => row.user_id === member.id && row.work_date === date);
+      const assignmentHtml = assignments.length
+        ? assignments.map(row => `<span class="chip chip-info" style="display:block;margin-bottom:4px">${esc(rosterVenueName(row.venue_id))} · ${esc(rosterShiftLabel(row.shift_type))}</span>`).join('')
+        : '<span class="tiny mut">No assignment</span>';
+      const controls = date >= dayKey() && eligibleVenues.length
+        ? eligibleVenues.map(context => `<div class="row" style="gap:4px;margin-top:7px">
+            ${['open','close'].map(listType => {
+              const assigned = assignments.some(row =>
+                row.venue_id === context.realId && row.shift_type === listType
+              );
+              return `<button class="switch ${assigned ? 'is-on' : ''}" data-act="roster-week" data-list="${listType}" data-id="${member.id}" data-date="${date}" data-venue="${context.realId}"
+                title="${assigned ? 'Remove' : 'Assign'} ${esc(LIST_META[listType].full)} at ${esc(venueDisplayLabel(context))} on ${esc(fmtDateShort(date))}" aria-label="${assigned ? 'Remove' : 'Assign'} ${esc(LIST_META[listType].full)} at ${esc(venueDisplayLabel(context))}" style="margin:0"></button>`;
+            }).join('')}
+            <span class="tiny mut">${esc(venueDisplayLabel(context))}</span>
+          </div>`).join('')
+        : `<span class="tiny mut" style="display:block;margin-top:7px">${date < dayKey() ? 'Past date' : 'No eligible venue access'}</span>`;
+      return `<td style="vertical-align:top;min-width:210px"><div class="stack" style="gap:2px">${assignmentHtml}</div>${controls}</td>`;
+    }).join('');
+    return `<tr><td style="vertical-align:top"><div class="row" style="gap:8px">${avatarHtml(member.id, 'sm')}<span>${esc(member.displayName)}</span><span class="tiny mut">${esc(member.organisationNames.join(', '))}</span></div></td>${cells}</tr>`;
+  }).join('');
+
+  const plannerContent = !weekState.start || weekState.start !== weekStart || weekState.loading
+    ? `<div class="empty" style="padding:24px">Loading the organisation roster for this week…</div>`
+    : weekState.error
+      ? `<div class="banner banner-warn" style="margin:14px">${ic('warn', 17)}<div>${esc(weekState.error)}<br><button class="btn btn-sm" data-act="roster-week-reload" style="margin-top:9px">Try again</button></div></div>`
+      : `<div class="tablewrap"><table class="tbl" style="min-width:1320px">
+          <thead><tr><th>Employee</th>${weekDates.map(date => `<th>${esc(fmtDateShort(date))}</th>`).join('')}</tr></thead>
+          <tbody>${plannerRows || `<tr><td colspan="8" class="mut" style="text-align:center;padding:22px">No active employees are available for roster planning.</td></tr>`}</tbody>
+        </table></div>`;
+
+  const managers = groupedMembers.filter(member =>
+    member.memberships.some(row => row.role === 'manager')
+  );
+  const scopeLabel = scopeIsAll ? 'all managed organisations' : organisationName(v.organisationId);
   return `
     <div class="page-head row-b wrap">
       <div>
         <div class="page-title">Team</div>
-        <div class="page-sub">Organisation members, venue access, and today's roster at ${esc(v.name)}.</div>
+        <div class="page-sub">Staff, venue access, and roster planning across ${esc(scopeLabel)}.</div>
       </div>
       <button class="btn btn-sm btn-primary" data-act="add-user">${ic('plus', 15)} Add employee</button>
     </div>
     <div class="stack">
       <div class="banner banner-info">${ic('info', 17)}<div>
-        Auth users are created securely in Supabase first. After an administrator adds the user to this organisation, this screen manages their profile, venue access, active state, and roster.</div></div>
+        Auth users and initial organisation membership are still bootstrapped securely in Supabase. This screen manages existing organisation members, venue access, active state, and roster planning. Email-based organisation assignment will be added later through server-side logic.</div></div>
       <div class="card">
         <div class="card-head"><div style="flex:1">
           <div class="row" style="gap:8px"><span class="venue-dot" style="background:${venueDotColor(v)}"></span>
-            <div class="h3">Roster · ${esc(v.name)} · ${esc(fmtDateShort(day.date))}</div></div>
+            <div class="h3">Roster · ${esc(venueDisplayLabel(v))} · ${esc(fmtDateShort(day.date))}</div></div>
           <div class="tiny mut">Only active employees with access to this venue can be assigned by a manager. Employees can use the existing "I'm covering" action.</div>
         </div></div>
         <div class="tablewrap"><table class="tbl">
@@ -2530,12 +3084,25 @@ function pageSupabaseTeam() {
       </div>
 
       <div class="card">
+        <div class="card-head"><div style="flex:1">
+          <div class="h3">Weekly roster planner</div>
+          <div class="tiny mut">Assignments shown across every accessible venue in ${esc(scopeLabel)}. Each employee's controls are shown for every eligible venue.</div>
+        </div><div class="row" style="gap:5px">
+          <button class="btn btn-sm btn-icon" data-act="roster-week-prev" title="Previous week">${ic('left', 14)}</button>
+          <button class="btn btn-sm" data-act="roster-week-today">This week</button>
+          <button class="btn btn-sm btn-icon" data-act="roster-week-next" title="Next week">${ic('right', 14)}</button>
+        </div></div>
+        <div class="card-foot tiny mut" style="border-top:0;padding-top:0">${esc(fmtDateShort(weekDates[0]))} – ${esc(fmtDateShort(weekDates[6]))} · Opening and Closing Shift assignments</div>
+        ${plannerContent}
+      </div>
+
+      <div class="card">
         <div class="card-head"><div style="flex:1"><div class="h3">Organisation members</div>
-          <div class="tiny mut">Managers inherit access to every venue in this organisation. Employee venue access is controlled by venue memberships.</div></div>
-          <span class="tiny mut nowrap hide-sm">${activeHere.length} active here · ${all.length} total</span></div>
+          <div class="tiny mut">${scopeIsAll ? 'All members across your managed organisations are shown here. Shared employees appear once per organisation membership so their organisation-specific venue access remains clear.' : 'Every member of this organisation is shown here, including employees who are not assigned to the selected venue.'} Removing the last venue is allowed and removes operational access without deleting history.</div></div>
+          <span class="tiny mut nowrap hide-sm">${employees.filter(member => member.active).length} active employees · ${groupedMembers.length} people</span></div>
         <div class="tablewrap"><table class="tbl">
-          <thead><tr><th>Member</th><th>Venues</th><th>Role / access</th><th></th></tr></thead>
-          <tbody>${staffRows || `<tr><td colspan="4" class="mut" style="text-align:center;padding:22px">No organisation members yet.</td></tr>`}</tbody>
+          <thead><tr><th>Member</th><th>Venue access</th><th>Roster this week</th><th>Role / access</th><th></th></tr></thead>
+          <tbody>${staffRows || `<tr><td colspan="5" class="mut" style="text-align:center;padding:22px">No organisation members yet.</td></tr>`}</tbody>
         </table></div>
         <div class="card-foot tiny mut">Managers: ${managers.map(member => esc(member.displayName)).join(', ') || 'None'} — organisation role and platform role are separate.</div>
       </div>
@@ -2708,6 +3275,27 @@ function pageHistory() {
    ========================================================================== */
 function pageAlerts() {
   const list = S.notifications;
+  const coverRequests = SUPABASE_COVER_REQUESTS.rows || [];
+  const coverItems = coverRequests.length ? coverRequests.map(request => {
+    const employee = user(request.user_id) || {};
+    const venueContext = venueCatalog().find(context => context.realId === request.venue_id);
+    const unread = !request.manager_seen_at;
+    return `<div class="alert-item ${unread ? 'is-unread' : ''}">
+      <span class="alert-ic chip-info" style="background:var(--info-soft);color:var(--info)">${ic('users', 17)}</span>
+      <span style="flex:1;min-width:0">
+        <span style="display:block;font-weight:${unread ? '680' : '540'};letter-spacing:-.012em">${esc(employee.name || employee.email || 'An employee')} is covering a shift</span>
+        <span class="tiny mut row wrap" style="margin-top:4px;gap:6px">
+          ${venueContext ? `<span class="chip"><span class="venue-dot" style="width:7px;height:7px;background:${venueDotColor(venueContext)}"></span>${esc(venueContext.name)}</span>` : ''}
+          <span>${esc(rosterShiftLabel(request.shift_type))} · ${esc(fmtDateShort(request.work_date))}</span>
+        </span>
+      </span>
+      <span class="row" style="gap:6px">
+        <span class="tiny mut nowrap">${esc(fmtDT(request.created_at))}</span>
+        ${unread ? `<button class="btn btn-sm btn-ghost" data-act="cover-read" data-id="${request.id}">Mark read</button>` : '<span class="chip chip-ok">Read</span>'}
+      </span>
+    </div>`;
+  }).join('') : `<div class="empty"><div class="empty-icon">${ic('users', 20)}</div><div>No shift cover requests.</div>
+    <div class="tiny mut" style="margin-top:4px">Employees who confirm they are covering will appear here.</div></div>`;
   return `
     <div class="page-head row-b wrap">
       <div>
@@ -2723,6 +3311,14 @@ function pageAlerts() {
       <div class="banner banner-info">${ic('info', 17)}<div>
         <b>Delivery is stubbed in this demo.</b> Messages are composed and logged exactly as they'd be sent, but nothing leaves the browser —
         open the console to see each one. In production these go out over email and SMS from a single <code>Notifier.deliver()</code> call.</div></div>
+      ${isSupabaseMode() ? `<div class="card">
+        <div class="card-head"><div class="h3">Shift cover requests</div>
+          <div class="row" style="gap:7px;margin-left:auto">
+            <span class="tiny mut">${plural(coverRequests.length, 'request')} · ${remoteUnreadCoverCount()} unread</span>
+            <button class="btn btn-sm btn-ghost" data-act="cover-refresh">Refresh</button>
+          </div></div>
+        ${SUPABASE_COVER_REQUESTS.error ? `<div class="banner banner-warn" style="margin:14px">${ic('warn', 17)}<div>${esc(SUPABASE_COVER_REQUESTS.error)}</div></div>` : coverItems}
+      </div>` : ''}
       <div class="card">
         <div class="card-head"><div class="h3">Inbox</div>
           <span class="tiny mut" style="margin-left:auto">${plural(list.length, 'message')} · ${unreadCount()} unread</span></div>
@@ -2836,7 +3432,7 @@ function pageSettings() {
         <div class="card">
           <div class="card-head"><div class="h3">Demo &amp; data</div></div>
           <div class="card-body stack" style="gap:11px">
-            <div class="tiny mut">History, CSV export and notifications remain in this browser's localStorage under <code>${STORE_KEY}</code>. Supabase supplies identity, team membership, venue access, today's roster, recurring templates, and today's Opening/Closing Shift task state.</div>
+            <div class="tiny mut">History, CSV export and notifications remain in this browser's localStorage under <code>${STORE_KEY}</code>. Supabase supplies identity, team membership, venue access, weekly roster planning, recurring templates, and today's Opening/Closing Shift task state.</div>
             <div class="row wrap" style="gap:8px">
               <button class="btn btn-sm" data-act="csv-all">${ic('dl', 15)} Export ${esc(s.name)}</button>
               <button class="btn btn-sm" data-act="csv-group">${ic('dl', 15)} Export all venues</button>
@@ -3184,19 +3780,19 @@ on conflict (organisation_id, user_id) do update set role = 'employee';`;
   });
 }
 
-async function clearSupabaseTodayRoster(userId, venueIds) {
+async function clearSupabaseFutureRoster(userId, venueIds) {
   for (const venueId of venueIds) {
     const { error } = await DB.from('roster_assignments')
       .delete()
       .eq('venue_id', venueId)
       .eq('user_id', userId)
-      .eq('work_date', dayKey());
+      .gte('work_date', dayKey());
     if (error) throw error;
   }
 }
 
-function openSupabaseUserEditor(id) {
-  const member = supabaseMemberForUser(id, currentSupabaseOrganisationId());
+function openSupabaseUserEditor(id, organisationId) {
+  const member = supabaseMemberForUser(id, organisationId || currentSupabaseOrganisationId());
   if (!member) { toast('That organisation member is no longer available.', 'warn'); return; }
   const isEmployee = member.role === 'employee';
   const picked = new Set(member.explicitVenueIds);
@@ -3255,8 +3851,9 @@ function openSupabaseUserEditor(id) {
         saveButton.disabled = true;
         try {
           const profileResult = await DB.from('profiles').update({ display_name: name, phone: phone || null, active })
-            .eq('id', member.id);
+            .eq('id', member.id).select('id,active').maybeSingle();
           if (profileResult.error) throw profileResult.error;
+          if (!profileResult.data) throw new Error('The profile was not updated; RLS may have denied the operation.');
 
           if (isEmployee) {
             const current = new Set(member.explicitVenueIds);
@@ -3270,13 +3867,14 @@ function openSupabaseUserEditor(id) {
               const result = await DB.from('venue_members').delete()
                 .eq('venue_id', venueId).eq('user_id', member.id);
               if (result.error) throw result.error;
-              await clearSupabaseTodayRoster(member.id, [venueId]);
+              await clearSupabaseFutureRoster(member.id, [venueId]);
             }
-            if (!active) await clearSupabaseTodayRoster(member.id, member.venueIds);
+            if (!active) await clearSupabaseFutureRoster(member.id, member.venueIds);
           }
 
           await loadSupabaseTeam();
           await loadSupabaseToday();
+          if (SUPABASE_ROSTER_WEEK.start === R.rosterWeekStart) await loadSupabaseRosterWeek(R.rosterWeekStart, true);
           closeModal();
           render();
           toast(`${name.split(' ')[0]} updated`, 'ok');
@@ -3290,10 +3888,10 @@ function openSupabaseUserEditor(id) {
   });
 }
 
-function openUserEditor(id) {
+function openUserEditor(id, organisationId) {
   if (isSupabaseMode()) {
     if (!id) { openSupabaseOnboarding(); return; }
-    openSupabaseUserEditor(id);
+    openSupabaseUserEditor(id, organisationId);
     return;
   }
   const u = id ? user(id) : null;
@@ -3659,46 +4257,51 @@ function unrosterEverywhere(userId) {
   });
 }
 
-async function toggleRemoteRoster(lk, userId) {
+async function toggleRemoteRoster(lk, userId, workDate, venueId) {
   if (!isMgr()) { toast('Only a manager can change the roster.', 'warn'); return; }
-  const context = V();
+  const context = venueCatalog().find(item => item.realId === venueId) || V();
   const member = supabaseMemberForUser(userId, context.organisationId);
   if (!member || member.role !== 'employee' || !member.active || !member.venueIds.includes(context.realId)) {
     toast('That employee is not active or does not have access to this venue.', 'warn');
     return;
   }
-  const day = today();
-  const existingId = day.rosterAssignmentIds && day.rosterAssignmentIds[lk]
-    ? day.rosterAssignmentIds[lk][userId]
-    : null;
-  const lockKey = `roster:${context.realId}:${day.date}:${lk}:${userId}`;
+  const date = workDate || dayKey();
+  const currentDay = date === dayKey() ? today() : null;
+  const existingId = currentDay && currentDay.rosterAssignmentIds && currentDay.rosterAssignmentIds[lk]
+    ? currentDay.rosterAssignmentIds[lk][userId]
+    : (SUPABASE_ROSTER_WEEK.rows || []).find(row =>
+      row.venue_id === context.realId && row.user_id === userId && row.work_date === date && row.shift_type === lk
+    )?.id;
+  const lockKey = `roster:${context.realId}:${date}:${lk}:${userId}`;
   if (REMOTE_MUTATIONS.has(lockKey)) return;
   REMOTE_MUTATIONS.add(lockKey);
   try {
     if (existingId) {
       const result = await DB.from('roster_assignments').delete().eq('id', existingId);
       if (result.error) throw result.error;
-      toast(`${member.displayName.split(' ')[0]} removed from the ${LIST_META[lk].label.toLowerCase()} shift`, 'ok');
     } else {
       const result = await DB.from('roster_assignments').insert({
         id: crypto.randomUUID(), venue_id: context.realId, user_id: userId,
-        work_date: day.date, shift_type: lk
+        work_date: date, shift_type: lk
       });
       if (result.error && result.error.code !== '23505') throw result.error;
-      toast(`${member.displayName.split(' ')[0]} added to the ${LIST_META[lk].label.toLowerCase()} shift`, 'ok');
     }
-    await loadSupabaseToday();
+    if (date === dayKey()) await loadSupabaseToday();
+    if (SUPABASE_ROSTER_WEEK.start === R.rosterWeekStart) {
+      await loadSupabaseRosterWeek(R.rosterWeekStart, true);
+    }
     render();
+    toast(`${member.displayName.split(' ')[0]} ${existingId ? 'removed from' : 'added to'} the ${LIST_META[lk].label.toLowerCase()} shift`, 'ok');
   } catch (error) {
-    console.error('[supabase] roster assignment change failed', { venueId: context.realId, userId, listType: lk, error });
+    console.error('[supabase] roster assignment change failed', { venueId: context.realId, date, userId, listType: lk, error });
     toast('Could not save that roster change. Please try again.', 'warn');
   } finally {
     REMOTE_MUTATIONS.delete(lockKey);
   }
 }
 
-async function toggleRemoteMemberActive(userId) {
-  const member = supabaseMemberForUser(userId, currentSupabaseOrganisationId());
+async function toggleRemoteMemberActive(userId, organisationId) {
+  const member = supabaseMemberForUser(userId, organisationId || currentSupabaseOrganisationId());
   if (!member) return;
   if (userId === AUTH.profile.id) { toast('You cannot disable your own signed-in access.', 'warn'); return; }
   const lockKey = `member-active:${member.organisationId}:${userId}`;
@@ -3706,11 +4309,13 @@ async function toggleRemoteMemberActive(userId) {
   REMOTE_MUTATIONS.add(lockKey);
   try {
     const active = !member.active;
-    const result = await DB.from('profiles').update({ active }).eq('id', userId);
+    const result = await DB.from('profiles').update({ active }).eq('id', userId).select('id,active').maybeSingle();
     if (result.error) throw result.error;
-    if (!active) await clearSupabaseTodayRoster(userId, member.venueIds);
+    if (!result.data) throw new Error('The profile active state was not updated; RLS may have denied the operation.');
+    if (!active) await clearSupabaseFutureRoster(userId, member.venueIds);
     await loadSupabaseTeam();
     await loadSupabaseToday();
+    if (SUPABASE_ROSTER_WEEK.start === R.rosterWeekStart) await loadSupabaseRosterWeek(R.rosterWeekStart, true);
     render();
     toast(`${member.displayName.split(' ')[0]} ${active ? 'can now access DailyOps' : 'is now inactive'}`, 'ok');
   } catch (error) {
@@ -3736,13 +4341,14 @@ async function toggleRemoteVenueMembership(userId, venueId) {
     if (assigned) {
       const result = await DB.from('venue_members').delete().eq('venue_id', venueId).eq('user_id', userId);
       if (result.error) throw result.error;
-      await clearSupabaseTodayRoster(userId, [venueId]);
+      await clearSupabaseFutureRoster(userId, [venueId]);
     } else {
       const result = await DB.from('venue_members').insert({ venue_id: venueId, user_id: userId });
       if (result.error && result.error.code !== '23505') throw result.error;
     }
     await loadSupabaseTeam();
     await loadSupabaseToday();
+    if (SUPABASE_ROSTER_WEEK.start === R.rosterWeekStart) await loadSupabaseRosterWeek(R.rosterWeekStart, true);
     render();
     toast(`${member.displayName.split(' ')[0]} ${assigned ? 'removed from' : 'added to'} ${context.name}`, 'ok');
   } catch (error) {
@@ -3751,6 +4357,16 @@ async function toggleRemoteVenueMembership(userId, venueId) {
   } finally {
     REMOTE_MUTATIONS.delete(lockKey);
   }
+}
+
+function navigateSupabaseRosterWeek(offsetDays) {
+  R.rosterWeekStart = dayKey(addDays(parseKey(R.rosterWeekStart || rosterWeekStartKey(dayKey())), offsetDays));
+  loadSupabaseRosterWeek(R.rosterWeekStart, true);
+}
+
+function resetSupabaseRosterWeek() {
+  R.rosterWeekStart = rosterWeekStartKey(dayKey());
+  loadSupabaseRosterWeek(R.rosterWeekStart, true);
 }
 
 async function reopenList(lk) {
@@ -3807,24 +4423,39 @@ async function coverShift(lk) {
     if (!me().active) { toast('This account is disabled', 'warn'); return; }
     if (day.roster[lk].includes(me().id)) return;
     const context = V();
-    const lockKey = `cover:${context.realId}:${day.date}:${lk}:${me().id}`;
-    if (REMOTE_MUTATIONS.has(lockKey)) return;
-    REMOTE_MUTATIONS.add(lockKey);
-    try {
-      const result = await DB.from('roster_assignments').insert({
-        id: crypto.randomUUID(), venue_id: context.realId, user_id: me().id,
-        work_date: day.date, shift_type: lk
-      });
-      if (result.error && result.error.code !== '23505') throw result.error;
-      await loadSupabaseToday();
-      render();
-      toast(`You're on the ${LIST_META[lk].label.toLowerCase()} shift`, 'ok');
-    } catch (error) {
-      console.error('[supabase] self-cover roster assignment failed', { venueId: context.realId, listType: lk, error });
-      toast('Could not save your cover assignment. Please try again.', 'warn');
-    } finally {
-      REMOTE_MUTATIONS.delete(lockKey);
-    }
+    confirmModal(
+      `Cover the ${LIST_META[lk].label.toLowerCase()} shift?`,
+      `This will add you to ${context.name} for today and notify the manager. Continue?`,
+      'I’m covering',
+      async () => {
+        const lockKey = `cover:${context.realId}:${day.date}:${lk}:${me().id}`;
+        if (REMOTE_MUTATIONS.has(lockKey)) return;
+        REMOTE_MUTATIONS.add(lockKey);
+        try {
+          const assignmentResult = await DB.from('roster_assignments').insert({
+            id: crypto.randomUUID(), venue_id: context.realId, user_id: me().id,
+            work_date: day.date, shift_type: lk
+          });
+          if (assignmentResult.error && assignmentResult.error.code !== '23505') throw assignmentResult.error;
+
+          const requestResult = await DB.from('shift_cover_requests').insert({
+            id: crypto.randomUUID(), venue_id: context.realId, user_id: me().id,
+            work_date: day.date, shift_type: lk
+          });
+          if (requestResult.error && requestResult.error.code !== '23505') throw requestResult.error;
+
+          await loadSupabaseToday();
+          await loadSupabaseMyRosterWeek(SUPABASE_MY_ROSTER_WEEK.start || rosterWeekStartKey(dayKey()), true);
+          render();
+          toast(`You're on the ${LIST_META[lk].label.toLowerCase()} shift — manager notified`, 'ok');
+        } catch (error) {
+          console.error('[supabase] self-cover request failed', { venueId: context.realId, listType: lk, error });
+          toast('Could not save your cover request. Please try again.', 'warn');
+        } finally {
+          REMOTE_MUTATIONS.delete(lockKey);
+        }
+      }
+    );
     return;
   }
   const day = today(), list = day.roster[lk];
@@ -3885,9 +4516,9 @@ function handleAct(act, ds) {
       save(); render(); break;
     }
     case 'add-user':    openUserEditor(null); break;
-    case 'edit-user':   openUserEditor(ds.id); break;
+    case 'edit-user':   openUserEditor(ds.id, ds.organisation); break;
     case 'toggle-user': {
-      if (isSupabaseMode()) { toggleRemoteMemberActive(ds.id); break; }
+      if (isSupabaseMode()) { toggleRemoteMemberActive(ds.id, ds.organisation); break; }
       const u = user(ds.id); u.active = !u.active;
       if (!u.active) unrosterEverywhere(ds.id);
       save(); render(); toast(`${u.name.split(' ')[0]} ${u.active ? 'can now sign in' : 'no longer has access'}`); break;
@@ -3903,6 +4534,33 @@ function handleAct(act, ds) {
       save(); render();
       toast(`${u.name.split(' ')[0]} ${i >= 0 ? 'removed from' : 'added to'} ${venue(ds.venue).name}`); break;
     }
+    case 'roster-week-prev':
+      if (isSupabaseMode()) navigateSupabaseRosterWeek(-7);
+      break;
+    case 'roster-week-next':
+      if (isSupabaseMode()) navigateSupabaseRosterWeek(7);
+      break;
+    case 'roster-week-today':
+      if (isSupabaseMode()) resetSupabaseRosterWeek();
+      break;
+    case 'roster-week-reload':
+      if (isSupabaseMode()) loadSupabaseRosterWeek(R.rosterWeekStart, true);
+      break;
+    case 'my-roster-prev':
+      if (isSupabaseMode()) navigateSupabaseMyRosterWeek(-7);
+      break;
+    case 'my-roster-next':
+      if (isSupabaseMode()) navigateSupabaseMyRosterWeek(7);
+      break;
+    case 'my-roster-today':
+      if (isSupabaseMode()) resetSupabaseMyRosterWeek();
+      break;
+    case 'my-roster-reload':
+      if (isSupabaseMode()) loadSupabaseMyRosterWeek(SUPABASE_MY_ROSTER_WEEK.start, true);
+      break;
+    case 'roster-week':
+      if (isSupabaseMode()) toggleRemoteRoster(ds.list, ds.id, ds.date, ds.venue);
+      break;
     case 'del-user': {
       if (isSupabaseMode()) { toast('Deactivate the member instead so historical attribution is retained.', 'warn'); break; }
       const u = user(ds.id);
@@ -3958,7 +4616,20 @@ function handleAct(act, ds) {
     case 'csv-all':   exportCsv(localHistoryKeys(V().id), `${V().name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-operations.csv`); break;
     case 'csv-group': exportAllVenues(); break;
     case 'open-notif': openNotif(ds.id); break;
-    case 'mark-read': S.notifications.forEach(n => n.read = true); save(); render(); break;
+    case 'cover-read':
+      if (isSupabaseMode()) markSupabaseCoverRequests([ds.id]);
+      break;
+    case 'cover-refresh':
+      if (isSupabaseMode()) loadSupabaseCoverRequests();
+      break;
+    case 'mark-read':
+      S.notifications.forEach(n => n.read = true);
+      save();
+      render();
+      if (isSupabaseMode()) markSupabaseCoverRequests(SUPABASE_COVER_REQUESTS.rows
+        .filter(request => !request.manager_seen_at)
+        .map(request => request.id));
+      break;
     case 'test-notif': {
       const built = buildEndOfDay(V(), day, false);
       built.subject = '[Test] ' + built.subject;
@@ -3971,7 +4642,9 @@ function handleAct(act, ds) {
       if (!selectVenue(ds.id)) break;
       R.list = 'open';
       if (!isSupabaseMode()) save();
-      render(); scrollTop(); toast(`Switched to ${V().name}`); break;
+      render(); scrollTop();
+      if (isSupabaseMode() && R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
+      toast(`Switched to ${V().name}`); break;
     }
     case 'add-venue':
     case 'edit-venue':
@@ -4026,7 +4699,13 @@ $('#app').addEventListener('click', e => {
   const t = e.target.closest('[data-task]');
   if (t && !e.target.closest('#modal-root')) { toggleTask(t.dataset.list, t.dataset.task); return; }
   const tab = e.target.closest('[data-tab]');
-  if (tab) { R.tab = tab.dataset.tab; render(); scrollTop(); return; }
+  if (tab) {
+    R.tab = tab.dataset.tab;
+    render();
+    scrollTop();
+    if (isSupabaseMode() && R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
+    return;
+  }
   const seg = e.target.closest('.segmented [data-list]');
   if (seg) { R.list = seg.dataset.list; render(); return; }
 });
@@ -4046,7 +4725,12 @@ $('#venue-switch').addEventListener('change', e => {
   R.list = 'open';
   if (!isSupabaseMode()) save();
   render(); scrollTop();
+  if (isSupabaseMode() && R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
   toast(`Switched to ${V().name}`);
+});
+
+$('#organisation-switch').addEventListener('change', e => {
+  if (isSupabaseMode()) selectOrganisation(e.target.value);
 });
 
 $('#btn-theme').addEventListener('click', () => {
@@ -4137,11 +4821,15 @@ async function restoreAuthenticatedApp(session) {
     AUTH.profile = null;
     AUTH.organisationMemberships = [];
     AUTH.organisations = [];
+    AUTH.selectedOrganisationId = null;
     AUTH.venueContexts = [];
     AUTH.selectedVenueId = null;
     SUPABASE_TODAY = { date: null, byVenue: {} };
     SUPABASE_TEMPLATES = { byVenue: {} };
     SUPABASE_TEAM = { members: [], profilesById: {}, venueIdsByUser: {} };
+    SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows: [], loading: false, error: null };
+    SUPABASE_MY_ROSTER_WEEK = { start: null, end: null, rows: [], loading: false, error: null };
+    SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
     S = null;
     showLogin();
     return;
@@ -4173,6 +4861,8 @@ async function restoreAuthenticatedApp(session) {
   if (restoreId !== AUTH_RESTORE_ID) return;
   showApp();
   render();
+  if (isMgr()) loadSupabaseCoverRequests();
+  else loadSupabaseMyRosterWeek(rosterWeekStartKey(dayKey()), true);
 }
 
 async function signIn(event) {
@@ -4252,11 +4942,15 @@ async function startApp() {
         AUTH.profile = null;
         AUTH.organisationMemberships = [];
         AUTH.organisations = [];
+        AUTH.selectedOrganisationId = null;
         AUTH.venueContexts = [];
         AUTH.selectedVenueId = null;
         SUPABASE_TODAY = { date: null, byVenue: {} };
         SUPABASE_TEMPLATES = { byVenue: {} };
         SUPABASE_TEAM = { members: [], profilesById: {}, venueIdsByUser: {} };
+        SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows: [], loading: false, error: null };
+        SUPABASE_MY_ROSTER_WEEK = { start: null, end: null, rows: [], loading: false, error: null };
+        SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
         S = null;
         showLogin();
       } else if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {

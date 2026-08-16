@@ -45,7 +45,7 @@ The browser uses only the Supabase project URL and publishable key from `supabas
 - A manager membership grants organisation-level management access, including the organisation's venues under the deployed RLS policies.
 - An employee membership identifies the user as an employee; venue access is additionally constrained by the deployed venue membership/access model.
 
-The frontend uses `organisation_members.role` to select manager or employee UI. It does not use `platform_role` to infer that role. RLS is the real security boundary; UI visibility is not authorisation.
+The frontend uses `organisation_members.role` to select the normal manager or employee UI. An active `platform_role = 'admin'` profile is additionally treated as globally manager-capable, and the corresponding RLS helpers enforce that capability. RLS is the real security boundary; UI visibility is not authorisation.
 
 ## 5. Current database model
 
@@ -61,19 +61,24 @@ The deployed initial schema currently contains these important public tables:
 - `daily_checklists`: dated operation/shift instances keyed by venue, work date, and legacy `list_type`; stores submitted state and submission attribution.
 - `daily_tasks`: snapshot task instances belonging to a dated operation; stores definition, status, completion attribution/time, notes, and incomplete reasons.
 - `roster_assignments`: dated venue and shift assignments using the legacy `shift_type` field.
+- `shift_cover_requests`: employee-confirmed current-shift cover notifications for managers; delivery is currently in-app only.
 - `notification_events`: reserved notification/audit records for future delivery; the current frontend notification experience is still local/demo.
 
 Important deployed enums include `app_role` (`manager`, `employee`), `checklist_type` (`open`, `close`), `task_status` (`pending`, `done`, `blocked`, `na`, `skipped`), `task_source` (`template`, `adhoc`), and `platform_role` (`user`, `admin`).
 
 The schema also contains SECURITY DEFINER access helpers, task/checklist update guards, and `ensure_daily_checklists(uuid, date)`. These helpers and guards remain part of the RLS boundary and are not renamed by this cleanup.
 
-Migration history currently consists of `001_initial_schema.sql`, `002_add_platform_role.sql`, `003_grant_helper_function_execute.sql`, `004_grant_can_update_task_execute.sql`, `005_allow_managers_delete_adhoc_daily_tasks.sql`, `006_restrict_venue_member_reads.sql`, `007_scope_team_and_roster_writes.sql`, and `008_grant_can_manage_profile_execute.sql`. Already-applied schema migrations remain immutable.
+Migration history currently consists of `001_initial_schema.sql`, `002_add_platform_role.sql`, `003_grant_helper_function_execute.sql`, `004_grant_can_update_task_execute.sql`, `005_allow_managers_delete_adhoc_daily_tasks.sql`, `006_restrict_venue_member_reads.sql`, `007_scope_team_and_roster_writes.sql`, `008_grant_can_manage_profile_execute.sql`, `009_platform_admin_access.sql`, and `010_add_shift_cover_requests.sql`. Already-applied schema migrations remain immutable.
 
 Migration `006_restrict_venue_member_reads.sql` replaces the initial broad `venue_members` select policy with a manager-or-own-membership policy. It does not change venue-membership write policies or roster access.
 
 Migration `007_scope_team_and_roster_writes.sql` keeps manager-created venue memberships and roster assignments inside the target venue's organisation, requires manager-rostered employees to be active and explicitly assigned to the venue, and preserves the existing authenticated self-cover insert path.
 
 Migration `008_grant_can_manage_profile_execute.sql` grants authenticated EXECUTE on the existing `can_manage_profile(uuid)` helper so manager active-state/profile updates can pass the existing `profiles_update` policy.
+
+Migration `009_platform_admin_access.sql` keeps `platform_role` separate from the organisation operating role while allowing an active platform admin to administer all organisations and venues through the existing helper functions and RLS policies. Ordinary users still require an active `organisation_members` manager membership for management access.
+
+Migration `010_add_shift_cover_requests.sql` stores an employee's confirmed current-shift cover request and gives managers a venue-scoped in-app alert. It does not send email/SMS and does not add a manager approval step.
 
 ## 6. What is live/real today
 
@@ -101,8 +106,18 @@ Migration `008_grant_can_manage_profile_execute.sql` grants authenticated EXECUT
 - Organisation member loading and the manager Team view from `organisation_members` and `profiles`.
 - Employee active/inactive state updates through `profiles` while retaining historical profile rows.
 - Manager venue membership administration through `venue_members`.
+- Organisation-wide manager Team visibility for every member of the selected organisation, including employees who have no access to the selected venue.
+- Combined Team visibility for managers of multiple organisations and active platform admins when `All organisations` is selected; shared employees retain organisation-specific membership rows and venue access context.
+- Cross-venue and cross-organisation roster assignment summaries for managers, loaded from `roster_assignments` for the current manager scope and week.
+- Seven-day Opening/Closing Shift roster planning through `roster_assignments`, with controls for every eligible venue in the current manager scope and week navigation.
+- Employee active/inactive changes and venue-access removal clear future roster assignments while retaining historical records.
 - Today's Opening/Closing Shift roster assignments through `roster_assignments`, including persistence and secure employee self-cover.
 - Employee roster-aware shift context and manager on-shift counts from real roster rows.
+- Platform-admin organisation and venue visibility, with database-enforced global management access for active `platform_role = 'admin'` profiles.
+- Manager-capable users can filter the venue context by `All organisations` or a managed organisation; ordinary managers cannot select organisations outside their manager memberships.
+- Multi-organisation venue labels show the organisation name alongside the venue in the venue picker and manager cross-venue summary.
+- Employee weekly roster and accessible-venue view across the current planning week.
+- Employee-confirmed cover requests persisted in `shift_cover_requests` and displayed as manager Alerts; confirmation adds the employee to the shift and does not require manager approval.
 
 ## 7. What is still local/demo/deferred
 
@@ -113,6 +128,7 @@ Migration `008_grant_can_manage_profile_execute.sql` grants authenticated EXECUT
 - Roster CSV import.
 - Historical days, reporting, and CSV history export.
 - Simulated notification inbox and notification previews.
+- The older local notification inbox remains demo data; shift-cover alerts are the separate real Supabase-backed in-app notification path.
 
 **DEFERRED**
 
@@ -120,12 +136,13 @@ Migration `008_grant_can_manage_profile_execute.sql` grants authenticated EXECUT
 - Production email/SMS notification delivery.
 - Edge Functions.
 - Scheduled end-of-day processing.
-- Automated Auth-user invitation/creation and organisation-role editing; MVP onboarding creates Auth users manually in the Supabase dashboard and then bootstraps `organisation_members` with the Team screen instructions.
+- Automated Auth-user invitation/creation, email-based assignment of an existing Auth user to an organisation, and organisation-role editing. MVP onboarding creates Auth users manually in the Supabase dashboard and then bootstraps `organisation_members` with the Team screen instructions. The missing email-based assignment flow is intentionally deferred to a manager-scoped Edge Function or narrowly scoped SECURITY DEFINER RPC; it must never use a service-role key in the browser.
+- Cover-request email/SMS delivery, realtime cover alerts, and manager push notifications. The current cover flow is an in-app database-backed alert only.
 - Offline/PWA support and evidence/photo attachments.
 
 ## 8. Completed milestones
 
-Steps 1–11 are complete in the current migration history and frontend implementation:
+Steps 1–11 are complete, with the organisation-wide team and weekly roster follow-up now implemented in the frontend:
 
 1. Initial multi-organisation Postgres schema, indexes, constraints, triggers, and RLS model.
 2. Additive `platform_role` schema migration for platform-level `user`/`admin` status.
@@ -138,6 +155,9 @@ Steps 1–11 are complete in the current migration history and frontend implemen
 9. Today's complete Supabase operation workflow: one-off tasks, safe routine re-apply, manager controls, shift submission/reopening, and real progress/critical counts.
 10. Supabase-backed recurring Opening/Closing Shift templates, manager template CRUD/order/copy, stable template-task references, and template-based daily snapshot generation.
 11. Supabase-backed organisation members/profiles, employee active state, venue memberships, today's roster assignments, manager Team controls, and employee roster-aware views.
+12. Organisation-wide manager staff visibility, cross-venue assignment summaries, seven-day roster planning, and future-roster cleanup when access is disabled or removed.
+13. Platform-admin access across organisations, employee weekly roster/venue visibility, and employee-confirmed in-app shift-cover notifications.
+14. Combined multi-organisation Team visibility and cross-organisation roster planning for managers with multiple manager memberships and platform admins.
 
 The repository does not use a separate generated milestone registry; this list reflects the current project history and implementation state.
 
@@ -150,6 +170,7 @@ The repository does not use a separate generated milestone registry; this list r
 - The one-time template bootstrap still uses local/demo definitions when a venue has no remote template. It does not overwrite existing remote template data.
 - Deferred history and notification screens still depend on localStorage state and the temporary real-venue-to-demo-context mapping.
 - Auth-user creation and initial organisation membership bootstrap are manual because the static browser must not use Supabase Auth admin APIs or a service-role key.
+- The current organisation/venue repair is a one-time SQL cleanup when duplicate organisation rows exist; the production model should retain one organisation row with multiple venue rows.
 - Organisation role changes are intentionally not exposed in the Team UI; they remain an administrator/manual SQL operation until a narrower workflow is designed.
 - Employees may insert their own current roster assignment through the existing RLS policy for the explicit "I'm covering" flow; they cannot update or delete roster rows.
 - Migration `006_restrict_venue_member_reads.sql` narrows employee reads of venue membership data while preserving manager administration.
@@ -157,6 +178,7 @@ The repository does not use a separate generated milestone registry; this list r
 - Migration `008_grant_can_manage_profile_execute.sql` records the required authenticated EXECUTE grant for manager profile updates.
 - Realtime is not implemented, so another browser's task changes are not pushed into an already-open screen.
 - There is no production notification backend or scheduled end-of-day job.
+- Shift-cover requests currently use two client writes: the employee roster assignment and the notification row. If the first write succeeds and the second fails, the UI reports the failure and the manager should verify the assignment before retrying.
 - RLS helper EXECUTE grants were initially missing in the live project and were corrected in migrations `003_grant_helper_function_execute.sql` and `004_grant_can_update_task_execute.sql`. The one-off delete capability is isolated in `005_allow_managers_delete_adhoc_daily_tasks.sql`. Keep these grants/policies and verify them when provisioning another Supabase project.
 - The frontend has been validated through repository/static checks and the existing development workflow; a full authenticated browser regression suite is still follow-up work.
 
@@ -164,12 +186,13 @@ The repository does not use a separate generated milestone registry; this list r
 
 Use this order for the next phases:
 
-1. History, reporting, and CSV.
-2. Realtime.
-3. Notifications.
-4. Scheduled end-of-day processing.
-5. Final security testing.
-6. Custom domain and polish.
+1. Secure existing-user organisation assignment through a manager-scoped Edge Function or narrowly scoped SECURITY DEFINER RPC.
+2. History, reporting, and CSV.
+3. Realtime, including live cover alerts.
+4. Notifications and cover-request delivery.
+5. Scheduled end-of-day processing.
+6. Final security testing.
+7. Custom domain and polish.
 
 ## 11. Git workflow
 
