@@ -1,0 +1,32 @@
+# Supabase implementation plan
+
+The implementation is incremental. The static UI and localStorage demo stay in place while one authenticated database path is proven end to end.
+
+## Phase 1 — implemented in this checkout
+
+- `supabase/migrations/001_initial_schema.sql` creates the multi-organisation relational model, constraints, indexes, Auth profile trigger, daily snapshot function, and RLS policies.
+- `supabase/config.js` contains only public browser configuration placeholders.
+- `index.html` loads Supabase JS v2 from a CDN when configured, uses Supabase Auth, loads the signed-in profile/role and accessible venues, and persists today's task changes.
+- The existing demo is selected automatically while the public config contains placeholders.
+
+The first manager must still be created in the Supabase dashboard and assigned to an organisation, venue, and templates using the setup instructions in `README.md`.
+
+## Phase 2 — next adapters
+
+Replace the phase 2 placeholder screens with repository-style functions for:
+
+- venue and employee administration
+- template editing and explicit daily-list synchronisation
+- roster administration and roster import
+- historical reporting and CSV export
+- notification event inbox
+
+## Phase 3 — realtime and notifications
+
+- Subscribe to `daily_tasks` and `daily_checklists` changes for the selected venue/date.
+- Move notification composition and delivery to Edge Functions.
+- Run cutoff/end-of-day summaries as scheduled server-side work so they do not depend on an open browser.
+
+## Secrets
+
+The frontend may contain only the Supabase project URL and publishable/anon key. Provider secrets and Supabase service-role credentials belong in Edge Function or Supabase project secrets and must never be committed to this repository.

@@ -1,0 +1,2555 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Peachy — Shift Checklist</title>
+<meta name="description" content="Open &amp; Close shift checklists for Peachy Bar &amp; Kitchen" />
+<style>
+/* ==========================================================================
+   PEACHY — SHIFT CHECKLIST
+   Single-file demo. Design tokens -> layout -> components -> responsive.
+   Responsive rules use @container so the "Mobile view" toggle and a genuinely
+   narrow window both hit the exact same breakpoints.
+   ========================================================================== */
+
+/* ---------- reset ---------- */
+*, *::before, *::after { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { background: none; border: 0; cursor: pointer; }
+h1,h2,h3,h4,p,figure { margin: 0; }
+ul, ol { margin: 0; padding: 0; list-style: none; }
+a { color: inherit; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 6px; }
+::selection { background: var(--accent-soft); color: var(--ink); }
+
+/* ---------- tokens ---------- */
+:root {
+  --bg:          #F4F1EE;
+  --backdrop:    #E7E1DB;
+  --surface:     #FFFFFF;
+  --surface-2:   #FAF7F5;
+  --surface-3:   #F2EDE9;
+  --ink:         #1A1512;
+  --ink-2:       #4A4038;
+  --muted:       #7C7069;
+  --line:        #E5DED8;
+  --line-2:      #D6CCC4;
+
+  /* --accent / --accent-hi / --accent-ink are overwritten per venue at runtime
+     (see applyVenueAccent). Everything else derives from them. */
+  --accent:      #B8451F;
+  --accent-hi:   #C8532B;
+  --accent-ink:  #FFFFFF;
+  --accent-soft: color-mix(in srgb, var(--accent) 13%, var(--surface));
+  --accent-line: color-mix(in srgb, var(--accent) 32%, var(--surface));
+
+  --ok:          #1A7F43;
+  --ok-soft:     #E2F4E9;
+  --warn:        #A25B06;
+  --warn-soft:   #FBEEDA;
+  --danger:      #B3261E;
+  --danger-soft: #FBE6E4;
+  --info:        #1F4FBF;
+  --info-soft:   #E6ECFC;
+
+  --focus:       var(--accent);
+  --shadow-sm:   0 1px 2px rgba(26,21,18,.06), 0 1px 3px rgba(26,21,18,.04);
+  --shadow-md:   0 2px 4px rgba(26,21,18,.05), 0 8px 20px rgba(26,21,18,.07);
+  --shadow-lg:   0 12px 40px rgba(26,21,18,.16), 0 2px 8px rgba(26,21,18,.08);
+
+  --r-sm: 8px; --r-md: 12px; --r-lg: 16px; --r-xl: 22px;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+html[data-theme="dark"] {
+  --bg:          #171412;
+  --backdrop:    #0C0A09;
+  --surface:     #201B19;
+  --surface-2:   #262120;
+  --surface-3:   #2E2825;
+  --ink:         #F6F1ED;
+  --ink-2:       #DCD2CB;
+  --muted:       #9E9189;
+  --line:        #332C29;
+  --line-2:      #423A35;
+
+  --accent:      #F08A5D;
+  --accent-hi:   #F79C72;
+  --accent-ink:  #2A1006;
+  --accent-soft: color-mix(in srgb, var(--accent) 20%, var(--surface));
+  --accent-line: color-mix(in srgb, var(--accent) 38%, var(--surface));
+
+  --ok:          #56C98A;
+  --ok-soft:     #17301F;
+  --warn:        #E5A63C;
+  --warn-soft:   #33260F;
+  --danger:      #F4776D;
+  --danger-soft: #351B19;
+  --info:        #86A9F5;
+  --info-soft:   #1A2340;
+
+  --focus:       var(--accent);
+  --shadow-sm:   0 1px 2px rgba(0,0,0,.4);
+  --shadow-md:   0 2px 4px rgba(0,0,0,.35), 0 8px 22px rgba(0,0,0,.35);
+  --shadow-lg:   0 16px 48px rgba(0,0,0,.55);
+}
+
+body {
+  font-family: var(--sans);
+  background: var(--backdrop);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+/* ---------- shell ---------- */
+.viewport { height: 100dvh; display: flex; align-items: center; justify-content: center; }
+.frame { width: 100%; height: 100%; background: var(--bg); position: relative; }
+.app {
+  position: relative; height: 100%; display: flex; flex-direction: column;
+  overflow: hidden; container-type: inline-size; container-name: app;
+  background: var(--bg);
+}
+.statusbar { display: none; }
+
+/* mobile-view toggle: shrink the frame; container queries do the rest */
+body.mobile-view .viewport {
+  background:
+    radial-gradient(120% 90% at 50% 0%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 60%),
+    var(--backdrop);
+  padding: 20px;
+}
+body.mobile-view .frame {
+  width: 402px; height: min(852px, 100dvh - 40px);
+  border-radius: 46px; border: 11px solid #0B0908;
+  box-shadow: var(--shadow-lg), 0 0 0 2px #2B2523, inset 0 0 0 1px rgba(255,255,255,.06);
+  overflow: hidden;
+}
+body.mobile-view .app { border-radius: 35px; }
+body.mobile-view .statusbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 30px 4px; font-size: 13px; font-weight: 650; letter-spacing: .01em;
+  color: var(--ink); background: var(--surface); flex: 0 0 auto;
+}
+.statusbar .sb-right { display: flex; align-items: center; gap: 5px; }
+
+/* ---------- top bar ---------- */
+.topbar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+  padding: 12px 18px; background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.logo {
+  width: 34px; height: 34px; border-radius: 11px; flex: 0 0 auto;
+  background: linear-gradient(140deg, var(--accent-hi), var(--accent));
+  color: var(--accent-ink); display: grid; place-items: center;
+  font-weight: 800; font-size: 15px; letter-spacing: -.03em;
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.brand-text { min-width: 0; }
+.brand-name { font-weight: 680; font-size: 14.5px; letter-spacing: -.015em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.brand-sub { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topbar-spacer { flex: 1 1 auto; }
+.topbar-actions { display: flex; align-items: center; gap: 6px; }
+
+.iconbtn {
+  width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center;
+  color: var(--ink-2); border: 1px solid transparent; position: relative; flex: 0 0 auto;
+  transition: background .14s, color .14s, border-color .14s;
+}
+.iconbtn:hover { background: var(--surface-3); color: var(--ink); }
+.iconbtn.is-on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
+.dot-badge {
+  position: absolute; top: 5px; right: 5px; min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 999px; background: var(--accent); color: var(--accent-ink);
+  font-size: 10px; font-weight: 750; display: grid; place-items: center;
+  border: 2px solid var(--surface);
+}
+
+/* pickers — a native <select> laid invisibly over styled chrome, so mobile gets
+   the OS picker while the button still looks like the rest of the app */
+.pickwrap {
+  position: relative; display: flex; align-items: center; gap: 8px; min-width: 0;
+  padding: 4px 9px 4px 4px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--surface-2); transition: border-color .14s, background .14s;
+}
+.pickwrap:hover { border-color: var(--line-2); background: var(--surface-3); }
+.pickwrap:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+.pickwrap select { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; border: 0; }
+.pickwrap.is-single { pointer-events: none; }
+.pickwrap.is-single .pick-chev { display: none; }
+.pick-text { min-width: 0; }
+.pick-name { font-size: 13px; font-weight: 645; letter-spacing: -.014em; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-sub { font-size: 10.5px; color: var(--muted); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-chev { color: var(--muted); flex: 0 0 auto; }
+
+/* venue colour picker */
+.swatches { display: flex; gap: 9px; flex-wrap: wrap; }
+.swatch { width: 32px; height: 32px; border-radius: 10px; border: 2px solid transparent; outline-offset: 2px; box-shadow: inset 0 0 0 1px rgba(0,0,0,.1); transition: transform .12s; }
+.swatch:hover { transform: scale(1.06); }
+.swatch.is-sel { border-color: var(--ink); }
+.venue-row { display: flex; align-items: center; gap: 11px; padding: 11px 0; border-bottom: 1px solid var(--line); }
+.venue-row:last-child { border-bottom: 0; }
+.venue-dot { width: 11px; height: 11px; border-radius: 999px; flex: 0 0 auto; }
+
+/* cross-venue strip */
+.vstrip { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; padding: 15px 17px 17px; }
+.vcard { text-align: left; padding: 12px 13px; border-radius: var(--r-md); border: 1px solid var(--line); background: var(--surface-2); transition: border-color .14s, background .14s; min-width: 0; }
+.vcard:hover { border-color: var(--line-2); background: var(--surface-3); }
+.vcard.is-current { border-color: var(--accent); background: var(--accent-soft); }
+.vcard-name { font-size: 13.5px; font-weight: 645; letter-spacing: -.015em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.vcard-num { display: block; font-size: 21px; font-weight: 720; letter-spacing: -.032em; margin-top: 7px; font-variant-numeric: tabular-nums; }
+.avatar {
+  width: 28px; height: 28px; border-radius: 999px; display: grid; place-items: center;
+  font-size: 11.5px; font-weight: 700; letter-spacing: -.02em; flex: 0 0 auto;
+  background: var(--surface-3); color: var(--ink-2); border: 1px solid var(--line);
+}
+.avatar.is-mgr { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
+.avatar.sm { width: 22px; height: 22px; font-size: 9.5px; }
+.avatar.lg { width: 40px; height: 40px; font-size: 15px; }
+
+/* ---------- body / nav ---------- */
+.shell { flex: 1 1 auto; display: flex; min-height: 0; }
+.sidebar {
+  flex: 0 0 216px; border-right: 1px solid var(--line); background: var(--surface);
+  padding: 14px 12px; display: flex; flex-direction: column; gap: 3px; overflow-y: auto;
+}
+.nav-label { font-size: 10.5px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); padding: 10px 10px 6px; }
+.navitem {
+  display: flex; align-items: center; gap: 11px; padding: 9px 11px; border-radius: 10px;
+  color: var(--ink-2); font-size: 14px; font-weight: 560; text-align: left; width: 100%;
+  transition: background .14s, color .14s;
+}
+.navitem:hover { background: var(--surface-3); color: var(--ink); }
+.navitem.is-active { background: var(--accent-soft); color: var(--accent); font-weight: 660; }
+.navitem svg { flex: 0 0 auto; }
+.navitem .count { margin-left: auto; font-size: 11.5px; font-weight: 700; color: var(--muted); }
+.sidebar-foot { margin-top: auto; padding: 10px 4px 2px; }
+
+.content { flex: 1 1 auto; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; }
+.page { max-width: 1080px; margin: 0 auto; padding: 26px 26px 90px; }
+.bottomnav { display: none; }
+
+/* ---------- typography ---------- */
+.page-head { margin-bottom: 20px; }
+.page-title { font-size: 25px; font-weight: 700; letter-spacing: -.032em; line-height: 1.15; }
+.page-sub { color: var(--muted); font-size: 13.5px; margin-top: 4px; }
+.sec-title { font-size: 12px; font-weight: 720; letter-spacing: .075em; text-transform: uppercase; color: var(--muted); }
+.h3 { font-size: 15.5px; font-weight: 660; letter-spacing: -.018em; }
+.mut { color: var(--muted); }
+.tiny { font-size: 12px; }
+.nowrap { white-space: nowrap; }
+
+/* ---------- cards ---------- */
+.card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+}
+.card-head { display: flex; align-items: center; gap: 12px; padding: 15px 17px; border-bottom: 1px solid var(--line); }
+.card-body { padding: 17px; }
+.card-foot { padding: 13px 17px; border-top: 1px solid var(--line); background: var(--surface-2); border-radius: 0 0 var(--r-lg) var(--r-lg); }
+.grid { display: grid; gap: 16px; }
+.grid-2 { grid-template-columns: 1fr 1fr; }
+.stack { display: flex; flex-direction: column; gap: 16px; }
+.row { display: flex; align-items: center; gap: 10px; }
+.row-b { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.wrap { flex-wrap: wrap; }
+
+/* ---------- buttons ---------- */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  height: 38px; padding: 0 15px; border-radius: 10px; font-size: 13.5px; font-weight: 620;
+  letter-spacing: -.005em; border: 1px solid var(--line-2); background: var(--surface);
+  color: var(--ink); transition: background .14s, border-color .14s, transform .1s, box-shadow .14s;
+  white-space: nowrap;
+}
+.btn:hover { background: var(--surface-3); }
+.btn:active { transform: translateY(1px); }
+.btn[disabled] { opacity: .45; pointer-events: none; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); box-shadow: 0 1px 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+.btn-primary:hover { background: var(--accent-hi); border-color: var(--accent-hi); }
+.btn-ghost { border-color: transparent; background: transparent; color: var(--ink-2); }
+.btn-ghost:hover { background: var(--surface-3); color: var(--ink); }
+.btn-danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+.btn-danger:hover { background: var(--danger-soft); }
+.btn-sm { height: 31px; padding: 0 11px; font-size: 12.5px; border-radius: 8px; gap: 5px; }
+.btn-lg { height: 46px; padding: 0 22px; font-size: 15px; border-radius: 12px; }
+.btn-block { width: 100%; }
+.btn-icon { width: 31px; padding: 0; }
+
+/* ---------- form ---------- */
+.field { display: flex; flex-direction: column; gap: 6px; }
+.label { font-size: 12.5px; font-weight: 620; color: var(--ink-2); }
+.input, .select, .textarea {
+  width: 100%; height: 38px; padding: 0 11px; border-radius: 10px;
+  border: 1px solid var(--line-2); background: var(--surface); color: var(--ink);
+  font-size: 14px; transition: border-color .14s, box-shadow .14s;
+}
+.textarea { height: auto; min-height: 70px; padding: 9px 11px; resize: vertical; line-height: 1.45; }
+.input:focus, .select:focus, .textarea:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.input::placeholder, .textarea::placeholder { color: var(--muted); }
+.select { appearance: none; padding-right: 30px;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 15px) 17px, calc(100% - 10px) 17px;
+  background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
+.hint { font-size: 11.5px; color: var(--muted); }
+
+.switch { position: relative; width: 40px; height: 23px; border-radius: 999px; background: var(--line-2); transition: background .18s; flex: 0 0 auto; }
+.switch::after { content: ""; position: absolute; top: 2.5px; left: 2.5px; width: 18px; height: 18px; border-radius: 999px; background: #fff; box-shadow: var(--shadow-sm); transition: transform .18s; }
+.switch.is-on { background: var(--accent); }
+.switch.is-on::after { transform: translateX(17px); }
+
+/* ---------- segmented ---------- */
+.segmented { display: flex; gap: 4px; padding: 4px; background: var(--surface-3); border-radius: 13px; border: 1px solid var(--line); }
+.segmented button {
+  flex: 1 1 0; display: flex; align-items: center; justify-content: center; gap: 8px;
+  height: 40px; border-radius: 9px; font-size: 14px; font-weight: 620; color: var(--muted);
+  letter-spacing: -.01em; transition: background .16s, color .16s, box-shadow .16s;
+}
+.segmented button:hover { color: var(--ink); }
+.segmented button.is-active { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-sm); }
+.segmented .seg-count { font-size: 11.5px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: var(--surface-3); color: var(--muted); }
+.segmented button.is-active .seg-count { background: var(--accent-soft); color: var(--accent); }
+/* dark theme reverses the raised/recessed relationship, so flip the fills */
+html[data-theme="dark"] .segmented,
+html[data-theme="dark"] .pill-toggle { background: #161312; }
+html[data-theme="dark"] .segmented button.is-active,
+html[data-theme="dark"] .pill-toggle button.is-active { background: var(--surface-3); }
+html[data-theme="dark"] .segmented button.is-active .seg-count { background: var(--accent-soft); }
+
+/* ---------- chips ---------- */
+.chip {
+  display: inline-flex; align-items: center; gap: 5px; height: 21px; padding: 0 8px;
+  border-radius: 999px; font-size: 11px; font-weight: 660; letter-spacing: .005em;
+  background: var(--surface-3); color: var(--muted); border: 1px solid transparent; white-space: nowrap;
+}
+.chip-accent { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
+.chip-ok     { background: var(--ok-soft); color: var(--ok); }
+.chip-warn   { background: var(--warn-soft); color: var(--warn); }
+.chip-danger { background: var(--danger-soft); color: var(--danger); }
+.chip-info   { background: var(--info-soft); color: var(--info); }
+.chip-dot::before { content:""; width: 5px; height: 5px; border-radius: 999px; background: currentColor; }
+
+/* ---------- progress ---------- */
+.bar { height: 7px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
+.bar > i { display: block; height: 100%; border-radius: 999px; background: var(--accent); transition: width .5s cubic-bezier(.3,.9,.3,1); }
+.bar.is-done > i { background: var(--ok); }
+.ring { position: relative; flex: 0 0 auto; }
+.ring svg { display: block; transform: rotate(-90deg); }
+.ring .track { stroke: var(--surface-3); }
+.ring .prog { stroke: var(--accent); stroke-linecap: round; transition: stroke-dashoffset .6s cubic-bezier(.3,.9,.3,1); }
+.ring.is-done .prog { stroke: var(--ok); }
+.ring .ring-label { position: absolute; inset: 0; display: grid; place-items: center; font-size: 15px; font-weight: 720; letter-spacing: -.03em; }
+
+/* ---------- task rows ---------- */
+.tasklist { display: flex; flex-direction: column; }
+.task {
+  display: flex; align-items: flex-start; gap: 13px; padding: 13px 16px;
+  border-bottom: 1px solid var(--line); transition: background .14s; position: relative;
+  cursor: pointer; text-align: left; width: 100%;
+}
+.task:last-child { border-bottom: 0; }
+.task:hover { background: var(--surface-2); }
+.task.is-locked { cursor: default; }
+.task.is-locked:hover { background: transparent; }
+.tick {
+  width: 24px; height: 24px; border-radius: 8px; border: 2px solid var(--line-2);
+  flex: 0 0 auto; margin-top: 1px; display: grid; place-items: center; color: transparent;
+  transition: background .16s, border-color .16s, color .16s, transform .16s;
+}
+.task:hover .tick { border-color: var(--accent); }
+.task.is-done .tick { background: var(--ok); border-color: var(--ok); color: #fff; }
+.task.is-flag .tick { background: var(--surface-3); border-color: var(--line-2); color: var(--muted); }
+.task-main { flex: 1 1 auto; min-width: 0; }
+.task-title { font-size: 14.5px; font-weight: 560; letter-spacing: -.012em; color: var(--ink); }
+.task.is-done .task-title { color: var(--muted); text-decoration: line-through; text-decoration-thickness: 1px; text-decoration-color: var(--line-2); }
+.task-detail { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.task-meta { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-top: 7px; font-size: 11.5px; color: var(--muted); }
+.task-note { margin-top: 7px; padding: 8px 10px; border-radius: 9px; background: var(--surface-2); border: 1px solid var(--line); font-size: 12.5px; color: var(--ink-2); }
+.task-note b { font-weight: 640; }
+.task-side { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.task-critical-mark { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--accent); opacity: .8; }
+
+/* ---------- sticky action bar ---------- */
+.actionbar {
+  position: sticky; bottom: 0; margin: 18px -26px -90px; padding: 14px 26px calc(14px + env(safe-area-inset-bottom));
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  border-top: 1px solid var(--line); display: flex; align-items: center; gap: 14px;
+}
+.actionbar .ab-text { flex: 1 1 auto; min-width: 0; }
+
+/* ---------- table ---------- */
+.tablewrap { overflow-x: auto; }
+table.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+table.tbl th {
+  text-align: left; font-size: 10.5px; font-weight: 720; letter-spacing: .075em;
+  text-transform: uppercase; color: var(--muted); padding: 10px 14px;
+  border-bottom: 1px solid var(--line); white-space: nowrap; background: var(--surface-2);
+}
+table.tbl td { padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+table.tbl tr:last-child td { border-bottom: 0; }
+table.tbl tbody tr:hover { background: var(--surface-2); }
+.num { font-variant-numeric: tabular-nums; }
+
+/* ---------- stat tiles ---------- */
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.stat { padding: 14px 15px; border-radius: var(--r-md); background: var(--surface); border: 1px solid var(--line); }
+.stat-k { font-size: 11px; font-weight: 680; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.stat-v { font-size: 25px; font-weight: 720; letter-spacing: -.035em; margin-top: 3px; font-variant-numeric: tabular-nums; }
+.stat-s { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+
+/* ---------- misc ---------- */
+.empty { padding: 40px 20px; text-align: center; color: var(--muted); }
+.empty-icon { width: 44px; height: 44px; border-radius: 13px; background: var(--surface-3); display: grid; place-items: center; margin: 0 auto 12px; color: var(--muted); }
+.divider { height: 1px; background: var(--line); }
+.kv { display: flex; gap: 8px; font-size: 13px; }
+.kv dt { color: var(--muted); min-width: 92px; }
+.banner { display: flex; align-items: flex-start; gap: 10px; padding: 11px 13px; border-radius: var(--r-md); font-size: 13px; border: 1px solid; }
+.banner-info { background: var(--info-soft); border-color: color-mix(in srgb, var(--info) 25%, transparent); color: var(--info); }
+.banner-warn { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 25%, transparent); color: var(--warn); }
+.banner-ok   { background: var(--ok-soft); border-color: color-mix(in srgb, var(--ok) 25%, transparent); color: var(--ok); }
+.banner b { font-weight: 660; }
+.drag-h { color: var(--muted); cursor: grab; }
+.sortrow { display: flex; flex-direction: column; gap: 1px; }
+.pill-toggle { display: inline-flex; padding: 3px; gap: 3px; background: var(--surface-3); border-radius: 10px; border: 1px solid var(--line); }
+.pill-toggle button { padding: 5px 11px; border-radius: 7px; font-size: 12.5px; font-weight: 620; color: var(--muted); }
+.pill-toggle button.is-active { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-sm); }
+
+/* ---------- modal ---------- */
+.modal-root { position: absolute; inset: 0; z-index: 60; display: none; }
+.modal-root.is-open { display: block; }
+.scrim { position: absolute; inset: 0; background: rgba(20,14,10,.42); backdrop-filter: blur(3px); animation: fade .18s ease; }
+.modal {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(560px, calc(100% - 36px)); max-height: calc(100% - 48px);
+  background: var(--surface); border-radius: var(--r-xl); box-shadow: var(--shadow-lg);
+  display: flex; flex-direction: column; overflow: hidden; animation: pop .2s cubic-bezier(.2,.9,.3,1);
+  border: 1px solid var(--line);
+}
+.modal.wide { width: min(720px, calc(100% - 36px)); }
+.modal-head { padding: 18px 20px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: flex-start; gap: 12px; }
+.modal-title { font-size: 17.5px; font-weight: 700; letter-spacing: -.024em; }
+.modal-sub { font-size: 13px; color: var(--muted); margin-top: 2px; }
+.modal-body { padding: 18px 20px; overflow-y: auto; flex: 1 1 auto; }
+.modal-foot { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; gap: 9px; justify-content: flex-end; background: var(--surface-2); flex-wrap: wrap; }
+@keyframes fade { from { opacity: 0 } }
+@keyframes pop { from { opacity: 0; transform: translate(-50%, -46%) scale(.97) } }
+@keyframes slideup { from { opacity: 0; transform: translateY(14px) } }
+
+/* review step */
+.review-item { padding: 13px 0; border-bottom: 1px solid var(--line); }
+.review-item:last-child { border-bottom: 0; }
+.reason-opts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 9px; }
+.reason-opts button { padding: 6px 11px; border-radius: 9px; border: 1px solid var(--line-2); font-size: 12.5px; font-weight: 580; color: var(--ink-2); background: var(--surface); transition: all .14s; }
+.reason-opts button:hover { border-color: var(--accent); }
+.reason-opts button.is-sel { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 660; }
+
+/* email preview */
+.mailpv { border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: var(--surface-2); }
+.mailpv-head { padding: 11px 14px; border-bottom: 1px solid var(--line); background: var(--surface); font-size: 12.5px; }
+.mailpv-head .kvline { display: flex; gap: 8px; }
+.mailpv-head .kvline span:first-child { color: var(--muted); min-width: 52px; }
+.mailpv-body { padding: 16px; font-size: 13.5px; line-height: 1.55; background: var(--surface); }
+.mailpv-body h4 { font-size: 16px; font-weight: 700; letter-spacing: -.02em; margin: 0 0 4px; }
+.mailpv-body ul { margin: 8px 0; }
+.mailpv-body li { padding: 4px 0 4px 20px; position: relative; }
+.mailpv-body li::before { position: absolute; left: 2px; top: 4px; font-size: 12px; }
+.mailpv-body li.done::before { content: "✓"; color: var(--ok); font-weight: 700; }
+.mailpv-body li.miss::before { content: "○"; color: var(--danger); font-weight: 700; }
+.sms-bubble { max-width: 320px; padding: 11px 14px; border-radius: 18px 18px 18px 5px; background: var(--surface-3); font-size: 13.5px; line-height: 1.45; white-space: pre-wrap; }
+
+/* alerts list */
+.alert-item { display: flex; gap: 12px; padding: 13px 16px; border-bottom: 1px solid var(--line); cursor: pointer; transition: background .14s; text-align: left; width: 100%; }
+.alert-item:hover { background: var(--surface-2); }
+.alert-item.is-unread { background: color-mix(in srgb, var(--accent-soft) 55%, transparent); }
+.alert-ic { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; flex: 0 0 auto; }
+
+/* activity feed */
+.feed { display: flex; flex-direction: column; }
+.feed-item { display: flex; gap: 11px; padding: 9px 0; align-items: flex-start; }
+.feed-line { font-size: 13px; }
+.feed-time { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* toasts */
+.toast-root { position: absolute; left: 0; right: 0; bottom: 0; z-index: 80; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px; pointer-events: none; transition: padding-bottom .2s; }
+.modal-root.is-open + .toast-root { padding-bottom: 84px; }
+.toast {
+  display: flex; align-items: center; gap: 10px; padding: 11px 15px; border-radius: 13px;
+  background: var(--ink); color: var(--bg); font-size: 13.5px; font-weight: 560;
+  box-shadow: var(--shadow-lg); animation: slideup .22s cubic-bezier(.2,.9,.3,1); max-width: 100%;
+}
+.toast .t-ic { color: var(--accent-hi); display: grid; place-items: center; }
+html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink); border: 1px solid var(--line-2); }
+
+/* ==========================================================================
+   RESPONSIVE — driven by container width, so the mobile toggle and a narrow
+   window behave identically.
+   ========================================================================== */
+@container app (max-width: 860px) {
+  .sidebar { display: none; }
+  .page { padding: 18px 16px 100px; }
+  .page-title { font-size: 22px; }
+  .grid-2 { grid-template-columns: 1fr; }
+  .stats { grid-template-columns: 1fr 1fr; }
+  .topbar { padding: 10px 14px; }
+  #user-pick .pick-name { max-width: 78px; }
+  .actionbar { margin: 16px -16px -100px; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
+  .bottomnav {
+    display: flex; flex: 0 0 auto; border-top: 1px solid var(--line); background: var(--surface);
+    padding: 7px 6px calc(7px + env(safe-area-inset-bottom));
+  }
+  .bottomnav button {
+    flex: 1 1 0; display: flex; flex-direction: column; align-items: center; gap: 3px;
+    padding: 5px 2px; border-radius: 11px; color: var(--muted); font-size: 10.5px; font-weight: 620;
+    transition: color .14s, background .14s; min-width: 0;
+  }
+  .bottomnav button span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bottomnav button.is-active { color: var(--accent); }
+  .bottomnav button.is-active .bn-ic { background: var(--accent-soft); }
+  .bn-ic { width: 44px; height: 25px; border-radius: 999px; display: grid; place-items: center; transition: background .16s; }
+  .modal { width: calc(100% - 24px); max-height: calc(100% - 32px); border-radius: 20px; }
+  .modal-foot { flex-direction: column-reverse; }
+  .modal-foot .btn { width: 100%; }
+  .card-head { padding: 13px 14px; }
+  .card-body { padding: 14px; }
+  .hide-sm { display: none !important; }
+  .userpick select { max-width: 88px; }
+  table.tbl th, table.tbl td { padding: 9px 11px; }
+}
+@container app (max-width: 520px) {
+  .stats { grid-template-columns: 1fr 1fr; }
+  .topbar-actions { gap: 0; }
+  /* claw back every pixel so the venue name — the thing that tells you which
+     site you're looking at — is the one item that never gets truncated */
+  #user-pick .pick-name, #user-pick .pick-chev, .pick-sub, .topbar-spacer { display: none; }
+  #user-pick { padding: 3px; }
+  .iconbtn { width: 32px; height: 32px; }
+  #venue-pick { flex: 1 1 auto; min-width: 0; }
+  #venue-pick .pick-name { max-width: none; }
+  .topbar { gap: 4px; padding: 10px 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+</style>
+</head>
+<body>
+
+<div class="viewport" id="viewport">
+  <div class="frame" id="frame">
+    <div class="app" id="app">
+
+      <div class="statusbar" id="statusbar">
+        <span id="sb-time">9:41</span>
+        <span class="sb-right">
+          <svg width="16" height="11" viewBox="0 0 16 11" fill="currentColor" aria-hidden="true"><rect x="0" y="7" width="3" height="4" rx="1"/><rect x="4.3" y="5" width="3" height="6" rx="1"/><rect x="8.6" y="2.5" width="3" height="8.5" rx="1"/><rect x="12.9" y="0" width="3" height="11" rx="1" opacity=".35"/></svg>
+          <svg width="24" height="12" viewBox="0 0 24 12" fill="none" aria-hidden="true"><rect x=".6" y=".6" width="19.5" height="10.8" rx="3" stroke="currentColor" stroke-opacity=".4"/><rect x="2.2" y="2.2" width="14" height="7.6" rx="1.8" fill="currentColor"/><path d="M21.6 4v4c1-.4 1.5-1 1.5-2s-.5-1.6-1.5-2z" fill="currentColor" fill-opacity=".4"/></svg>
+        </span>
+      </div>
+
+      <header class="topbar">
+        <div class="pickwrap" id="venue-pick">
+          <div class="logo" id="venue-logo" aria-hidden="true">P</div>
+          <div class="pick-text">
+            <div class="pick-name" id="venue-name">Peachy</div>
+            <div class="pick-sub" id="venue-sub">Bar &amp; Kitchen</div>
+          </div>
+          <span class="pick-chev" id="venue-chev"></span>
+          <select id="venue-switch" aria-label="Switch venue"></select>
+        </div>
+        <div class="topbar-spacer"></div>
+        <div class="topbar-actions">
+          <button class="iconbtn" id="btn-alerts" title="Alerts" aria-label="Alerts"></button>
+          <button class="iconbtn" id="btn-theme" title="Toggle dark mode" aria-label="Toggle dark mode"></button>
+          <button class="iconbtn" id="btn-mobile" title="Toggle mobile view" aria-label="Toggle mobile view"></button>
+          <div class="pickwrap" id="user-pick">
+            <div class="avatar" id="cur-avatar">?</div>
+            <div class="pick-text"><div class="pick-name" id="cur-name">—</div></div>
+            <span class="pick-chev" id="user-chev"></span>
+            <select id="user-switch" aria-label="Switch user"></select>
+          </div>
+        </div>
+      </header>
+
+      <div class="shell">
+        <nav class="sidebar" id="sidebar" aria-label="Main"></nav>
+        <div class="content" id="content"><div class="page" id="page"></div></div>
+      </div>
+
+      <nav class="bottomnav" id="bottomnav" aria-label="Main"></nav>
+
+      <div class="modal-root" id="modal-root" role="dialog" aria-modal="true"></div>
+      <div class="toast-root" id="toast-root" aria-live="polite"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ==========================================================================
+   PEACHY — SHIFT CHECKLIST  ·  demo build
+   No backend, no auth. All state lives in localStorage under STORE_KEY.
+   Sections: icons · utils · store/seed · notifier · render · actions · init
+   ========================================================================== */
+"use strict";
+
+/* ------------------------------------------------------------------ icons */
+const P = {
+  bell:    '<path d="M6 8a6 6 0 1112 0c0 7 3 7 3 9H3c0-2 3-2 3-9"/><path d="M10.3 21a2 2 0 003.4 0"/>',
+  sun:     '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  moon:    '<path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/>',
+  phone:   '<rect x="6" y="2" width="12" height="20" rx="3"/><path d="M11 18.5h2"/>',
+  desktop: '<rect x="2" y="3" width="20" height="13" rx="2"/><path d="M8 21h8M12 16v5"/>',
+  check:   '<path d="M20 6L9 17l-5-5"/>',
+  home:    '<path d="M3 10.5L12 3l9 7.5"/><path d="M5 9.6V20h14V9.6"/>',
+  list:    '<path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/>',
+  users:   '<path d="M16 20v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 20v-2a4 4 0 00-3-3.9"/><path d="M16 3.1a4 4 0 010 7.8"/>',
+  clock:   '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 1.9"/>',
+  cog:     '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.6 1.6 0 00-1.8-.3 1.6 1.6 0 00-1 1.5V21a2 2 0 11-4 0v-.1A1.6 1.6 0 008 19.4a1.6 1.6 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.6 1.6 0 00.3-1.8 1.6 1.6 0 00-1.5-1H2a2 2 0 110-4h.1A1.6 1.6 0 003.6 8a1.6 1.6 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.6 1.6 0 001.8.3H8a1.6 1.6 0 001-1.5V2a2 2 0 114 0v.1a1.6 1.6 0 001 1.5 1.6 1.6 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.6 1.6 0 00-.3 1.8V8a1.6 1.6 0 001.5 1H22a2 2 0 110 4h-.1a1.6 1.6 0 00-1.5 1z"/>',
+  plus:    '<path d="M12 5v14M5 12h14"/>',
+  trash:   '<path d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/>',
+  pencil:  '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/>',
+  up:      '<path d="M18 15l-6-6-6 6"/>',
+  down:    '<path d="M6 9l6 6 6-6"/>',
+  right:   '<path d="M9 18l6-6-6-6"/>',
+  dl:      '<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>',
+  mail:    '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2.5 6.5L12 13l9.5-6.5"/>',
+  sms:     '<path d="M21 11.5a8.4 8.4 0 01-9 8.4 9 9 0 01-4.2-1L3 20l1.2-4.5A8.4 8.4 0 0112 3a8.4 8.4 0 019 8.5z"/>',
+  warn:    '<path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L14.7 3.9a2 2 0 00-3.4 0z"/><path d="M12 9v4M12 17h.01"/>',
+  x:       '<path d="M18 6L6 18M6 6l12 12"/>',
+  sunrise: '<path d="M17 18a5 5 0 00-10 0"/><path d="M12 2v6M4.2 10.2l1.4 1.4M1 18h2M21 18h2M18.4 11.6l1.4-1.4M23 22H1"/><path d="M8 6l4-4 4 4"/>',
+  nightly: '<path d="M17 18a5 5 0 00-10 0"/><path d="M12 9V3M4.2 10.2l1.4 1.4M1 18h2M21 18h2M18.4 11.6l1.4-1.4M23 22H1"/><path d="M16 5l-4 4-4-4"/>',
+  play:    '<path d="M6 4l14 8-14 8z"/>',
+  reset:   '<path d="M3 12a9 9 0 109-9 9 9 0 00-6.4 2.6L3 8"/><path d="M3 3v5h5"/>',
+  info:    '<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>',
+  chart:   '<path d="M3 3v18h18"/><path d="M7 14l3.5-4 3 3L21 6"/>',
+  flag:    '<path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V4s-1 1-4 1-5-2-8-2-4 1-4 1z"/><path d="M4 22v-7"/>',
+  note:    '<path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h4"/>',
+  send:    '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/>',
+  lock:    '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/>',
+  bolt:    '<path d="M13 2L3 14h9l-1 8 10-12h-9z"/>',
+  minus:   '<path d="M6 12h12"/>'
+};
+function ic(name, size = 18, sw = 1.9) {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[name] || ''}</svg>`;
+}
+
+/* ------------------------------------------------------------------ utils */
+const $  = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const uid = (p = 'id') => p + '_' + Math.random().toString(36).slice(2, 9);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
+
+const dayKey = d => { const x = d || new Date(); return `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,'0')}-${String(x.getDate()).padStart(2,'0')}`; };
+const parseKey = k => { const [y,m,d] = k.split('-').map(Number); return new Date(y, m-1, d); };
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate()+n); return x; };
+const fmtDate = k => parseKey(k).toLocaleDateString(undefined, { weekday:'long', day:'numeric', month:'long' });
+const fmtDateShort = k => parseKey(k).toLocaleDateString(undefined, { weekday:'short', day:'numeric', month:'short' });
+const fmtTime = iso => iso ? new Date(iso).toLocaleTimeString(undefined, { hour:'numeric', minute:'2-digit' }) : '';
+const fmtDT = iso => iso ? new Date(iso).toLocaleString(undefined, { day:'numeric', month:'short', hour:'numeric', minute:'2-digit' }) : '';
+const initials = n => String(n||'?').trim().split(/\s+/).slice(0,2).map(w => w[0]).join('').toUpperCase();
+const pct = (a, b) => b === 0 ? 100 : Math.round((a / b) * 100);
+const plural = (n, s, p) => `${n} ${n === 1 ? s : (p || s + 's')}`;
+
+const LIST_META = {
+  open:  { key:'open',  label:'Open',  full:'Open Shift',  icon:'sunrise', verb:'opening' },
+  close: { key:'close', label:'Close', full:'Close Shift', icon:'nightly', verb:'closing' }
+};
+const REASONS = {
+  blocked: { label:'Blocked',        chip:'chip-danger', needsDetail:true,  sub:'Something stopped this getting done' },
+  na:      { label:'Not applicable', chip:'chip-info',   needsDetail:false, sub:"Didn't apply to today" },
+  skipped: { label:'Ran out of time',chip:'chip-warn',   needsDetail:false, sub:'No time left in the shift' }
+};
+
+/* ------------------------------------------------------------- store/seed */
+const STORE_KEY = 'peachy.shift.v2';
+let S = null;
+
+/* ---- venue palettes ---------------------------------------------------- */
+const ACCENTS = {
+  terracotta: { label:'Terracotta', light:['#B8451F','#C8532B','#FFFFFF'], dark:['#F08A5D','#F79C72','#2A1006'] },
+  teal:       { label:'Teal',       light:['#0F766E','#12857B','#FFFFFF'], dark:['#5FC9BC','#7BD8CD','#03302B'] },
+  berry:      { label:'Berry',      light:['#9B2C5E','#B03570','#FFFFFF'], dark:['#F187B0','#F6A0C2','#33091C'] },
+  olive:      { label:'Olive',      light:['#3F6212','#4C7615','#FFFFFF'], dark:['#A8D157','#BADE79','#182505'] },
+  indigo:     { label:'Indigo',     light:['#4338CA','#4F46E5','#FFFFFF'], dark:['#A5B4FC','#BFC9FD','#1A1650'] },
+  graphite:   { label:'Graphite',   light:['#44403C','#57534E','#FFFFFF'], dark:['#C4BDB6','#D6D0CA','#22201E'] }
+};
+const accentOf = key => ACCENTS[key] || ACCENTS.terracotta;
+
+/* ---- seed checklists, one pair per venue ------------------------------- */
+const SH_OPEN = [
+  ['Unlock, disarm alarm, walk the floor', 'Check nothing was disturbed overnight; log anything odd.', false],
+  ['Cool-room + fridge temperature log', 'All units must read 5°C or below. Record on the sheet by the pass.', true],
+  ['Line check — taste and date-check all prep', 'Anything past date goes in the bin, not on the pass.', true],
+  ['Flush beer lines and pull a test pour', 'First pour from every tap. Dump until clear and cold.', false],
+  ['Restock bar spirits, mixers and garnish', 'Back-bar to par. Cut citrus fresh — no carry-over.', false],
+  ['Coffee machine on, grinder dialled in', 'Pull a shot, check the timing, adjust for the weather.', false],
+  ['Count the till float to $500', 'Two people count. Discrepancy over $5 goes to the manager.', true],
+  ['Set the dining room', 'Tables squared, cutlery polished, candles topped, menus wiped.', false],
+  ['Check and stock the toilets', 'Paper, soap, hand towel, bin. Quick mop if needed.', false],
+  ['Write the specials board and update the POS', 'Match the board to what the kitchen actually has.', false],
+  ['Set music and lighting for service', 'Opening playlist, lights to 60%, blinds down on the west side.', false]
+];
+const SH_CLOSE = [
+  ['Last call announced, all tabs closed out', 'No open tabs left on the POS at close.', true],
+  ['Rinse beer taps, cap and wipe spirit bottles', 'Nozzles soaked, pourers rinsed.', false],
+  ['Empty and drain ice wells, wipe down the bar', 'Wells empty or they stink by morning.', false],
+  ['Run and put away all glassware', 'Nothing left in the machine overnight.', false],
+  ['Kitchen cleaned, grill and fryers off at the wall', 'Filters soaking, surfaces sanitised, gas off.', true],
+  ['Log cool-room temps, label and date all prep', 'Every container labelled or it gets binned tomorrow.', true],
+  ['Bins out, cardboard flattened and stacked', 'Cardboard to the recycling cage, lids closed.', false],
+  ['Sweep and mop all floors', 'Bar, dining room, entry mat, kitchen last.', false],
+  ['Reconcile POS, run the Z-report, cash to safe', 'Take a photo of the Z-report for the manager.', true],
+  ["Leave tomorrow's prep list for the chef", 'On the pass, under the magnet.', false],
+  ['Gas off, lights off, alarm set, doors locked', 'Final walk-through before you set the alarm.', true]
+];
+const BD_OPEN = [
+  ['Unlock, disarm alarm, check the deck', 'Look for overnight damage and anything the wind moved.', false],
+  ['Fridge and esky temperature log', 'Every unit at 5°C or below before a single drink goes out.', true],
+  ['Fill ice bins, check the drains run clear', 'Blocked drain floods the deck by midday.', false],
+  ['Umbrellas up, deck furniture set and wiped', 'Check every umbrella base is weighted.', true],
+  ['Sand mats out, entry hosed down', 'Both entrances. Sand inside is a slip hazard.', false],
+  ['Frozen cocktail machines on and running', 'Give them 40 minutes before service.', false],
+  ['Count the till float to $400', 'Count it with a second person on the deck.', true],
+  ['Stock the sunscreen station and water jugs', 'Free water out front by 11am, no exceptions.', false]
+];
+const BD_CLOSE = [
+  ['Last call announced, all tabs closed out', 'No open tabs left on the POS at close.', true],
+  ['Umbrellas down, furniture stacked and strapped', 'Strapped even on a calm night — the southerly comes through.', true],
+  ['Ice bins emptied and drained', 'Hose them out and leave the lids up.', false],
+  ['Frozen machines rinsed and set to standby', 'Rinse cycle, then standby. Do not switch off at the wall.', false],
+  ['Deck swept, sand mats shaken out', 'Sweep the sand off the boards or it grinds them down.', false],
+  ['Fridges restocked for tomorrow', 'Rotate stock, oldest to the front.', false],
+  ['Reconcile POS, run the Z-report, cash to safe', 'Photo of the Z-report to the manager.', true],
+  ['Roller shutters down, alarm set, gate locked', 'Check the beach gate as well as the street door.', true]
+];
+const LP_OPEN = [
+  ['Unlock, disarm alarm, air the room', 'Open up for twenty minutes before anyone arrives.', false],
+  ['Cellar and wine fridge temperature log', 'Cellar 13–15°C, whites 7–9°C. Log both.', true],
+  ['Check by-the-glass bottles for oxidation', 'Taste every open bottle. If it is tired, it does not go out.', true],
+  ['Coravin argon level and needle check', 'Swap the capsule if it is below a quarter.', false],
+  ['Date-check the cheese and charcuterie fridge', 'Anything unlabelled gets binned.', true],
+  ['Polish glassware, rinse decanters', 'Hold every glass up to the light before it goes on the rack.', false],
+  ['Count the till float to $300', 'Two people count.', false],
+  ['Set candles, menus and the specials card', 'Handwrite the specials card fresh each day.', false]
+];
+const LP_CLOSE = [
+  ['Last call announced, all tabs closed out', 'No open tabs left on the POS at close.', true],
+  ['By-the-glass bottles gassed and re-corked', 'Argon into every open bottle before it goes back in.', true],
+  ['Decanters rinsed and left to drain', 'Hot water only, never detergent.', false],
+  ['Cheese wrapped, dated and back in the fridge', 'Fresh paper every night.', true],
+  ['Glassware polished and racked', 'Nothing left in the machine overnight.', false],
+  ['Bar wiped down, bins out, bottles to recycling', 'Glass out the back gate, quietly — the neighbours complain.', false],
+  ['Reconcile POS, run the Z-report, cash to safe', 'Photo of the Z-report to the manager.', true],
+  ['Lights off, alarm set, doors locked', 'Final walk-through of the cellar before you set it.', true]
+];
+
+const VENUE_SEED = [
+  { name:'Peachy Surry Hills', sub:'Bar & Kitchen',      accent:'terracotta', cutoff:'23:30', open:SH_OPEN, close:SH_CLOSE, todayDone:8 },
+  { name:'Peachy Bondi',       sub:'Beach Bar',          accent:'teal',       cutoff:'23:00', open:BD_OPEN, close:BD_CLOSE, todayDone:6 },
+  { name:'Little Peach',       sub:'Wine Bar · Newtown', accent:'berry',      cutoff:'23:45', open:LP_OPEN, close:LP_CLOSE, todayDone:4 }
+];
+
+/* name, email, phone, venue indexes, active */
+const SEED_STAFF = [
+  ['Mia Tran',      'mia.tran@peachy.com.au',     '+61 412 004 118', [0,1],   true],
+  ['Jordan Ellis',  'jordan.ellis@peachy.com.au', '+61 412 771 903', [0],     true],
+  ['Priya Nair',    'priya.nair@peachy.com.au',   '+61 413 552 640', [0,2],   true],
+  ['Tom Kowalski',  'tom.k@peachy.com.au',        '+61 402 318 774', [1],     true],
+  ['Sofia Ramos',   'sofia.ramos@peachy.com.au',  '+61 431 890 226', [0,1,2], true],
+  ['Noah Adeyemi',  'noah.a@peachy.com.au',       '+61 438 205 617', [1,2],   true],
+  ['Dan Whitfield', 'dan.w@peachy.com.au',        '+61 405 662 019', [2],     false]
+];
+
+function tplFrom(rows) {
+  return rows.map(([title, detail, critical]) => ({ id: uid('t'), title, detail, critical }));
+}
+function blankList() {
+  return { tasks: [], submitted: false, submittedBy: null, submittedAt: null, completeNotified: false };
+}
+function makeDay(key, roster, vid) {
+  const v = vid || V().id;
+  const d = { date: key, roster: roster || { open: [], close: [] },
+              lists: { open: blankList(), close: blankList() }, reported: false, reportedAt: null };
+  ['open','close'].forEach(k => { d.lists[k].tasks = S.templates[v][k].map(instanceFromTemplate); });
+  return d;
+}
+function instanceFromTemplate(t) {
+  return { id: uid('x'), tplId: t.id, title: t.title, detail: t.detail, critical: !!t.critical,
+           source: 'template', addedBy: null, status: 'pending', doneBy: null, doneAt: null, note: '', reason: '' };
+}
+function newVenue(name, sub, accent) {
+  const v = { id: uid('v'), name, sub, accent: accent || 'terracotta',
+              managerEmail: V() ? V().managerEmail : '', managerPhone: V() ? V().managerPhone : '',
+              cutoff: '23:30', notifyComplete: true, notifyEndOfDay: true, channelEmail: true, channelSms: true };
+  S.venues.push(v);
+  S.templates[v.id] = { open: [], close: [] };
+  S.days[v.id] = {};
+  S.users.filter(u => u.role === 'manager').forEach(u => u.venues.push(v.id));
+  return v;
+}
+
+function defaultState() {
+  const st = { version: 2, venues: [], users: [], templates: {}, days: {}, notifications: [],
+               session: { userId: null, venueId: null } };
+  S = st;
+
+  VENUE_SEED.forEach(v => {
+    const id = uid('v');
+    st.venues.push({ id, name: v.name, sub: v.sub, accent: v.accent, cutoff: v.cutoff,
+      managerEmail: 'abhishek.bhardwaj@theoc.ai', managerPhone: '+61 400 111 222',
+      notifyComplete: true, notifyEndOfDay: true, channelEmail: true, channelSms: true });
+    st.templates[id] = { open: tplFrom(v.open), close: tplFrom(v.close) };
+    st.days[id] = {};
+  });
+
+  const mgr = { id: uid('u'), name: 'Abhishek Bhardwaj', role: 'manager',
+                email: 'abhishek.bhardwaj@theoc.ai', phone: '+61 400 111 222', active: true,
+                venues: st.venues.map(v => v.id) };
+  st.users.push(mgr);
+  SEED_STAFF.forEach(([name, email, phone, vix, active]) => {
+    st.users.push({ id: uid('u'), name, role: 'employee', email, phone, active,
+                    venues: vix.map(i => st.venues[i].id) });
+  });
+  st.session.userId = mgr.id;
+  st.session.venueId = st.venues[0].id;
+
+  st.venues.forEach((v, vi) => {
+    const crewPool = st.users.filter(u => u.role === 'employee' && u.active && u.venues.includes(v.id));
+    const pick = n => crewPool.slice().sort(() => Math.random() - .5).slice(0, Math.min(n, crewPool.length)).map(u => u.id);
+
+    // six days of history so the manager views open onto something real
+    for (let i = 6; i >= 1; i--) {
+      const key = dayKey(addDays(new Date(), -i));
+      const day = makeDay(key, { open: pick(2), close: pick(3) }, v.id);
+      ['open','close'].forEach(lk => {
+        const L = day.lists[lk], crew = day.roster[lk], base = parseKey(key);
+        L.tasks.forEach((t, idx) => {
+          const miss = Math.random() < (lk === 'close' ? 0.11 : 0.07);
+          if (miss && !t.critical) {
+            const rs = ['skipped','na','blocked'][Math.floor(Math.random()*3)];
+            t.status = rs;
+            t.reason = rs === 'blocked' ? 'Supplier delivery never turned up.'
+                     : rs === 'na' ? 'Not needed on a quiet Tuesday.'
+                     : 'Slammed until close, ran out of time.';
+          } else {
+            const at = new Date(base);
+            at.setHours(lk === 'open' ? 9 : 22, 6 + idx * 4 + Math.floor(Math.random()*5), 0, 0);
+            t.status = 'done'; t.doneBy = crew[Math.floor(Math.random()*crew.length)]; t.doneAt = at.toISOString();
+          }
+        });
+        const sub = new Date(base); sub.setHours(lk === 'open' ? 11 : 23, lk === 'open' ? 15 : 41, 0, 0);
+        L.submitted = true; L.submittedBy = crew[crew.length - 1];
+        L.submittedAt = sub.toISOString(); L.completeNotified = true;
+      });
+      day.reported = true;
+      day.reportedAt = day.lists.close.submittedAt;
+      st.days[v.id][key] = day;
+    }
+
+    // today, mid-service: open list part-way, close list untouched
+    const tk = dayKey();
+    const tday = makeDay(tk, { open: pick(2), close: pick(3) }, v.id);
+    const crew = tday.roster.open;
+    tday.lists.open.tasks.forEach((t, i) => {
+      if (i < VENUE_SEED[vi].todayDone && crew.length) {
+        const at = new Date(); at.setHours(9, 10 + i * 5, 0, 0);
+        t.status = 'done'; t.doneBy = crew[i % crew.length]; t.doneAt = at.toISOString();
+      }
+    });
+    st.days[v.id][tk] = tday;
+  });
+  return st;
+}
+
+function load() {
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (raw) { S = JSON.parse(raw); if (S && S.version === 2 && S.venues && S.venues.length) { repair(); return; } }
+  } catch (e) { console.warn('[store] could not read saved state, reseeding', e); }
+  S = defaultState();
+  save();
+}
+/* guards against a half-written state (venue deleted, user added by hand, etc.) */
+function repair() {
+  S.venues.forEach(v => { S.templates[v.id] = S.templates[v.id] || { open: [], close: [] }; S.days[v.id] = S.days[v.id] || {}; });
+  S.users.forEach(u => {
+    if (!Array.isArray(u.venues)) u.venues = S.venues.map(v => v.id);
+    if (u.role === 'manager') u.venues = S.venues.map(v => v.id);
+    u.venues = u.venues.filter(id => S.venues.some(v => v.id === id));
+  });
+  if (!venue(S.session.venueId)) S.session.venueId = (S.venues[0] || {}).id;
+}
+function save() { try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); } catch (e) { console.warn('[store] save failed', e); } }
+
+/* selectors */
+const user = id => S.users.find(u => u.id === id) || null;
+const me = () => user(S.session.userId) || S.users[0];
+const isMgr = () => (me() || {}).role === 'manager';
+const uname = id => (user(id) || {}).name || 'Unknown';
+
+const venue  = id => S.venues.find(v => v.id === id) || null;
+const V      = () => venue(S.session.venueId) || S.venues[0];
+const TPL    = vid => S.templates[vid || V().id];
+const DAYS   = vid => S.days[vid || V().id];
+/* venues a given user is allowed to see — managers see all */
+const venuesFor = u => !u ? [] : u.role === 'manager' ? S.venues.slice() : S.venues.filter(v => (u.venues || []).includes(v.id));
+/* keep the selected venue legal for whoever is signed in */
+function ensureVenue() {
+  const allowed = venuesFor(me());
+  if (!allowed.length) return;
+  if (!allowed.some(v => v.id === S.session.venueId)) S.session.venueId = allowed[0].id;
+}
+function today(vid) {
+  const v = vid || V().id, k = dayKey();
+  if (!S.days[v][k]) { S.days[v][k] = makeDay(k, { open: [], close: [] }, v); save(); }
+  return S.days[v][k];
+}
+
+function listStats(L) {
+  const total = L.tasks.length;
+  const done = L.tasks.filter(t => t.status === 'done').length;
+  const flagged = L.tasks.filter(t => t.status !== 'done' && t.status !== 'pending').length;
+  const pending = total - done - flagged;
+  return { total, done, flagged, pending, pct: pct(done, total), complete: done === total && total > 0 };
+}
+function dayStats(day) {
+  const a = listStats(day.lists.open), b = listStats(day.lists.close);
+  const total = a.total + b.total, done = a.done + b.done;
+  return { total, done, missed: total - done, pct: pct(done, total), open: a, close: b };
+}
+/* ==========================================================================
+   NOTIFICATIONS
+   --------------------------------------------------------------------------
+   Everything the app "sends" flows through Notifier.deliver(). In this demo it
+   only logs and stores the message so it can be previewed in the Alerts tab.
+
+   >>> TO GO LIVE: replace the body of deliver() with a single call to your
+   >>> backend and nothing else in this file has to change. e.g.
+   >>>
+   >>>   async deliver(msg) {
+   >>>     const r = await fetch('/api/notify', {
+   >>>       method: 'POST',
+   >>>       headers: { 'Content-Type': 'application/json' },
+   >>>       body: JSON.stringify(msg)          // { channel, to, subject, html, text }
+   >>>     });
+   >>>     return r.json();
+   >>>   }
+   >>>
+   >>> Server side: SendGrid/Postmark for channel==='email', Twilio for 'sms'.
+   >>> The cutoff-time report should also exist as a scheduled Cloud Function so
+   >>> it fires even when no browser is open.
+   ========================================================================== */
+const Notifier = {
+  async deliver(msg) {
+    console.info(`[Notifier · STUB] ${msg.channel.toUpperCase()} → ${msg.to} :: ${msg.subject}`, msg);
+    return { ok: true, stub: true, sentAt: new Date().toISOString() };
+  },
+
+  /* every venue has its own recipients and its own channel switches */
+  channels(v) {
+    const out = [];
+    if (v.channelEmail) out.push({ channel: 'email', to: v.managerEmail });
+    if (v.channelSms)   out.push({ channel: 'sms',   to: v.managerPhone });
+    return out;
+  },
+
+  push(kind, built, meta) {
+    const m = meta || {};
+    const v = venue(m.venueId) || V();
+    const chans = this.channels(v);
+    if (!chans.length) { toast(`No notification channel is on for ${v.name}`, 'warn'); return []; }
+    const made = [];
+    chans.forEach(c => {
+      const rec = {
+        id: uid('n'), at: new Date().toISOString(), kind,
+        venueId: v.id, venueName: v.name,
+        channel: c.channel, to: c.to,
+        subject: built.subject, html: built.html, text: built.text,
+        read: false, dayKey: m.dayKey || dayKey(), listKey: m.listKey || null
+      };
+      S.notifications.unshift(rec);
+      made.push(rec);
+      this.deliver(rec);
+    });
+    save();
+    return made;
+  }
+};
+
+/* ------------------------------------------------------------ message copy */
+function statusChipLabel(t) {
+  if (t.status === 'done') return 'Done';
+  if (t.status === 'pending') return 'Not done';
+  return REASONS[t.status] ? REASONS[t.status].label : 'Not done';
+}
+function taskLineHtml(t) {
+  if (t.status === 'done') {
+    return `<li class="done">${esc(t.title)} <span style="color:var(--muted)">— ${esc(uname(t.doneBy))}, ${esc(fmtTime(t.doneAt))}</span>${
+      t.note ? `<br><span style="color:var(--muted)">“${esc(t.note)}”</span>` : ''}</li>`;
+  }
+  const why = t.reason ? ` — ${esc(t.reason)}` : '';
+  return `<li class="miss">${esc(t.title)} <span style="color:var(--danger)">[${esc(statusChipLabel(t))}${
+    t.critical ? ' · critical' : ''}]</span><span style="color:var(--muted)">${why}</span></li>`;
+}
+function listBlockHtml(day, lk) {
+  const L = day.lists[lk], st = listStats(L), m = LIST_META[lk];
+  const sub = L.submitted ? `submitted by ${esc(uname(L.submittedBy))} at ${esc(fmtTime(L.submittedAt))}` : 'not submitted';
+  return `<h4 style="margin-top:14px">${m.full} — ${st.done}/${st.total}</h4>
+    <p style="color:var(--muted);margin:0 0 4px">${sub}</p>
+    <ul>${L.tasks.map(taskLineHtml).join('')}</ul>`;
+}
+function buildListComplete(v, day, lk) {
+  const L = day.lists[lk], m = LIST_META[lk], st = listStats(L);
+  const who = [...new Set(L.tasks.map(t => t.doneBy).filter(Boolean))].map(uname);
+  return {
+    subject: `✅ ${v.name} — ${m.full} checklist complete, ${fmtDateShort(day.date)}`,
+    html: `<h4>All ${m.label.toLowerCase()} tasks are done</h4>
+      <p style="color:var(--muted);margin:0 0 10px">${esc(fmtDate(day.date))} · ${esc(v.name)}</p>
+      <p><b>${st.done} of ${st.total}</b> tasks ticked off by ${esc(who.join(', ') || 'the team')}.</p>
+      <ul>${L.tasks.map(taskLineHtml).join('')}</ul>`,
+    text: `${v.name}: ${m.full} checklist is complete — all ${st.total} tasks done by ${who.join(', ') || 'the team'}. ${fmtDateShort(day.date)}.`
+  };
+}
+function buildEndOfDay(v, day, auto) {
+  const d = dayStats(day);
+  const missed = [...day.lists.open.tasks, ...day.lists.close.tasks].filter(t => t.status !== 'done');
+  const crit = missed.filter(t => t.critical);
+  return {
+    subject: `${v.name} — end of day, ${fmtDateShort(day.date)} (${d.done}/${d.total} done)`,
+    html: `<h4>End of day summary</h4>
+      <p style="color:var(--muted);margin:0 0 10px">${esc(fmtDate(day.date))} · ${esc(v.name)}${auto ? ' · auto-sent at cutoff' : ''}</p>
+      <p style="font-size:15px"><b>${d.done} of ${d.total}</b> tasks completed (${d.pct}%).${
+        missed.length ? ` <span style="color:var(--danger)"><b>${missed.length}</b> left undone${crit.length ? `, ${crit.length} of them critical` : ''}.</span>` : ' Nothing left undone.'}</p>
+      ${listBlockHtml(day, 'open')}
+      ${listBlockHtml(day, 'close')}`,
+    text: `${v.name} end of day ${fmtDateShort(day.date)}: ${d.done}/${d.total} tasks done (${d.pct}%).${
+      missed.length
+        ? ` Left undone: ${missed.slice(0, 3).map(t => t.title).join('; ')}${missed.length > 3 ? `; +${missed.length - 3} more` : ''}.${
+            crit.length ? ` ${plural(crit.length, 'critical task')} missed.` : ''} Full list in your email.`
+        : ' Everything completed.'}`
+  };
+}
+
+/* ----------------------------------------------------------- trigger rules
+   Runs across EVERY venue, not just the one on screen — a manager watching
+   Bondi still gets told when Surry Hills finishes its close list. In
+   production this whole function lives in a scheduled backend job.
+   -------------------------------------------------------------------------- */
+function runTriggers(opts) {
+  const o = opts || {};
+  let fired = 0;
+  const here = V().id;
+
+  S.venues.forEach(v => {
+    const day = today(v.id);
+    const tag = v.id === here ? '' : ` · ${v.name}`;
+
+    // 1. a list has every task ticked off -> notify straight away
+    if (v.notifyComplete) {
+      ['open','close'].forEach(lk => {
+        const L = day.lists[lk], st = listStats(L);
+        if (st.complete && !L.completeNotified) {
+          L.completeNotified = true;
+          Notifier.push('list-complete', buildListComplete(v, day, lk), { venueId: v.id, dayKey: day.date, listKey: lk });
+          fired++;
+          toast(`${LIST_META[lk].full} complete — manager notified${tag}`, 'ok');
+        }
+        if (!st.complete) L.completeNotified = false;   // reopened, allow it to fire again
+      });
+    }
+
+    // 2. end of day: staff submitted the close list, or the cutoff time passed
+    if (v.notifyEndOfDay && !day.reported) {
+      const submitted = day.lists.close.submitted;
+      const forced = o.forceEod && (!o.venueId || o.venueId === v.id);
+      if (submitted || cutoffPassed(v) || forced) {
+        day.reported = true;
+        day.reportedAt = new Date().toISOString();
+        const auto = !submitted && !forced;
+        Notifier.push('end-of-day', buildEndOfDay(v, day, auto), { venueId: v.id, dayKey: day.date });
+        fired++;
+        toast(`End of day summary sent to the manager${tag}`, 'ok');
+      }
+    }
+  });
+
+  if (fired) save();
+  return fired;
+}
+function cutoffPassed(v) {
+  const [h, m] = String((v || V()).cutoff || '23:30').split(':').map(Number);
+  const now = new Date();
+  return now.getHours() > h || (now.getHours() === h && now.getMinutes() >= m);
+}
+const unreadCount = () => S.notifications.filter(n => !n.read).length;
+
+/* ---------------------------------------------------------------- toasts */
+function toast(msg, tone) {
+  const root = $('#toast-root');
+  while (root.children.length >= 3) root.firstChild.remove();
+  const el = document.createElement('div');
+  el.className = 'toast';
+  const icon = tone === 'ok' ? 'check' : tone === 'warn' ? 'warn' : 'info';
+  el.innerHTML = `<span class="t-ic">${ic(icon, 16)}</span><span>${esc(msg)}</span>`;
+  root.appendChild(el);
+  setTimeout(() => { el.style.transition = 'opacity .25s, transform .25s'; el.style.opacity = '0'; el.style.transform = 'translateY(8px)'; }, 3200);
+  setTimeout(() => el.remove(), 3600);
+}
+
+/* ---------------------------------------------------------------- modals */
+let modalOnClose = null;
+function openModal(html, opts) {
+  const o = opts || {};
+  const root = $('#modal-root');
+  root.innerHTML = `<div class="scrim" data-close="1"></div>
+    <div class="modal ${o.wide ? 'wide' : ''}" role="document">${html}</div>`;
+  root.classList.add('is-open');
+  modalOnClose = o.onClose || null;
+  root.querySelector('.scrim').addEventListener('click', () => { if (!o.locked) closeModal(); });
+  if (o.after) o.after(root);
+}
+function closeModal() {
+  const root = $('#modal-root');
+  root.classList.remove('is-open');
+  root.innerHTML = '';
+  const cb = modalOnClose; modalOnClose = null;
+  if (cb) cb();
+}
+function confirmModal(title, body, confirmLabel, onYes, danger) {
+  openModal(`
+    <div class="modal-head"><div><div class="modal-title">${esc(title)}</div><div class="modal-sub">${esc(body)}</div></div></div>
+    <div class="modal-foot">
+      <button class="btn" data-x="cancel">Cancel</button>
+      <button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-x="yes">${esc(confirmLabel)}</button>
+    </div>`, {
+    after(root) {
+      root.querySelector('[data-x=cancel]').onclick = closeModal;
+      root.querySelector('[data-x=yes]').onclick = () => { closeModal(); onYes(); };
+    }
+  });
+}
+
+/* ------------------------------------------------------------------- csv */
+function csvCell(v) { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; }
+const CSV_HEAD = ['Venue','Date','List','Task','Critical','Source','Status','Completed by','Completed at','Reason / note'];
+function csvRows(v, keys) {
+  const out = [];
+  keys.forEach(k => {
+    const day = (S.days[v.id] || {})[k]; if (!day) return;
+    ['open','close'].forEach(lk => day.lists[lk].tasks.forEach(t => {
+      out.push([v.name, k, LIST_META[lk].full, t.title, t.critical ? 'Yes' : 'No',
+        t.source === 'adhoc' ? 'Added on the day' : 'Template', statusChipLabel(t),
+        t.doneBy ? uname(t.doneBy) : '', t.doneAt ? new Date(t.doneAt).toLocaleString() : '',
+        t.reason || t.note || '']);
+    }));
+  });
+  return out;
+}
+function downloadCsv(rows, filename) {
+  const blob = new Blob([rows.map(r => r.map(csvCell).join(',')).join('\n')], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = filename; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  toast('CSV downloaded', 'ok');
+}
+function exportCsv(keys, filename, vid) {
+  const v = venue(vid) || V();
+  downloadCsv([CSV_HEAD].concat(csvRows(v, keys)), filename);
+}
+function exportAllVenues() {
+  const rows = [CSV_HEAD];
+  S.venues.forEach(v => rows.push(...csvRows(v, Object.keys(S.days[v.id] || {}).sort().reverse())));
+  downloadCsv(rows, 'peachy-all-venues.csv');
+}
+
+/* ==========================================================================
+   RENDER
+   ========================================================================== */
+let R = { tab: 'today', list: 'open', historyKey: null };
+
+const NAV_MGR = [
+  { id:'today',     label:'Today',      icon:'home'  },
+  { id:'templates', label:'Checklists', icon:'list'  },
+  { id:'team',      label:'Team',       icon:'users' },
+  { id:'history',   label:'History',    icon:'clock' },
+  { id:'settings',  label:'Settings',   icon:'cog'   }
+];
+
+function ringHtml(value, size, done) {
+  const r = (size / 2) - 5, c = 2 * Math.PI * r;
+  const off = c - (clamp(value, 0, 100) / 100) * c;
+  return `<div class="ring ${done ? 'is-done' : ''}" style="width:${size}px;height:${size}px">
+    <svg width="${size}" height="${size}">
+      <circle class="track" cx="${size/2}" cy="${size/2}" r="${r}" fill="none" stroke-width="6"/>
+      <circle class="prog" cx="${size/2}" cy="${size/2}" r="${r}" fill="none" stroke-width="6"
+        stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"/>
+    </svg>
+    <div class="ring-label">${value}%</div></div>`;
+}
+function avatarHtml(id, cls) {
+  const u = user(id); if (!u) return '';
+  return `<div class="avatar ${u.role === 'manager' ? 'is-mgr' : ''} ${cls || ''}" title="${esc(u.name)}">${esc(initials(u.name))}</div>`;
+}
+function avatarStack(ids) {
+  if (!ids.length) return `<span class="tiny mut">Nobody rostered</span>`;
+  return `<div class="row" style="gap:4px;min-width:0">${ids.map(id => avatarHtml(id, 'sm')).join('')}
+    <span class="tiny mut" style="margin-left:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">${
+      ids.map(id => uname(id).split(' ')[0]).join(', ')}</span></div>`;
+}
+
+/* one task row, shared by the employee list and the manager view */
+function taskRowHtml(t, o) {
+  const opt = o || {};
+  const done = t.status === 'done';
+  const flag = t.status !== 'done' && t.status !== 'pending';
+  const cls = ['task', done ? 'is-done' : '', flag ? 'is-flag' : '', opt.locked ? 'is-locked' : ''].join(' ');
+  const tag = opt.locked ? 'div' : 'button';
+  const meta = [];
+  if (done && t.doneBy) meta.push(`<span class="row" style="gap:5px">${avatarHtml(t.doneBy, 'sm')}${esc(uname(t.doneBy).split(' ')[0])} · ${esc(fmtTime(t.doneAt))}</span>`);
+  if (flag) meta.push(`<span class="chip ${REASONS[t.status].chip}">${esc(REASONS[t.status].label)}</span>`);
+  if (t.critical) meta.push(`<span class="chip chip-accent">Critical</span>`);
+  if (t.source === 'adhoc') meta.push(`<span class="chip">Added today${t.addedBy ? ' · ' + esc(uname(t.addedBy).split(' ')[0]) : ''}</span>`);
+
+  return `<${tag} class="${cls}" ${opt.locked ? '' : `data-task="${t.id}" data-list="${opt.listKey}" type="button"`}>
+    ${t.critical ? '<span class="task-critical-mark"></span>' : ''}
+    <span class="tick">${ic(flag ? 'minus' : 'check', 15, 3)}</span>
+    <span class="task-main">
+      <span class="task-title">${esc(t.title)}</span>
+      ${t.detail ? `<span class="task-detail" style="display:block">${esc(t.detail)}</span>` : ''}
+      ${meta.length ? `<span class="task-meta">${meta.join('')}</span>` : ''}
+      ${t.reason ? `<span class="task-note" style="display:block"><b>Reason:</b> ${esc(t.reason)}</span>` : ''}
+      ${t.note ? `<span class="task-note" style="display:block"><b>Note:</b> ${esc(t.note)}</span>` : ''}
+    </span>
+    ${opt.side || ''}
+  </${tag}>`;
+}
+
+/* ------------------------------------------------------------- chrome */
+/* The venue's colour is the one thing that tells you at a glance which site
+   you're looking at, so it drives --accent and everything derived from it. */
+function applyVenueAccent() {
+  const a = accentOf(V().accent);
+  const [c, hi, ink] = document.documentElement.dataset.theme === 'dark' ? a.dark : a.light;
+  const st = document.documentElement.style;
+  st.setProperty('--accent', c);
+  st.setProperty('--accent-hi', hi);
+  st.setProperty('--accent-ink', ink);
+}
+function venueDotColor(v) {
+  const a = accentOf(v.accent);
+  return (document.documentElement.dataset.theme === 'dark' ? a.dark : a.light)[0];
+}
+
+function renderChrome() {
+  ensureVenue();
+  applyVenueAccent();
+
+  const m = me();
+  const mine = venuesFor(m);
+  const v = V();
+
+  $('#venue-name').textContent = v.name;
+  $('#venue-sub').textContent = v.sub;
+  $('#venue-logo').textContent = (v.name.match(/\b[A-Za-z]/g) || ['P']).slice(0, 1).join('').toUpperCase();
+  $('#venue-chev').innerHTML = ic('down', 14);
+  $('#venue-pick').classList.toggle('is-single', mine.length < 2);
+  $('#venue-pick').title = mine.length < 2 ? v.name : 'Switch venue';
+  $('#venue-switch').innerHTML = mine.map(x =>
+    `<option value="${x.id}" ${x.id === v.id ? 'selected' : ''}>${esc(x.name)} — ${esc(x.sub)}</option>`).join('');
+  document.title = `${v.name} — Shift Checklist`;
+
+  $('#cur-avatar').textContent = initials(m.name);
+  $('#cur-avatar').className = 'avatar ' + (m.role === 'manager' ? 'is-mgr' : '');
+  $('#cur-name').textContent = m.name.split(' ')[0];
+  $('#user-chev').innerHTML = ic('down', 14);
+  const sel = $('#user-switch');
+  sel.innerHTML = S.users.map(u =>
+    `<option value="${u.id}" ${u.id === m.id ? 'selected' : ''}>${esc(u.name)}${u.role === 'manager' ? ' (Manager)' : ''}${u.active ? '' : ' — inactive'}</option>`).join('');
+
+  const bell = $('#btn-alerts');
+  const n = unreadCount();
+  bell.innerHTML = ic('bell', 18) + (isMgr() && n ? `<span class="dot-badge">${n > 9 ? '9+' : n}</span>` : '');
+  bell.style.display = isMgr() ? '' : 'none';
+  bell.classList.toggle('is-on', R.tab === 'alerts');
+
+  $('#btn-theme').innerHTML = ic(document.documentElement.dataset.theme === 'dark' ? 'sun' : 'moon', 18);
+  const mob = document.body.classList.contains('mobile-view');
+  $('#btn-mobile').innerHTML = ic(mob ? 'desktop' : 'phone', 18);
+  $('#btn-mobile').classList.toggle('is-on', mob);
+  $('#btn-mobile').title = mob ? 'Back to desktop view' : 'Switch to mobile view';
+
+  const items = isMgr() ? NAV_MGR : [];
+  const day = today();
+  const counts = { today: listStats(day.lists.open).pending + listStats(day.lists.close).pending };
+
+  $('#sidebar').style.display = items.length ? '' : 'none';
+  $('#sidebar').innerHTML = items.length ? `
+    <div class="nav-label">Manager</div>
+    ${items.map(i => `<button class="navitem ${R.tab === i.id ? 'is-active' : ''}" data-tab="${i.id}">
+        ${ic(i.icon, 18)}<span>${i.label}</span>
+        ${i.id === 'today' && counts.today ? `<span class="count">${counts.today}</span>` : ''}
+      </button>`).join('')}
+    <div class="sidebar-foot">
+      <button class="navitem" data-tab="alerts">${ic('mail', 18)}<span>Alerts</span>
+        ${unreadCount() ? `<span class="count" style="color:var(--accent)">${unreadCount()}</span>` : ''}</button>
+    </div>` : '';
+
+  const bn = $('#bottomnav');
+  bn.style.display = items.length ? '' : 'none';
+  bn.innerHTML = items.map(i => `<button class="${R.tab === i.id ? 'is-active' : ''}" data-tab="${i.id}">
+      <span class="bn-ic">${ic(i.icon, 18)}</span><span>${i.label}</span></button>`).join('');
+}
+
+function render() {
+  renderChrome();
+  const page = $('#page');
+  let html = '';
+  if (!isMgr())                     html = pageEmployee();
+  else if (R.tab === 'today')       html = pageManagerToday();
+  else if (R.tab === 'templates')   html = pageTemplates();
+  else if (R.tab === 'team')        html = pageTeam();
+  else if (R.tab === 'history')     html = pageHistory();
+  else if (R.tab === 'alerts')      html = pageAlerts();
+  else if (R.tab === 'settings')    html = pageSettings();
+  page.innerHTML = html;
+}
+
+/* ==========================================================================
+   EMPLOYEE VIEW
+   ========================================================================== */
+function pageEmployee() {
+  const day = today();
+  const lk = R.list, L = day.lists[lk], m = LIST_META[lk], st = listStats(L);
+  const rostered = day.roster[lk].includes(me().id);
+  const locked = L.submitted;
+  const hour = new Date().getHours();
+  const greet = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+
+  const segs = ['open','close'].map(k => {
+    const s = listStats(day.lists[k]);
+    return `<button data-list="${k}" class="${k === lk ? 'is-active' : ''}">
+      ${ic(LIST_META[k].icon, 17)}<span>${LIST_META[k].label}</span>
+      <span class="seg-count">${s.done}/${s.total}</span></button>`;
+  }).join('');
+
+  let banner = '';
+  if (locked) {
+    banner = `<div class="banner banner-ok">${ic('check', 17)}<div>
+      <b>Shift submitted.</b> ${esc(uname(L.submittedBy))} sent this list to the manager at ${esc(fmtTime(L.submittedAt))}. It's now read-only.</div></div>`;
+  } else if (!rostered) {
+    banner = `<div class="banner banner-warn">${ic('info', 17)}<div class="row-b" style="width:100%">
+      <span>You're not rostered on the ${esc(m.label.toLowerCase())} shift today.</span>
+      <button class="btn btn-sm" data-act="cover" data-list="${lk}">I'm covering</button></div></div>`;
+  }
+
+  const rows = L.tasks.length
+    ? L.tasks.map(t => taskRowHtml(t, { listKey: lk, locked: locked || !me().active })).join('')
+    : `<div class="empty"><div class="empty-icon">${ic('list', 20)}</div>
+        <div>No ${esc(m.label.toLowerCase())} tasks set for today.</div>
+        <div class="tiny mut" style="margin-top:4px">Your manager hasn't published this list yet.</div></div>`;
+
+  const bar = locked
+    ? `<div class="actionbar"><div class="ab-text">
+         <div class="row" style="gap:8px"><span class="chip chip-ok chip-dot">Submitted</span>
+         <span class="tiny mut">${st.done} of ${st.total} done${st.flagged ? ` · ${st.flagged} flagged` : ''}</span></div></div>
+         <button class="btn btn-sm" data-act="reopen" data-list="${lk}">Reopen list</button></div>`
+    : `<div class="actionbar">
+         <div class="ab-text">
+           <div class="row-b" style="margin-bottom:6px">
+             <span class="tiny" style="font-weight:640">${st.done} of ${st.total} done</span>
+             <span class="tiny mut">${st.pending ? plural(st.pending, 'left') : 'All clear'}</span>
+           </div>
+           <div class="bar ${st.complete ? 'is-done' : ''}"><i style="width:${st.pct}%"></i></div>
+         </div>
+         <button class="btn btn-primary" data-act="review" data-list="${lk}">${ic('send', 16)} Submit shift</button>
+       </div>`;
+
+  return `
+    <div class="page-head">
+      <div class="page-title">${greet}, ${esc(me().name.split(' ')[0])}</div>
+      <div class="page-sub">${esc(fmtDate(day.date))} · ${esc(V().name)}</div>
+    </div>
+    <div class="stack">
+      <div class="segmented">${segs}</div>
+      ${banner}
+      <div class="card">
+        <div class="card-head">
+          ${ringHtml(st.pct, 44, st.complete)}
+          <div style="flex:1;min-width:0">
+            <div class="h3">${esc(m.full)} checklist</div>
+            <div class="tiny mut">${st.done} done · ${st.pending} to go${st.flagged ? ` · ${st.flagged} flagged` : ''}</div>
+          </div>
+          <div class="hide-sm">${avatarStack(day.roster[lk])}</div>
+        </div>
+        <div class="tasklist">${rows}</div>
+      </div>
+      <div class="tiny mut" style="text-align:center">Tap a task to tick it off. Notes and reasons are collected when you submit.</div>
+    </div>
+    ${bar}`;
+}
+/* ==========================================================================
+   MANAGER · TODAY
+   ========================================================================== */
+function activityFeed(day) {
+  const ev = [];
+  ['open','close'].forEach(lk => {
+    day.lists[lk].tasks.forEach(t => {
+      if (t.status === 'done' && t.doneAt) ev.push({ at: t.doneAt, who: t.doneBy, text: `ticked <b>${esc(t.title)}</b>`, lk });
+      if (t.source === 'adhoc' && t.addedBy) ev.push({ at: t.addedAt || day.date + 'T08:00:00', who: t.addedBy, text: `added <b>${esc(t.title)}</b> to the ${LIST_META[lk].label.toLowerCase()} list`, lk });
+    });
+    const L = day.lists[lk];
+    if (L.submitted) ev.push({ at: L.submittedAt, who: L.submittedBy, text: `submitted the <b>${LIST_META[lk].full.toLowerCase()}</b> checklist`, lk });
+  });
+  return ev.sort((a, b) => new Date(b.at) - new Date(a.at)).slice(0, 14);
+}
+
+/* a one-row roll-up of every site, so the manager isn't blind to the venues
+   they aren't currently looking at. Clicking a card switches venue. */
+function venueStripHtml() {
+  if (S.venues.length < 2) return '';
+  return `<div class="card">
+    <div class="card-head"><div class="h3">Across the group</div>
+      <span class="tiny mut" style="margin-left:auto">${plural(S.venues.length, 'venue')} · today</span></div>
+    <div class="vstrip">${S.venues.map(v => {
+      const d = dayStats(today(v.id));
+      const col = venueDotColor(v);
+      const cur = v.id === V().id;
+      const crit = [...today(v.id).lists.open.tasks, ...today(v.id).lists.close.tasks].filter(t => t.critical && t.status !== 'done').length;
+      return `<button class="vcard ${cur ? 'is-current' : ''}" data-act="goto-venue" data-id="${v.id}">
+        <span class="row" style="gap:7px;min-width:0">
+          <span class="venue-dot" style="background:${col}"></span>
+          <span class="vcard-name">${esc(v.name)}</span>
+          ${cur ? '<span class="chip chip-accent" style="margin-left:auto">Viewing</span>' : ''}
+        </span>
+        <span class="vcard-num">${d.done}<span class="mut" style="font-size:13px;font-weight:600">/${d.total}</span></span>
+        <span class="bar" style="display:block;margin-top:7px"><i style="width:${d.pct}%;background:${col}"></i></span>
+        <span class="tiny mut" style="display:block;margin-top:7px">${d.open.done}/${d.open.total} open · ${d.close.done}/${d.close.total} close${
+          crit ? ` · <span style="color:var(--danger);font-weight:640">${crit} critical</span>` : ''}</span>
+      </button>`;
+    }).join('')}</div></div>`;
+}
+
+function pageManagerToday() {
+  const day = today();
+  const d = dayStats(day);
+  const lk = R.list, L = day.lists[lk], m = LIST_META[lk], st = listStats(L);
+  const critOut = [...day.lists.open.tasks, ...day.lists.close.tasks].filter(t => t.critical && t.status !== 'done');
+  const feed = activityFeed(day);
+
+  const summary = ['open','close'].map(k => {
+    const s = listStats(day.lists[k]), L2 = day.lists[k];
+    return `<div class="card"><div class="card-body row" style="gap:14px">
+      ${ringHtml(s.pct, 56, s.complete)}
+      <div style="flex:1;min-width:0">
+        <div class="row" style="gap:7px;margin-bottom:2px">${ic(LIST_META[k].icon, 16)}<span class="h3">${LIST_META[k].full}</span></div>
+        <div class="tiny mut">${s.done}/${s.total} done${s.flagged ? ` · ${s.flagged} flagged` : ''}${s.pending ? ` · ${s.pending} outstanding` : ''}</div>
+        <div style="margin-top:8px">${avatarStack(day.roster[k])}</div>
+      </div>
+      <div style="text-align:right;flex:0 0 auto">
+        ${L2.submitted
+          ? `<span class="chip chip-ok chip-dot">Submitted</span><div class="tiny mut" style="margin-top:5px">${esc(fmtTime(L2.submittedAt))}</div>`
+          : s.complete
+            ? `<span class="chip chip-ok chip-dot">All ticked</span><div class="tiny mut" style="margin-top:5px">awaiting submit</div>`
+            : `<span class="chip chip-dot">In progress</span>`}
+      </div></div></div>`;
+  }).join('');
+
+  const segs = ['open','close'].map(k => {
+    const s = listStats(day.lists[k]);
+    return `<button data-list="${k}" class="${k === lk ? 'is-active' : ''}">
+      ${ic(LIST_META[k].icon, 17)}<span>${LIST_META[k].label} list</span>
+      <span class="seg-count">${s.done}/${s.total}</span></button>`;
+  }).join('');
+
+  const rows = L.tasks.map(t => taskRowHtml(t, {
+    listKey: lk, locked: L.submitted,
+    side: t.source === 'adhoc' ? `<span class="task-side"><span class="btn btn-sm btn-icon btn-ghost" data-act="del-task" data-list="${lk}" data-id="${t.id}" title="Remove this one-off task">${ic('trash', 14)}</span></span>` : ''
+  })).join('');
+
+  return `
+    <div class="page-head row-b wrap">
+      <div>
+        <div class="page-title">Today</div>
+        <div class="page-sub">${esc(fmtDate(day.date))} · ${esc(V().name)}</div>
+      </div>
+      <div class="row wrap" style="gap:8px">
+        <button class="btn btn-sm" data-act="eod">${ic('send', 15)} Run end of day</button>
+        <button class="btn btn-sm btn-primary" data-act="add-task" data-list="${lk}">${ic('plus', 15)} One-off task</button>
+      </div>
+    </div>
+
+    <div class="stack">
+      <div class="stats">
+        <div class="stat"><div class="stat-k">Completed</div><div class="stat-v">${d.done}<span style="font-size:15px;color:var(--muted)">/${d.total}</span></div><div class="stat-s">${d.pct}% of today</div></div>
+        <div class="stat"><div class="stat-k">Outstanding</div><div class="stat-v" style="color:${d.missed ? 'var(--accent)' : 'var(--ok)'}">${d.missed}</div><div class="stat-s">${d.missed ? 'still to do' : 'nothing left'}</div></div>
+        <div class="stat"><div class="stat-k">Critical open</div><div class="stat-v" style="color:${critOut.length ? 'var(--danger)' : 'var(--ok)'}">${critOut.length}</div><div class="stat-s">${critOut.length ? 'need attention' : 'all covered'}</div></div>
+        <div class="stat"><div class="stat-k">On shift</div><div class="stat-v">${new Set([...day.roster.open, ...day.roster.close]).size}</div><div class="stat-s">rostered today</div></div>
+      </div>
+
+      ${venueStripHtml()}
+
+      <div class="grid grid-2">${summary}</div>
+
+      ${critOut.length ? `<div class="banner banner-warn">${ic('warn', 17)}<div>
+        <b>${plural(critOut.length, 'critical task')} not done yet:</b> ${critOut.map(t => esc(t.title)).join(' · ')}</div></div>` : ''}
+
+      <div class="segmented">${segs}</div>
+
+      <div class="card">
+        <div class="card-head">
+          <div style="flex:1;min-width:0">
+            <div class="h3">${esc(m.full)} checklist</div>
+            <div class="tiny mut">${L.submitted ? `Submitted by ${esc(uname(L.submittedBy))} at ${esc(fmtTime(L.submittedAt))} — read-only` : 'Live — tap a task to tick it off on behalf of the team'}</div>
+          </div>
+          <span class="chip ${st.complete ? 'chip-ok' : ''}">${st.pct}%</span>
+        </div>
+        <div class="tasklist">${rows || `<div class="empty">No tasks on this list.</div>`}</div>
+        <div class="card-foot row" style="gap:8px">
+          <button class="btn btn-sm" data-act="add-task" data-list="${lk}">${ic('plus', 15)} Add a one-off task</button>
+          <button class="btn btn-sm btn-ghost" data-act="sync-tpl" data-list="${lk}">${ic('reset', 15)} Re-apply template</button>
+          ${L.submitted ? `<button class="btn btn-sm btn-ghost" data-act="reopen" data-list="${lk}">Reopen</button>` : ''}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div class="h3">Activity</div><span class="tiny mut" style="margin-left:auto">${plural(feed.length, 'event')}</span></div>
+        <div class="card-body">
+          ${feed.length ? `<div class="feed">${feed.map(e => `
+            <div class="feed-item">${avatarHtml(e.who, 'sm')}
+              <div style="flex:1;min-width:0">
+                <div class="feed-line"><b>${esc(uname(e.who).split(' ')[0])}</b> ${e.text}</div>
+                <div class="feed-time">${esc(fmtTime(e.at))}</div>
+              </div></div>`).join('')}</div>`
+            : `<div class="empty" style="padding:20px">Nothing has happened yet today.</div>`}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div class="h3">Demo controls</div></div>
+        <div class="card-body row wrap" style="gap:8px">
+          <button class="btn btn-sm" data-act="eod">${ic('send', 15)} Force end-of-day report</button>
+          <button class="btn btn-sm" data-act="tick-all" data-list="${lk}">${ic('check', 15)} Tick everything on ${esc(m.label.toLowerCase())}</button>
+          <button class="btn btn-sm btn-danger" data-act="reset-day">${ic('reset', 15)} Reset today</button>
+          <button class="btn btn-sm btn-danger" data-act="reset-all">${ic('trash', 15)} Wipe all demo data</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+/* ==========================================================================
+   MANAGER · CHECKLIST TEMPLATES
+   ========================================================================== */
+function pageTemplates() {
+  const card = k => {
+    const m = LIST_META[k], t = TPL()[k];
+    return `<div class="card">
+      <div class="card-head">
+        <div class="row" style="gap:8px;flex:1">${ic(m.icon, 18)}<div>
+          <div class="h3">${m.full} template</div>
+          <div class="tiny mut">${plural(t.length, 'routine task')} · ${t.filter(x => x.critical).length} critical</div>
+        </div></div>
+      </div>
+      <div class="tasklist">
+        ${t.length ? t.map((x, i) => `
+          <div class="task is-locked">
+            ${x.critical ? '<span class="task-critical-mark"></span>' : ''}
+            <span class="sortrow">
+              <button class="btn btn-sm btn-icon btn-ghost" data-act="tpl-up" data-list="${k}" data-id="${x.id}" ${i === 0 ? 'disabled' : ''} title="Move up">${ic('up', 13)}</button>
+              <button class="btn btn-sm btn-icon btn-ghost" data-act="tpl-down" data-list="${k}" data-id="${x.id}" ${i === t.length - 1 ? 'disabled' : ''} title="Move down">${ic('down', 13)}</button>
+            </span>
+            <span class="task-main">
+              <span class="task-title">${esc(x.title)}</span>
+              ${x.detail ? `<span class="task-detail" style="display:block">${esc(x.detail)}</span>` : ''}
+              <span class="task-meta">
+                <button class="chip ${x.critical ? 'chip-accent' : ''}" data-act="tpl-crit" data-list="${k}" data-id="${x.id}" style="cursor:pointer">${x.critical ? 'Critical' : 'Mark critical'}</button>
+              </span>
+            </span>
+            <span class="task-side">
+              <button class="btn btn-sm btn-icon btn-ghost" data-act="tpl-edit" data-list="${k}" data-id="${x.id}" title="Edit">${ic('pencil', 14)}</button>
+              <button class="btn btn-sm btn-icon btn-ghost" data-act="tpl-del" data-list="${k}" data-id="${x.id}" title="Delete">${ic('trash', 14)}</button>
+            </span>
+          </div>`).join('')
+        : `<div class="empty">No routine tasks yet.</div>`}
+      </div>
+      <div class="card-foot row" style="gap:8px">
+        <button class="btn btn-sm btn-primary" data-act="tpl-add" data-list="${k}">${ic('plus', 15)} Add routine task</button>
+        <button class="btn btn-sm btn-ghost" data-act="sync-tpl" data-list="${k}">${ic('reset', 15)} Apply to today</button>
+      </div>
+    </div>`;
+  };
+  return `
+    <div class="page-head row-b wrap">
+      <div>
+        <div class="page-title">Checklists</div>
+        <div class="page-sub">The standard tasks published every day at <b>${esc(V().name)}</b>. One-off extras are added from the Today tab.</div>
+      </div>
+      ${S.venues.length > 1 ? `<button class="btn btn-sm" data-act="copy-tpl">${ic('list', 15)} Copy from another venue</button>` : ''}
+    </div>
+    <div class="stack">
+      <div class="banner banner-info">${ic('info', 17)}<div>
+        Template edits apply to <b>tomorrow onwards</b>. Hit <b>Apply to today</b> to push changes into today's live list — already-ticked tasks keep their state.</div></div>
+      <div class="grid grid-2">${card('open')}${card('close')}</div>
+    </div>`;
+}
+
+/* ==========================================================================
+   MANAGER · TEAM & ROSTER
+   ========================================================================== */
+function pageTeam() {
+  const day = today();
+  const v = V();
+  const all = S.users.filter(u => u.role === 'employee');
+  const here = all.filter(u => u.venues.includes(v.id));
+  const active = here.filter(u => u.active);
+
+  const rosterRows = active.length ? active.map(u => `
+    <tr>
+      <td><div class="row" style="gap:9px">${avatarHtml(u.id, 'sm')}<span>${esc(u.name)}</span></div></td>
+      ${['open','close'].map(k => `<td style="text-align:center">
+        <button class="switch ${day.roster[k].includes(u.id) ? 'is-on' : ''}" data-act="roster" data-list="${k}" data-id="${u.id}"
+          aria-label="${esc(u.name)} on ${k} shift" style="margin:0 auto"></button></td>`).join('')}
+    </tr>`).join('') : `<tr><td colspan="3" class="mut" style="text-align:center;padding:22px">Nobody is assigned to ${esc(v.name)} yet.</td></tr>`;
+
+  const venueChips = u => S.venues.map(x => `<button class="chip ${u.venues.includes(x.id) ? 'chip-accent' : ''}"
+      data-act="toggle-user-venue" data-id="${u.id}" data-venue="${x.id}" style="cursor:pointer"
+      title="${u.venues.includes(x.id) ? 'Remove from' : 'Assign to'} ${esc(x.name)}">
+      <span class="venue-dot" style="width:7px;height:7px;background:${u.venues.includes(x.id) ? venueDotColor(x) : 'currentColor'};opacity:${u.venues.includes(x.id) ? 1 : .4}"></span>${esc(x.name)}</button>`).join('');
+
+  const staffRows = all.map(u => `
+    <tr>
+      <td><div class="row" style="gap:10px">${avatarHtml(u.id)}<div>
+        <div style="font-weight:600">${esc(u.name)}</div>
+        <div class="tiny mut">${esc(u.email)}</div></div></div></td>
+      <td><div class="row wrap" style="gap:5px">${venueChips(u)}</div></td>
+      <td><span class="chip ${u.active ? 'chip-ok' : ''} chip-dot">${u.active ? 'Active' : 'Disabled'}</span></td>
+      <td style="text-align:right"><div class="row" style="gap:4px;justify-content:flex-end">
+        <button class="switch ${u.active ? 'is-on' : ''}" data-act="toggle-user" data-id="${u.id}" aria-label="Toggle access for ${esc(u.name)}"></button>
+        <button class="btn btn-sm btn-icon btn-ghost" data-act="edit-user" data-id="${u.id}" title="Edit">${ic('pencil', 14)}</button>
+        <button class="btn btn-sm btn-icon btn-ghost" data-act="del-user" data-id="${u.id}" title="Remove">${ic('trash', 14)}</button>
+      </div></td>
+    </tr>`).join('');
+
+  const mgr = S.users.filter(u => u.role === 'manager');
+
+  return `
+    <div class="page-head row-b wrap">
+      <div>
+        <div class="page-title">Team</div>
+        <div class="page-sub">Accounts, venue access, and who's on which shift at ${esc(v.name)} today.</div>
+      </div>
+      <button class="btn btn-sm btn-primary" data-act="add-user">${ic('plus', 15)} Add employee</button>
+    </div>
+    <div class="stack">
+      <div class="card">
+        <div class="card-head"><div style="flex:1">
+          <div class="row" style="gap:8px"><span class="venue-dot" style="background:${venueDotColor(v)}"></span>
+            <div class="h3">Roster · ${esc(v.name)} · ${esc(fmtDateShort(day.date))}</div></div>
+          <div class="tiny mut">Only staff assigned to this venue can be rostered. Anyone else on shift can still tap "I'm covering".</div>
+        </div></div>
+        <div class="tablewrap"><table class="tbl">
+          <thead><tr><th>Employee</th><th style="text-align:center">Open</th><th style="text-align:center">Close</th></tr></thead>
+          <tbody>${rosterRows}</tbody>
+        </table></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div style="flex:1"><div class="h3">Accounts</div>
+          <div class="tiny mut">Tap a venue chip to give or take away access. Staff only ever see the venues they're assigned to.</div></div>
+          <span class="tiny mut nowrap hide-sm">${active.length} active here · ${all.length} total</span></div>
+        <div class="tablewrap"><table class="tbl">
+          <thead><tr><th>Employee</th><th>Venues</th><th>Access</th><th></th></tr></thead>
+          <tbody>${staffRows || `<tr><td colspan="4" class="mut" style="text-align:center;padding:22px">No employees yet.</td></tr>`}</tbody>
+        </table></div>
+        <div class="card-foot tiny mut">Managers: ${mgr.map(u => esc(u.name)).join(', ')} — access to every venue, its templates, roster, history and settings.</div>
+      </div>
+    </div>`;
+}
+
+/* ==========================================================================
+   MANAGER · HISTORY & STATS
+   ========================================================================== */
+function pageHistory() {
+  const keys = Object.keys(DAYS()).sort().reverse();
+  const recent = keys.slice(0, 30);
+  const totals = recent.reduce((a, k) => { const d = dayStats(DAYS()[k]); a.t += d.total; a.d += d.done; return a; }, { t: 0, d: 0 });
+
+  const missCount = {};
+  recent.forEach(k => ['open','close'].forEach(lk => DAYS()[k].lists[lk].tasks.forEach(t => {
+    if (t.status !== 'done') missCount[t.title] = (missCount[t.title] || 0) + 1;
+  })));
+  const worst = Object.entries(missCount).sort((a, b) => b[1] - a[1])[0];
+
+  const perUser = {};
+  recent.forEach(k => ['open','close'].forEach(lk => DAYS()[k].lists[lk].tasks.forEach(t => {
+    if (t.status === 'done' && t.doneBy) {
+      perUser[t.doneBy] = perUser[t.doneBy] || { done: 0, shifts: new Set() };
+      perUser[t.doneBy].done++; perUser[t.doneBy].shifts.add(k + lk);
+    }
+  })));
+  const rosterCount = {};
+  recent.forEach(k => ['open','close'].forEach(lk => DAYS()[k].roster[lk].forEach(id => {
+    rosterCount[id] = rosterCount[id] || { assigned: 0 }; rosterCount[id].assigned++;
+  })));
+
+  const staffStats = S.users.filter(u => u.role === 'employee').map(u => {
+    const p = perUser[u.id] || { done: 0, shifts: new Set() };
+    const shifts = p.shifts.size;
+    return { u, done: p.done, shifts, avg: shifts ? Math.round(p.done / shifts) : 0, rostered: (rosterCount[u.id] || {}).assigned || 0 };
+  }).sort((a, b) => b.done - a.done);
+
+  const dayRows = recent.map(k => {
+    const day = DAYS()[k], d = dayStats(day);
+    return `<tr>
+      <td class="nowrap"><b>${esc(fmtDateShort(k))}</b>${k === dayKey() ? ' <span class="chip chip-accent">Today</span>' : ''}</td>
+      <td style="min-width:120px"><div class="row" style="gap:8px">
+        <div class="bar" style="flex:1;min-width:60px"><i style="width:${d.pct}%;background:${d.pct === 100 ? 'var(--ok)' : 'var(--accent)'}"></i></div>
+        <span class="tiny num nowrap" style="font-weight:640">${d.pct}%</span></div></td>
+      <td class="num nowrap hide-sm">${d.open.done}/${d.open.total}</td>
+      <td class="num nowrap hide-sm">${d.close.done}/${d.close.total}</td>
+      <td class="num"><span class="chip ${d.missed ? 'chip-warn' : 'chip-ok'}">${d.missed}</span></td>
+      <td style="text-align:right"><button class="btn btn-sm btn-ghost" data-act="view-day" data-key="${k}">View ${ic('right', 13)}</button></td>
+    </tr>`;
+  }).join('');
+
+  return `
+    <div class="page-head row-b wrap">
+      <div>
+        <div class="page-title">History</div>
+        <div class="page-sub">Every checklist published at <b>${esc(V().name)}</b>, kept as a record.</div>
+      </div>
+      <button class="btn btn-sm" data-act="csv-all">${ic('dl', 15)} Export CSV</button>
+    </div>
+    <div class="stack">
+      <div class="stats">
+        <div class="stat"><div class="stat-k">Days logged</div><div class="stat-v">${recent.length}</div><div class="stat-s">most recent 30</div></div>
+        <div class="stat"><div class="stat-k">Completion</div><div class="stat-v">${pct(totals.d, totals.t)}%</div><div class="stat-s">${totals.d} of ${totals.t} tasks</div></div>
+        <div class="stat"><div class="stat-k">Left undone</div><div class="stat-v">${totals.t - totals.d}</div><div class="stat-s">across all shifts</div></div>
+        <div class="stat"><div class="stat-k">Most missed</div><div class="stat-v" style="font-size:16px;letter-spacing:-.01em;line-height:1.25;margin-top:6px">${worst ? esc(worst[0]) : '—'}</div><div class="stat-s">${worst ? `${worst[1]}×` : 'nothing missed'}</div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div class="h3">Daily record</div></div>
+        <div class="tablewrap"><table class="tbl">
+          <thead><tr><th>Date</th><th>Completion</th><th class="hide-sm">Open</th><th class="hide-sm">Close</th><th>Missed</th><th></th></tr></thead>
+          <tbody>${dayRows || `<tr><td colspan="6" class="mut" style="text-align:center;padding:22px">No history yet.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div style="flex:1"><div class="h3">Team performance</div>
+          <div class="tiny mut">Tasks ticked off per person across the logged period.</div></div></div>
+        <div class="tablewrap"><table class="tbl">
+          <thead><tr><th>Employee</th><th class="num">Tasks done</th><th class="num hide-sm">Shifts worked</th><th class="num hide-sm">Avg / shift</th><th>Share</th></tr></thead>
+          <tbody>${staffStats.map(s => {
+            const top = staffStats[0].done || 1;
+            return `<tr>
+              <td><div class="row" style="gap:9px">${avatarHtml(s.u.id, 'sm')}<span>${esc(s.u.name)}</span>${s.u.active ? '' : '<span class="chip">disabled</span>'}</div></td>
+              <td class="num"><b>${s.done}</b></td>
+              <td class="num hide-sm">${s.shifts}</td>
+              <td class="num hide-sm">${s.avg}</td>
+              <td style="min-width:90px"><div class="bar"><i style="width:${Math.round(s.done / top * 100)}%"></i></div></td>
+            </tr>`; }).join('')}</tbody>
+        </table></div>
+      </div>
+    </div>`;
+}
+
+/* ==========================================================================
+   MANAGER · ALERTS
+   ========================================================================== */
+function pageAlerts() {
+  const list = S.notifications;
+  return `
+    <div class="page-head row-b wrap">
+      <div>
+        <div class="page-title">Alerts</div>
+        <div class="page-sub">Everything the app has sent you, across every venue.</div>
+      </div>
+      <div class="row" style="gap:8px">
+        <button class="btn btn-sm btn-ghost" data-act="mark-read">Mark all read</button>
+        <button class="btn btn-sm" data-act="test-notif">${ic('bolt', 15)} Send test</button>
+      </div>
+    </div>
+    <div class="stack">
+      <div class="banner banner-info">${ic('info', 17)}<div>
+        <b>Delivery is stubbed in this demo.</b> Messages are composed and logged exactly as they'd be sent, but nothing leaves the browser —
+        open the console to see each one. In production these go out over email and SMS from a single <code>Notifier.deliver()</code> call.</div></div>
+      <div class="card">
+        <div class="card-head"><div class="h3">Inbox</div>
+          <span class="tiny mut" style="margin-left:auto">${plural(list.length, 'message')} · ${unreadCount()} unread</span></div>
+        <div>${list.length ? list.map(n => {
+          const isEod = n.kind === 'end-of-day';
+          const tone = isEod ? 'chip-info' : 'chip-ok';
+          return `<button class="alert-item ${n.read ? '' : 'is-unread'}" data-act="open-notif" data-id="${n.id}">
+            <span class="alert-ic ${tone}" style="background:var(--${isEod ? 'info' : 'ok'}-soft);color:var(--${isEod ? 'info' : 'ok'})">
+              ${ic(n.channel === 'sms' ? 'sms' : 'mail', 17)}</span>
+            <span style="flex:1;min-width:0">
+              <span style="display:block;font-weight:${n.read ? '540' : '680'};letter-spacing:-.012em">${esc(n.subject)}</span>
+              <span class="tiny mut row wrap" style="margin-top:4px;gap:6px">
+                ${S.venues.length > 1 && n.venueName ? `<span class="chip"><span class="venue-dot" style="width:7px;height:7px;background:${
+                  venueDotColor(venue(n.venueId) || { accent: 'graphite' })}"></span>${esc(n.venueName)}</span>` : ''}
+                <span>${n.channel === 'sms' ? 'SMS' : 'Email'} → ${esc(n.to)}</span>
+              </span>
+            </span>
+            <span class="tiny mut nowrap">${esc(fmtDT(n.at))}</span>
+          </button>`;
+        }).join('') : `<div class="empty"><div class="empty-icon">${ic('mail', 20)}</div><div>No alerts yet.</div>
+          <div class="tiny mut" style="margin-top:4px">You'll get one when a list is fully ticked off, and again at end of day.</div></div>`}</div>
+      </div>
+    </div>`;
+}
+
+/* ==========================================================================
+   MANAGER · SETTINGS
+   ========================================================================== */
+function pageSettings() {
+  const s = V();
+  const tog = (key, title, sub) => `
+    <div class="row-b" style="padding:11px 0;border-bottom:1px solid var(--line)">
+      <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:14px">${title}</div><div class="tiny mut">${sub}</div></div>
+      <button class="switch ${s[key] ? 'is-on' : ''}" data-act="setting-toggle" data-key="${key}" aria-label="${title}"></button>
+    </div>`;
+
+  const venueRows = S.venues.map(v => {
+    const staff = S.users.filter(u => u.role === 'employee' && u.active && u.venues.includes(v.id)).length;
+    const cur = v.id === V().id;
+    return `<div class="venue-row">
+      <span class="venue-dot" style="background:${venueDotColor(v)}"></span>
+      <div style="flex:1;min-width:0">
+        <div class="row" style="gap:7px"><span style="font-weight:620;font-size:14px">${esc(v.name)}</span>
+          ${cur ? '<span class="chip chip-accent">Viewing</span>' : ''}</div>
+        <div class="tiny mut">${esc(v.sub)} · cutoff ${esc(v.cutoff)} · ${plural(staff, 'active employee')}</div>
+      </div>
+      ${cur ? '' : `<button class="btn btn-sm btn-ghost" data-act="goto-venue" data-id="${v.id}">Open</button>`}
+      <button class="btn btn-sm btn-icon btn-ghost" data-act="edit-venue" data-id="${v.id}" title="Edit venue">${ic('pencil', 14)}</button>
+      <button class="btn btn-sm btn-icon btn-ghost" data-act="del-venue" data-id="${v.id}" title="Remove venue" ${S.venues.length < 2 ? 'disabled' : ''}>${ic('trash', 14)}</button>
+    </div>`;
+  }).join('');
+
+  return `
+    <div class="page-head">
+      <div class="page-title">Settings</div>
+      <div class="page-sub">Everything below the Venues card applies to <b>${esc(s.name)}</b> only — each venue keeps its own recipients, cutoff and rules.</div>
+    </div>
+    <div class="stack">
+      <div class="card">
+        <div class="card-head"><div style="flex:1"><div class="h3">Venues</div>
+          <div class="tiny mut">Each venue has its own checklists, roster, history and reports.</div></div>
+          <button class="btn btn-sm btn-primary" data-act="add-venue">${ic('plus', 15)} Add venue</button></div>
+        <div class="card-body" style="padding-top:2px;padding-bottom:6px">${venueRows}</div>
+      </div>
+
+      <div class="grid grid-2">
+        <div class="card">
+          <div class="card-head"><div class="row" style="gap:8px"><span class="venue-dot" style="background:${venueDotColor(s)}"></span>
+            <div class="h3">${esc(s.name)}</div></div></div>
+          <div class="card-body stack" style="gap:13px">
+            <div class="field"><label class="label" for="s-venue">Venue name</label>
+              <input class="input" id="s-venue" data-set="name" value="${esc(s.name)}"></div>
+            <div class="field"><label class="label" for="s-sub">Tagline</label>
+              <input class="input" id="s-sub" data-set="sub" value="${esc(s.sub)}"></div>
+            <div class="field"><label class="label">Colour</label>
+              <div class="swatches">${Object.entries(ACCENTS).map(([k, a]) =>
+                `<button class="swatch ${s.accent === k ? 'is-sel' : ''}" data-act="venue-accent" data-key="${k}"
+                  style="background:${document.documentElement.dataset.theme === 'dark' ? a.dark[0] : a.light[0]}"
+                  title="${a.label}" aria-label="${a.label}"></button>`).join('')}</div>
+              <span class="hint">Tints the whole app so you can tell at a glance which venue you're in.</span></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div class="h3">Where reports go</div></div>
+          <div class="card-body stack" style="gap:13px">
+            <div class="field"><label class="label" for="s-mail">Manager email</label>
+              <input class="input" id="s-mail" type="email" data-set="managerEmail" value="${esc(s.managerEmail)}"></div>
+            <div class="field"><label class="label" for="s-phone">Manager mobile</label>
+              <input class="input" id="s-phone" data-set="managerPhone" value="${esc(s.managerPhone)}"></div>
+            <div class="field"><label class="label" for="s-cut">End-of-day cutoff</label>
+              <input class="input" id="s-cut" type="time" data-set="cutoff" value="${esc(s.cutoff)}">
+              <span class="hint">If ${esc(s.name)} hasn't submitted its close list by this time, the summary is sent anyway.</span></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div class="h3">Notification rules</div></div>
+          <div class="card-body" style="padding-top:4px">
+            ${tog('notifyComplete', 'When a list is fully ticked off', 'Fires the moment the last task is done, any time of day')}
+            ${tog('notifyEndOfDay', 'End-of-day summary', 'Done vs left undone, across both lists')}
+            ${tog('channelEmail', 'Send by email', esc(s.managerEmail))}
+            ${tog('channelSms', 'Send by SMS', esc(s.managerPhone))}
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div class="h3">Demo &amp; data</div></div>
+          <div class="card-body stack" style="gap:11px">
+            <div class="tiny mut">All venues live in this browser's localStorage under <code>${STORE_KEY}</code>. No server, no auth — swap in Firebase for production.</div>
+            <div class="row wrap" style="gap:8px">
+              <button class="btn btn-sm" data-act="csv-all">${ic('dl', 15)} Export ${esc(s.name)}</button>
+              <button class="btn btn-sm" data-act="csv-group">${ic('dl', 15)} Export all venues</button>
+              <button class="btn btn-sm btn-danger" data-act="reset-all">${ic('reset', 15)} Reset demo data</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+/* ==========================================================================
+   MODALS
+   ========================================================================== */
+
+/* ---- end-of-shift review: this is where notes and reasons are collected --- */
+function openReview(lk) {
+  const day = today(), L = day.lists[lk], m = LIST_META[lk];
+  const st = listStats(L);
+  const pending = L.tasks.filter(t => t.status !== 'done');
+  const done = L.tasks.filter(t => t.status === 'done');
+  const draft = {};
+  pending.forEach(t => { draft[t.id] = { status: t.status === 'pending' ? '' : t.status, reason: t.reason || '' }; });
+
+  const reasonBtns = t => Object.entries(REASONS).map(([k, r]) =>
+    `<button data-reason="${k}" data-for="${t.id}" class="${draft[t.id].status === k ? 'is-sel' : ''}">${r.label}</button>`).join('');
+
+  const pendingHtml = pending.length ? `
+    <div class="sec-title" style="margin-bottom:6px">${plural(pending.length, 'task')} not ticked off</div>
+    <div class="tiny mut" style="margin-bottom:10px">Tell the manager why — this goes straight into the end-of-day report.</div>
+    ${pending.map(t => `
+      <div class="review-item" data-item="${t.id}">
+        <div class="row" style="gap:8px;align-items:flex-start">
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600;font-size:14px">${esc(t.title)}</div>
+            ${t.critical ? '<span class="chip chip-accent" style="margin-top:5px">Critical</span>' : ''}
+          </div>
+        </div>
+        <div class="reason-opts">${reasonBtns(t)}</div>
+        <textarea class="textarea" data-detail="${t.id}" rows="2"
+          style="margin-top:8px;min-height:52px;display:${draft[t.id].status ? 'block' : 'none'}"
+          placeholder="Add detail${'…'}">${esc(draft[t.id].reason)}</textarea>
+      </div>`).join('')}` : `
+    <div class="banner banner-ok" style="margin-bottom:14px">${ic('check', 17)}<div>
+      <b>Every task is ticked off.</b> Nothing outstanding on the ${esc(m.label.toLowerCase())} list.</div></div>`;
+
+  const notesHtml = done.length ? `
+    <details style="margin-top:16px">
+      <summary style="cursor:pointer;font-size:13px;font-weight:620;color:var(--ink-2);padding:8px 0">
+        Add a note to something you completed (${done.length})</summary>
+      <div style="padding-top:6px">
+        ${done.map(t => `
+          <div style="padding:9px 0;border-bottom:1px solid var(--line)">
+            <div class="tiny" style="font-weight:600;margin-bottom:5px">${esc(t.title)}</div>
+            <input class="input" data-note="${t.id}" placeholder="Optional note${'…'}" value="${esc(t.note || '')}">
+          </div>`).join('')}
+      </div>
+    </details>` : '';
+
+  openModal(`
+    <div class="modal-head"><div style="flex:1">
+      <div class="modal-title">Submit the ${esc(m.label.toLowerCase())} checklist</div>
+      <div class="modal-sub">${st.done} of ${st.total} ticked off · ${esc(fmtDate(day.date))}</div>
+    </div>
+    <button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
+    <div class="modal-body">${pendingHtml}${notesHtml}</div>
+    <div class="modal-foot">
+      <button class="btn" data-x="close">Keep working</button>
+      <button class="btn btn-primary" data-x="submit">${ic('send', 16)} Send to manager</button>
+    </div>`, {
+    wide: true,
+    after(root) {
+      root.querySelectorAll('[data-x=close]').forEach(b => b.onclick = closeModal);
+      root.querySelectorAll('[data-reason]').forEach(b => b.onclick = () => {
+        const id = b.dataset.for;
+        draft[id].status = b.dataset.reason;
+        root.querySelectorAll(`[data-for="${id}"]`).forEach(x => x.classList.toggle('is-sel', x === b));
+        const ta = root.querySelector(`[data-detail="${id}"]`);
+        ta.style.display = 'block';
+        ta.placeholder = REASONS[b.dataset.reason].needsDetail ? 'What blocked it? (required)' : 'Add detail (optional)…';
+      });
+      root.querySelector('[data-x=submit]').onclick = () => {
+        for (const t of pending) {
+          const d = draft[t.id];
+          d.reason = (root.querySelector(`[data-detail="${t.id}"]`) || {}).value || '';
+          if (!d.status) { toast(`Pick a reason for "${t.title.slice(0, 34)}…"`, 'warn'); root.querySelector(`[data-item="${t.id}"]`).scrollIntoView({ block: 'center' }); return; }
+          if (REASONS[d.status].needsDetail && !d.reason.trim()) { toast('A blocked task needs a short explanation', 'warn'); root.querySelector(`[data-detail="${t.id}"]`).focus(); return; }
+        }
+        pending.forEach(t => { t.status = draft[t.id].status; t.reason = draft[t.id].reason.trim(); });
+        done.forEach(t => { const el = root.querySelector(`[data-note="${t.id}"]`); if (el) t.note = el.value.trim(); });
+        L.submitted = true; L.submittedBy = me().id; L.submittedAt = new Date().toISOString();
+        save(); closeModal(); runTriggers(); render();
+        toast(`${m.full} checklist sent to the manager`, 'ok');
+      };
+    }
+  });
+}
+
+/* ---- add a one-off task to today --------------------------------------- */
+function openAddTask(lk) {
+  const m = LIST_META[lk];
+  openModal(`
+    <div class="modal-head"><div style="flex:1">
+      <div class="modal-title">One-off task</div>
+      <div class="modal-sub">Added to today's ${esc(m.label.toLowerCase())} list only — the template stays untouched.</div>
+    </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
+    <div class="modal-body stack" style="gap:13px">
+      <div class="field"><label class="label" for="nt-title">Task</label>
+        <input class="input" id="nt-title" placeholder="e.g. Chase the linen delivery" autofocus></div>
+      <div class="field"><label class="label" for="nt-detail">Detail <span class="mut">(optional)</span></label>
+        <textarea class="textarea" id="nt-detail" rows="2" placeholder="Anything the team needs to know"></textarea></div>
+      <div class="field"><label class="label">Which list</label>
+        <div class="pill-toggle" id="nt-list">
+          ${['open','close'].map(k => `<button data-k="${k}" class="${k === lk ? 'is-active' : ''}">${LIST_META[k].full}</button>`).join('')}
+        </div></div>
+      <div class="row-b" style="padding-top:4px">
+        <div><div style="font-weight:600;font-size:14px">Critical</div><div class="tiny mut">Flagged in the report if it's missed</div></div>
+        <button class="switch" id="nt-crit"></button>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn" data-x="close">Cancel</button>
+      <button class="btn btn-primary" data-x="save">Add task</button></div>`, {
+    after(root) {
+      let list = lk, crit = false;
+      root.querySelectorAll('[data-x=close]').forEach(b => b.onclick = closeModal);
+      root.querySelectorAll('#nt-list button').forEach(b => b.onclick = () => {
+        list = b.dataset.k;
+        root.querySelectorAll('#nt-list button').forEach(x => x.classList.toggle('is-active', x === b));
+      });
+      const sw = root.querySelector('#nt-crit');
+      sw.onclick = () => { crit = !crit; sw.classList.toggle('is-on', crit); };
+      root.querySelector('#nt-title').focus();
+      root.querySelector('[data-x=save]').onclick = () => {
+        const title = root.querySelector('#nt-title').value.trim();
+        if (!title) { toast('Give the task a name', 'warn'); return; }
+        const day = today();
+        day.lists[list].tasks.push({
+          id: uid('x'), tplId: null, title, detail: root.querySelector('#nt-detail').value.trim(),
+          critical: crit, source: 'adhoc', addedBy: me().id, addedAt: new Date().toISOString(),
+          status: 'pending', doneBy: null, doneAt: null, note: '', reason: ''
+        });
+        day.lists[list].completeNotified = false;
+        R.list = list; save(); closeModal(); render();
+        toast(`Added to today's ${LIST_META[list].label.toLowerCase()} list`, 'ok');
+      };
+    }
+  });
+}
+
+/* ---- template task add / edit ------------------------------------------ */
+function openTemplateEditor(lk, id) {
+  const tpl = TPL()[lk];
+  const t = id ? tpl.find(x => x.id === id) : null;
+  openModal(`
+    <div class="modal-head"><div style="flex:1">
+      <div class="modal-title">${t ? 'Edit' : 'New'} routine task</div>
+      <div class="modal-sub">${esc(LIST_META[lk].full)} template</div>
+    </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
+    <div class="modal-body stack" style="gap:13px">
+      <div class="field"><label class="label" for="tt-title">Task</label>
+        <input class="input" id="tt-title" value="${esc(t ? t.title : '')}" placeholder="e.g. Count the till float"></div>
+      <div class="field"><label class="label" for="tt-detail">Instructions <span class="mut">(optional)</span></label>
+        <textarea class="textarea" id="tt-detail" rows="3" placeholder="How it should be done">${esc(t ? t.detail : '')}</textarea></div>
+      <div class="row-b" style="padding-top:4px">
+        <div><div style="font-weight:600;font-size:14px">Critical</div><div class="tiny mut">Called out separately when it's missed</div></div>
+        <button class="switch ${t && t.critical ? 'is-on' : ''}" id="tt-crit"></button>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn" data-x="close">Cancel</button>
+      <button class="btn btn-primary" data-x="save">${t ? 'Save changes' : 'Add to template'}</button></div>`, {
+    after(root) {
+      let crit = !!(t && t.critical);
+      root.querySelectorAll('[data-x=close]').forEach(b => b.onclick = closeModal);
+      const sw = root.querySelector('#tt-crit');
+      sw.onclick = () => { crit = !crit; sw.classList.toggle('is-on', crit); };
+      root.querySelector('#tt-title').focus();
+      root.querySelector('[data-x=save]').onclick = () => {
+        const title = root.querySelector('#tt-title').value.trim();
+        const detail = root.querySelector('#tt-detail').value.trim();
+        if (!title) { toast('Give the task a name', 'warn'); return; }
+        if (t) { t.title = title; t.detail = detail; t.critical = crit; }
+        else tpl.push({ id: uid('t'), title, detail, critical: crit });
+        save(); closeModal(); render();
+        toast(t ? 'Template updated' : 'Added to the template', 'ok');
+      };
+    }
+  });
+}
+
+/* ---- employee account add / edit --------------------------------------- */
+function openUserEditor(id) {
+  const u = id ? user(id) : null;
+  const picked = new Set(u ? u.venues : [V().id]);
+  const chips = () => S.venues.map(v => `<button class="chip ${picked.has(v.id) ? 'chip-accent' : ''}" data-venue="${v.id}" style="cursor:pointer;height:28px;padding:0 11px">
+      <span class="venue-dot" style="width:7px;height:7px;background:${venueDotColor(v)}"></span>${esc(v.name)}</button>`).join('');
+
+  openModal(`
+    <div class="modal-head"><div style="flex:1">
+      <div class="modal-title">${u ? 'Edit employee' : 'Add employee'}</div>
+      <div class="modal-sub">${u ? 'Update their details, venues or access.' : 'They can sign in and tick tasks off straight away.'}</div>
+    </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
+    <div class="modal-body stack" style="gap:13px">
+      <div class="field"><label class="label" for="us-name">Full name</label>
+        <input class="input" id="us-name" value="${esc(u ? u.name : '')}" placeholder="e.g. Alex Moreau"></div>
+      <div class="field"><label class="label" for="us-mail">Email</label>
+        <input class="input" id="us-mail" type="email" value="${esc(u ? u.email : '')}" placeholder="name@peachy.com.au"></div>
+      <div class="field"><label class="label" for="us-phone">Mobile</label>
+        <input class="input" id="us-phone" value="${esc(u ? u.phone : '')}" placeholder="+61 4.. ... ..."></div>
+      <div class="field"><label class="label">Venues</label>
+        <div class="row wrap" style="gap:6px" id="us-venues">${chips()}</div>
+        <span class="hint">They only see the checklists for the venues you tick here.</span></div>
+      <div class="row-b" style="padding-top:4px">
+        <div><div style="font-weight:600;font-size:14px">Access enabled</div><div class="tiny mut">Turn off to keep the record but block the account</div></div>
+        <button class="switch ${!u || u.active ? 'is-on' : ''}" id="us-active"></button>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn" data-x="close">Cancel</button>
+      <button class="btn btn-primary" data-x="save">${u ? 'Save' : 'Add employee'}</button></div>`, {
+    after(root) {
+      let active = !u || u.active;
+      root.querySelectorAll('[data-x=close]').forEach(b => b.onclick = closeModal);
+      const sw = root.querySelector('#us-active');
+      sw.onclick = () => { active = !active; sw.classList.toggle('is-on', active); };
+      root.querySelector('#us-venues').addEventListener('click', e => {
+        const b = e.target.closest('[data-venue]'); if (!b) return;
+        const vid = b.dataset.venue;
+        if (picked.has(vid)) picked.delete(vid); else picked.add(vid);
+        b.classList.toggle('chip-accent', picked.has(vid));
+      });
+      root.querySelector('#us-name').focus();
+      root.querySelector('[data-x=save]').onclick = () => {
+        const name = root.querySelector('#us-name').value.trim();
+        const email = root.querySelector('#us-mail').value.trim();
+        const phone = root.querySelector('#us-phone').value.trim();
+        if (!name) { toast('A name is required', 'warn'); return; }
+        if (!picked.size) { toast('Assign them to at least one venue', 'warn'); return; }
+        const venuesList = [...picked];
+        if (u) Object.assign(u, { name, email, phone, active, venues: venuesList });
+        else S.users.push({ id: uid('u'), name, role: 'employee', email, phone, active, venues: venuesList });
+        save(); closeModal(); render();
+        toast(u ? 'Employee updated' : `${name.split(' ')[0]} added to the team`, 'ok');
+      };
+    }
+  });
+}
+
+/* ---- venue add / edit --------------------------------------------------- */
+function openVenueEditor(id) {
+  const v = id ? venue(id) : null;
+  let accent = v ? v.accent : Object.keys(ACCENTS)[S.venues.length % Object.keys(ACCENTS).length];
+  const dark = document.documentElement.dataset.theme === 'dark';
+
+  openModal(`
+    <div class="modal-head"><div style="flex:1">
+      <div class="modal-title">${v ? 'Edit venue' : 'Add a venue'}</div>
+      <div class="modal-sub">${v ? 'Name, tagline and colour.' : 'It starts with empty checklists — build them, or copy another venue across.'}</div>
+    </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
+    <div class="modal-body stack" style="gap:13px">
+      <div class="field"><label class="label" for="vn-name">Venue name</label>
+        <input class="input" id="vn-name" value="${esc(v ? v.name : '')}" placeholder="e.g. Peachy Newtown"></div>
+      <div class="field"><label class="label" for="vn-sub">Tagline</label>
+        <input class="input" id="vn-sub" value="${esc(v ? v.sub : '')}" placeholder="e.g. Wine Bar"></div>
+      <div class="field"><label class="label" for="vn-cut">End-of-day cutoff</label>
+        <input class="input" id="vn-cut" type="time" value="${esc(v ? v.cutoff : '23:30')}"></div>
+      <div class="field"><label class="label">Colour</label>
+        <div class="swatches" id="vn-accent">${Object.entries(ACCENTS).map(([k, a]) =>
+          `<button class="swatch ${accent === k ? 'is-sel' : ''}" data-key="${k}" title="${a.label}" aria-label="${a.label}"
+            style="background:${dark ? a.dark[0] : a.light[0]}"></button>`).join('')}</div></div>
+    </div>
+    <div class="modal-foot"><button class="btn" data-x="close">Cancel</button>
+      <button class="btn btn-primary" data-x="save">${v ? 'Save venue' : 'Add venue'}</button></div>`, {
+    after(root) {
+      root.querySelectorAll('[data-x=close]').forEach(b => b.onclick = closeModal);
+      root.querySelector('#vn-accent').addEventListener('click', e => {
+        const b = e.target.closest('[data-key]'); if (!b) return;
+        accent = b.dataset.key;
+        root.querySelectorAll('#vn-accent .swatch').forEach(x => x.classList.toggle('is-sel', x === b));
+      });
+      root.querySelector('#vn-name').focus();
+      root.querySelector('[data-x=save]').onclick = () => {
+        const name = root.querySelector('#vn-name').value.trim();
+        const sub = root.querySelector('#vn-sub').value.trim();
+        const cutoff = root.querySelector('#vn-cut').value || '23:30';
+        if (!name) { toast('Give the venue a name', 'warn'); return; }
+        if (v) { Object.assign(v, { name, sub, cutoff, accent }); }
+        else {
+          const nv = newVenue(name, sub, accent);
+          nv.cutoff = cutoff;
+          S.session.venueId = nv.id;
+          R.tab = 'templates';
+        }
+        save(); closeModal(); render();
+        toast(v ? 'Venue updated' : `${name} added — build its checklists next`, 'ok');
+      };
+    }
+  });
+}
+
+/* ---- copy a checklist template from another venue ----------------------- */
+function openCopyTemplate() {
+  const others = S.venues.filter(v => v.id !== V().id);
+  if (!others.length) { toast('There is only one venue', 'warn'); return; }
+  let src = others[0].id, lists = { open: true, close: true };
+
+  openModal(`
+    <div class="modal-head"><div style="flex:1">
+      <div class="modal-title">Copy checklists</div>
+      <div class="modal-sub">Into <b>${esc(V().name)}</b>. Copied tasks are added — nothing already there is removed.</div>
+    </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
+    <div class="modal-body stack" style="gap:13px">
+      <div class="field"><label class="label" for="cp-src">Copy from</label>
+        <select class="select" id="cp-src">${others.map(v =>
+          `<option value="${v.id}">${esc(v.name)} — ${TPL(v.id).open.length + TPL(v.id).close.length} tasks</option>`).join('')}</select></div>
+      <div class="field"><label class="label">Which lists</label>
+        <div class="row wrap" style="gap:6px" id="cp-lists">
+          ${['open','close'].map(k => `<button class="chip chip-accent" data-k="${k}" style="cursor:pointer;height:28px;padding:0 11px">${LIST_META[k].full}</button>`).join('')}
+        </div></div>
+    </div>
+    <div class="modal-foot"><button class="btn" data-x="close">Cancel</button>
+      <button class="btn btn-primary" data-x="save">Copy across</button></div>`, {
+    after(root) {
+      root.querySelectorAll('[data-x=close]').forEach(b => b.onclick = closeModal);
+      root.querySelector('#cp-src').onchange = e => { src = e.target.value; };
+      root.querySelector('#cp-lists').addEventListener('click', e => {
+        const b = e.target.closest('[data-k]'); if (!b) return;
+        lists[b.dataset.k] = !lists[b.dataset.k];
+        b.classList.toggle('chip-accent', lists[b.dataset.k]);
+      });
+      root.querySelector('[data-x=save]').onclick = () => {
+        if (!lists.open && !lists.close) { toast('Pick at least one list', 'warn'); return; }
+        let n = 0;
+        ['open','close'].forEach(k => {
+          if (!lists[k]) return;
+          const have = new Set(TPL()[k].map(t => t.title.toLowerCase()));
+          TPL(src)[k].forEach(t => {
+            if (have.has(t.title.toLowerCase())) return;
+            TPL()[k].push({ id: uid('t'), title: t.title, detail: t.detail, critical: t.critical });
+            n++;
+          });
+        });
+        save(); closeModal(); render();
+        toast(n ? `${plural(n, 'task')} copied from ${venue(src).name}` : 'Nothing new to copy', n ? 'ok' : 'warn');
+      };
+    }
+  });
+}
+
+/* ---- notification preview ---------------------------------------------- */
+function openNotif(id) {
+  const n = S.notifications.find(x => x.id === id); if (!n) return;
+  n.read = true; save();
+  const body = n.channel === 'sms'
+    ? `<div class="tiny mut" style="margin-bottom:9px">SMS to ${esc(n.to)} · ${esc(fmtDT(n.at))}</div>
+       <div class="sms-bubble">${esc(n.text)}</div>
+       <div class="tiny mut" style="margin-top:12px">${n.text.length} characters · ${Math.ceil(n.text.length / 160)} segment(s)</div>`
+    : `<div class="mailpv">
+        <div class="mailpv-head">
+          <div class="kvline"><span>From</span><span>Peachy Checklists &lt;no-reply@peachybar.com.au&gt;</span></div>
+          <div class="kvline"><span>To</span><span>${esc(n.to)}</span></div>
+          <div class="kvline"><span>Subject</span><span><b>${esc(n.subject)}</b></span></div>
+          <div class="kvline"><span>Sent</span><span>${esc(fmtDT(n.at))}</span></div>
+        </div>
+        <div class="mailpv-body">${n.html}</div>
+       </div>`;
+  openModal(`
+    <div class="modal-head"><div style="flex:1">
+      <div class="modal-title">${n.channel === 'sms' ? 'SMS preview' : 'Email preview'}</div>
+      <div class="modal-sub">${n.kind === 'end-of-day' ? 'End-of-day summary' : 'List completed'} · delivery stubbed</div>
+    </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
+    <div class="modal-body">${body}</div>
+    <div class="modal-foot"><button class="btn" data-x="close">Close</button></div>`, {
+    wide: true,
+    after(root) { root.querySelectorAll('[data-x=close]').forEach(b => b.onclick = closeModal); },
+    onClose: render
+  });
+}
+
+/* ---- a past day, read-only --------------------------------------------- */
+function openDay(key) {
+  const day = DAYS()[key]; if (!day) return;
+  const d = dayStats(day);
+  const block = lk => {
+    const L = day.lists[lk], s = listStats(L);
+    return `<div class="card" style="margin-bottom:14px">
+      <div class="card-head">${ringHtml(s.pct, 40, s.complete)}
+        <div style="flex:1"><div class="h3">${LIST_META[lk].full}</div>
+          <div class="tiny mut">${L.submitted ? `Submitted by ${esc(uname(L.submittedBy))} · ${esc(fmtTime(L.submittedAt))}` : 'Never submitted'}</div></div></div>
+      <div class="tasklist">${L.tasks.map(t => taskRowHtml(t, { locked: true })).join('')}</div></div>`;
+  };
+  openModal(`
+    <div class="modal-head"><div style="flex:1">
+      <div class="modal-title">${esc(fmtDate(key))}</div>
+      <div class="modal-sub">${esc(V().name)} · ${d.done} of ${d.total} tasks completed · ${d.pct}%${d.missed ? ` · ${d.missed} left undone` : ''}</div>
+    </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
+    <div class="modal-body" style="background:var(--bg)">${block('open')}${block('close')}</div>
+    <div class="modal-foot">
+      <button class="btn" data-x="csv">${ic('dl', 15)} Export this day</button>
+      <button class="btn btn-primary" data-x="close">Done</button></div>`, {
+    wide: true,
+    after(root) {
+      root.querySelectorAll('[data-x=close]').forEach(b => b.onclick = closeModal);
+      root.querySelector('[data-x=csv]').onclick = () =>
+        exportCsv([key], `${V().name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${key}.csv`);
+    }
+  });
+}
+
+/* ==========================================================================
+   ACTIONS
+   ========================================================================== */
+function toggleTask(lk, id) {
+  const day = today(), L = day.lists[lk];
+  if (L.submitted) { toast('This list is submitted — reopen it to make changes', 'warn'); return; }
+  if (!me().active) { toast('This account is disabled', 'warn'); return; }
+  const t = L.tasks.find(x => x.id === id); if (!t) return;
+  if (t.status === 'done') { t.status = 'pending'; t.doneBy = null; t.doneAt = null; }
+  else { t.status = 'done'; t.doneBy = me().id; t.doneAt = new Date().toISOString(); t.reason = ''; }
+  save(); runTriggers(); render();
+}
+
+function syncTemplate(lk) {
+  const day = today(), L = day.lists[lk], tpl = TPL()[lk];
+  const byTpl = {}; L.tasks.forEach(t => { if (t.tplId) byTpl[t.tplId] = t; });
+  const kept = tpl.map(x => {
+    const ex = byTpl[x.id];
+    if (ex) { ex.title = x.title; ex.detail = x.detail; ex.critical = x.critical; delete byTpl[x.id]; return ex; }
+    return instanceFromTemplate(x);
+  });
+  const orphansDone = Object.values(byTpl).filter(t => t.status === 'done');
+  L.tasks = kept.concat(orphansDone, L.tasks.filter(t => t.source === 'adhoc'));
+  L.completeNotified = false;
+  save(); runTriggers(); render();
+  toast(`${LIST_META[lk].full} list synced with the template`, 'ok');
+}
+
+/* pulling someone off shift has to clear them from every venue, not just this one */
+function unrosterEverywhere(userId) {
+  S.venues.forEach(v => {
+    const d = today(v.id);
+    ['open','close'].forEach(k => { d.roster[k] = d.roster[k].filter(x => x !== userId); });
+  });
+}
+
+function handleAct(act, ds) {
+  const day = today();
+  switch (act) {
+    case 'review':    openReview(ds.list); break;
+    case 'add-task':  openAddTask(ds.list || R.list); break;
+    case 'del-task': {
+      const L = day.lists[ds.list];
+      L.tasks = L.tasks.filter(t => t.id !== ds.id);
+      save(); runTriggers(); render(); toast('Task removed'); break;
+    }
+    case 'cover': {
+      if (!day.roster[ds.list].includes(me().id)) day.roster[ds.list].push(me().id);
+      save(); render(); toast(`You're on the ${LIST_META[ds.list].label.toLowerCase()} shift`, 'ok'); break;
+    }
+    case 'reopen': {
+      const L = day.lists[ds.list];
+      L.submitted = false; L.submittedBy = null; L.submittedAt = null;
+      save(); render(); toast('List reopened'); break;
+    }
+    case 'tick-all': {
+      const L = day.lists[ds.list];
+      if (L.submitted) { toast('Reopen the list first', 'warn'); break; }
+      L.tasks.forEach(t => { if (t.status !== 'done') { t.status = 'done'; t.doneBy = me().id; t.doneAt = new Date().toISOString(); t.reason = ''; } });
+      save(); runTriggers(); render(); break;
+    }
+    case 'sync-tpl':  syncTemplate(ds.list); break;
+    case 'eod': {
+      if (day.reported) { toast(`${V().name} has already been reported today — see Alerts`, 'warn'); R.tab = 'alerts'; render(); break; }
+      runTriggers({ forceEod: true, venueId: V().id }); render(); break;
+    }
+    case 'roster': {
+      const arr = day.roster[ds.list];
+      const i = arr.indexOf(ds.id);
+      if (i >= 0) arr.splice(i, 1); else arr.push(ds.id);
+      save(); render(); break;
+    }
+    case 'add-user':    openUserEditor(null); break;
+    case 'edit-user':   openUserEditor(ds.id); break;
+    case 'toggle-user': {
+      const u = user(ds.id); u.active = !u.active;
+      if (!u.active) unrosterEverywhere(ds.id);
+      save(); render(); toast(`${u.name.split(' ')[0]} ${u.active ? 'can now sign in' : 'no longer has access'}`); break;
+    }
+    case 'toggle-user-venue': {
+      const u = user(ds.id), i = u.venues.indexOf(ds.venue);
+      if (i >= 0) {
+        if (u.venues.length < 2) { toast('They need at least one venue', 'warn'); break; }
+        u.venues.splice(i, 1);
+        ['open','close'].forEach(k => { const d = today(ds.venue); d.roster[k] = d.roster[k].filter(x => x !== ds.id); });
+      } else u.venues.push(ds.venue);
+      save(); render();
+      toast(`${u.name.split(' ')[0]} ${i >= 0 ? 'removed from' : 'added to'} ${venue(ds.venue).name}`); break;
+    }
+    case 'del-user': {
+      const u = user(ds.id);
+      confirmModal(`Remove ${u.name}?`, 'Their past checklist history stays in the record. This cannot be undone.', 'Remove', () => {
+        S.users = S.users.filter(x => x.id !== ds.id);
+        unrosterEverywhere(ds.id);
+        if (S.session.userId === ds.id) S.session.userId = S.users.find(x => x.role === 'manager').id;
+        save(); render(); toast('Employee removed');
+      }, true); break;
+    }
+    case 'tpl-add':  openTemplateEditor(ds.list, null); break;
+    case 'tpl-edit': openTemplateEditor(ds.list, ds.id); break;
+    case 'tpl-crit': {
+      const t = TPL()[ds.list].find(x => x.id === ds.id); t.critical = !t.critical; save(); render(); break;
+    }
+    case 'tpl-del': {
+      const arr = TPL()[ds.list], t = arr.find(x => x.id === ds.id);
+      confirmModal('Remove from template?', `"${t.title}" will stop appearing on new ${LIST_META[ds.list].label.toLowerCase()} lists.`, 'Remove', () => {
+        TPL()[ds.list] = arr.filter(x => x.id !== ds.id); save(); render(); toast('Removed from the template');
+      }, true); break;
+    }
+    case 'tpl-up': case 'tpl-down': {
+      const arr = TPL()[ds.list], i = arr.findIndex(x => x.id === ds.id);
+      const j = act === 'tpl-up' ? i - 1 : i + 1;
+      if (j < 0 || j >= arr.length) break;
+      [arr[i], arr[j]] = [arr[j], arr[i]]; save(); render(); break;
+    }
+    case 'view-day':  openDay(ds.key); break;
+    case 'csv-all':   exportCsv(Object.keys(DAYS()).sort().reverse(), `${V().name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-checklists.csv`); break;
+    case 'csv-group': exportAllVenues(); break;
+    case 'open-notif': openNotif(ds.id); break;
+    case 'mark-read': S.notifications.forEach(n => n.read = true); save(); render(); break;
+    case 'test-notif': {
+      const built = buildEndOfDay(V(), day, false);
+      built.subject = '[Test] ' + built.subject;
+      Notifier.push('end-of-day', built, { dayKey: day.date });
+      render(); toast('Test notification composed — open it to preview', 'ok'); break;
+    }
+    case 'setting-toggle': V()[ds.key] = !V()[ds.key]; save(); render(); break;
+    case 'venue-accent':   V().accent = ds.key; save(); render(); break;
+    case 'goto-venue': {
+      if (ds.id === S.session.venueId) break;
+      S.session.venueId = ds.id; R.list = 'open';
+      save(); render(); scrollTop(); toast(`Switched to ${V().name}`); break;
+    }
+    case 'add-venue':  openVenueEditor(null); break;
+    case 'edit-venue': openVenueEditor(ds.id); break;
+    case 'copy-tpl':   openCopyTemplate(); break;
+    case 'del-venue': {
+      if (S.venues.length < 2) { toast('You need at least one venue', 'warn'); break; }
+      const v = venue(ds.id);
+      confirmModal(`Remove ${v.name}?`, 'Its checklists, roster and history go with it. Alerts already sent are kept. This cannot be undone.', 'Remove venue', () => {
+        S.venues = S.venues.filter(x => x.id !== ds.id);
+        delete S.templates[ds.id]; delete S.days[ds.id];
+        S.users.forEach(u => { u.venues = u.venues.filter(x => x !== ds.id); });
+        S.users.filter(u => u.role === 'employee' && !u.venues.length).forEach(u => { u.venues = [S.venues[0].id]; });
+        if (S.session.venueId === ds.id) S.session.venueId = S.venues[0].id;
+        save(); render(); toast(`${v.name} removed`);
+      }, true); break;
+    }
+    case 'reset-day': {
+      confirmModal(`Reset today at ${V().name}?`, 'Both lists go back to the template with nothing ticked. Other venues and all history are untouched.', 'Reset today', () => {
+        const roster = DAYS()[dayKey()].roster;
+        DAYS()[dayKey()] = makeDay(dayKey(), roster, V().id);
+        save(); render(); toast(`Today reset for ${V().name}`, 'ok');
+      }, true); break;
+    }
+    case 'reset-all': {
+      confirmModal('Wipe all demo data?', 'Everything goes back to the seeded demo — staff, templates, history and alerts.', 'Wipe and reseed', () => {
+        localStorage.removeItem(STORE_KEY); S = defaultState(); save();
+        R = { tab: 'today', list: 'open', historyKey: null };
+        render(); toast('Demo data reset', 'ok');
+      }, true); break;
+    }
+  }
+}
+
+/* ==========================================================================
+   WIRING
+   ========================================================================== */
+function scrollTop() { const c = $('#content'); if (c) c.scrollTop = 0; }
+
+$('#app').addEventListener('click', e => {
+  const a = e.target.closest('[data-act]');
+  if (a && $('#app').contains(a) && !e.target.closest('#modal-root')) { e.preventDefault(); handleAct(a.dataset.act, a.dataset); return; }
+  const t = e.target.closest('[data-task]');
+  if (t && !e.target.closest('#modal-root')) { toggleTask(t.dataset.list, t.dataset.task); return; }
+  const tab = e.target.closest('[data-tab]');
+  if (tab) { R.tab = tab.dataset.tab; render(); scrollTop(); return; }
+  const seg = e.target.closest('.segmented [data-list]');
+  if (seg) { R.list = seg.dataset.list; render(); return; }
+});
+
+$('#user-switch').addEventListener('change', e => {
+  S.session.userId = e.target.value;
+  R.tab = 'today';
+  ensureVenue();
+  save(); render(); scrollTop();
+  const n = venuesFor(me()).length;
+  toast(`Now viewing as ${me().name}${isMgr() ? ' (manager)' : ` · ${n === 1 ? V().name : plural(n, 'venue')}`}`);
+});
+
+$('#venue-switch').addEventListener('change', e => {
+  S.session.venueId = e.target.value;
+  R.list = 'open';
+  save(); render(); scrollTop();
+  toast(`Switched to ${V().name}`);
+});
+
+$('#btn-theme').addEventListener('click', () => {
+  const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem('peachy.theme', next); } catch (e) {}
+  renderChrome();
+});
+
+$('#btn-mobile').addEventListener('click', () => {
+  document.body.classList.toggle('mobile-view');
+  try { localStorage.setItem('peachy.mobile', document.body.classList.contains('mobile-view') ? '1' : '0'); } catch (e) {}
+  renderChrome();
+});
+
+$('#btn-alerts').addEventListener('click', () => { R.tab = 'alerts'; render(); scrollTop(); });
+
+$('#page').addEventListener('change', e => {
+  const el = e.target.closest('[data-set]');
+  if (!el) return;
+  V()[el.dataset.set] = el.value;
+  save(); render();
+  toast('Saved');
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('#modal-root').classList.contains('is-open')) closeModal();
+});
+
+/* ------------------------------------------------------------------- init */
+function tickClock() {
+  const el = $('#sb-time');
+  if (el) el.textContent = new Date().toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+(function init() {
+  try {
+    const th = localStorage.getItem('peachy.theme');
+    if (th) document.documentElement.dataset.theme = th;
+    else if (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches) document.documentElement.dataset.theme = 'dark';
+    if (localStorage.getItem('peachy.mobile') === '1') document.body.classList.add('mobile-view');
+  } catch (e) {}
+
+  load();
+  tickClock();
+  render();
+
+  // cutoff watcher — in production this is a scheduled backend job, not a timer
+  setInterval(() => { tickClock(); if (runTriggers()) render(); }, 30000);
+
+  console.info('%cPeachy — Shift Checklist (demo, multi-venue)', 'font-weight:700;font-size:13px');
+  console.info(`${S.venues.length} venues: ${S.venues.map(v => v.name).join(', ')}`);
+  console.info('Notifications are stubbed: see Notifier.deliver(). State lives in localStorage["' + STORE_KEY + '"].');
+})();
+</script>
+</body>
+</html>

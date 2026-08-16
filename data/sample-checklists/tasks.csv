@@ -1,0 +1,4 @@
+venue,list_type,sort_order,title,detail,critical
+Peachy Surry Hills,open,1,Unlock and disarm alarm,Walk the floor before service,true
+Peachy Surry Hills,open,2,Check refrigeration temperatures,Record all fridge temperatures,true
+Peachy Surry Hills,close,1,Reconcile POS and cash drawer,Record discrepancies,true

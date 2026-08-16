@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+.env.local
+.DS_Store
+Thumbs.db
+node_modules/
+.supabase/
+.vscode/
