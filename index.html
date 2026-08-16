@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>DailyOps — Shift Checklist</title>
-<meta name="description" content="DailyOps multi-venue opening and closing shift checklist demo" />
+<title>DailyOps — Daily Operations</title>
+<meta name="description" content="DailyOps multi-venue daily operations and opening/closing shift tasks" />
 <style>
 /* ==========================================================================
-   DAILYOPS — SHIFT CHECKLIST
+   DAILYOPS — DAILY OPERATIONS
    Single-file demo. Design tokens -> layout -> components -> responsive.
    Responsive rules use @container so the "Mobile view" toggle and a genuinely
    narrow window both hit the exact same breakpoints.
@@ -568,7 +568,7 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
       <div class="auth-card">
         <div class="auth-brand">
           <div class="logo" aria-hidden="true">D</div>
-          <div><div class="auth-title">DailyOps</div><div class="auth-sub">Shift checklists for every venue</div></div>
+          <div><div class="auth-title">DailyOps</div><div class="auth-sub">Daily operations for every venue</div></div>
         </div>
         <div class="auth-loading" id="auth-loading">Checking your DailyOps session…</div>
         <div class="auth-error auth-status" id="auth-status" hidden></div>
@@ -635,10 +635,10 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
 <script src="./supabase/config.js"></script>
 <script>
 /* ========================================================================== 
-   DAILYOPS — SHIFT CHECKLIST  ·  demo build
-   REAL NOW: auth, profile, organisation role, venues, today's daily checklists,
+   DAILYOPS — DAILY OPERATIONS  ·  demo build
+   REAL NOW: auth, profile, organisation role, venues, today's shift operations,
    and today's daily task status are loaded from Supabase.
-   DEMO/LOCAL STILL: templates, rosters, historical days, CSV history, and
+   DEMO/LOCAL STILL: recurring templates, rosters, historical days, CSV history, and
    notifications remain in localStorage until their later migration phases.
    Sections: icons · utils · store/seed · notifier · render · actions · init
    ========================================================================== */
@@ -725,8 +725,10 @@ const pct = (a, b) => b === 0 ? 100 : Math.round((a / b) * 100);
 const plural = (n, s, p) => `${n} ${n === 1 ? s : (p || s + 's')}`;
 
 const LIST_META = {
-  open:  { key:'open',  label:'Open',  full:'Open Shift',  icon:'sunrise', verb:'opening' },
-  close: { key:'close', label:'Close', full:'Close Shift', icon:'nightly', verb:'closing' }
+  // open/close remain compatibility keys for the current schema and adapter.
+  // Additional operation sections can be added without changing the existing keys.
+  open:  { key:'open',  label:'Opening',  full:'Opening Shift',  icon:'sunrise', verb:'opening' },
+  close: { key:'close', label:'Closing', full:'Closing Shift', icon:'nightly', verb:'closing' }
 };
 const REASONS = {
   blocked: { label:'Blocked',        chip:'chip-danger', needsDetail:true,  sub:'Something stopped this getting done' },
@@ -737,7 +739,7 @@ const REASONS = {
 /* ==========================================================================
    SUPABASE BOUNDARY
    The current Supabase slice owns auth, identity, venue access, and today's
-   checklist/task instance. Template, roster, history, and notification data
+   daily-operation/shift-task instance. Template, roster, history, and notification data
    remain explicitly local/demo data.
    ========================================================================== */
 
@@ -756,7 +758,7 @@ const ACCENTS = {
 };
 const accentOf = key => ACCENTS[key] || ACCENTS.terracotta;
 
-/* ---- seed checklists, one pair per venue ------------------------------- */
+/* ---- seed demo shift tasks, one opening/closing pair per venue ------------ */
 const SH_OPEN = [
   ['Unlock, disarm alarm, walk the floor', 'Check nothing was disturbed overnight; log anything odd.', false],
   ['Cool-room + fridge temperature log', 'All units must read 5°C or below. Record on the sheet by the pass.', true],
@@ -1006,7 +1008,7 @@ function createLocalDemoVenue(index) {
   const source = S.venues[index % S.venues.length];
   const id = uid('v');
   const venue = {
-    id, name: `Local checklist context ${index + 1}`, sub: 'Demo data',
+    id, name: `Local operations context ${index + 1}`, sub: 'Demo data',
     accent: source.accent, cutoff: source.cutoff,
     managerEmail: source.managerEmail, managerPhone: source.managerPhone,
     notifyComplete: source.notifyComplete, notifyEndOfDay: source.notifyEndOfDay,
@@ -1138,7 +1140,7 @@ async function loadOrganisationAccess(session) {
 
 /* selectors */
 /* In Supabase mode these are real venue rows wrapped around local demo IDs.
-   The wrapper keeps checklist/demo state keyed to S.templates and S.days. */
+   The wrapper keeps deferred template/roster/history state keyed to S.templates and S.days. */
 function venueCatalog() {
   return isSupabaseMode() ? AUTH.venueContexts : S.venues;
 }
@@ -1205,6 +1207,7 @@ function ensureVenue() {
   if (!selected || !allowed.some(v => v.id === selected.id)) selectVenue(allowed[0].id);
 }
 
+// Legacy schema adapter: daily_checklists rows are today's shift-operation instances.
 const REMOTE_CHECKLIST_SELECT = 'id,venue_id,work_date,list_type,submitted,submitted_by,submitted_at,complete_notified';
 const REMOTE_TASK_SELECT = 'id,checklist_id,template_task_id,sort_order,title,detail,critical,source,status,added_by,added_at,completed_by,completed_at,note,reason';
 
@@ -1274,14 +1277,14 @@ async function loadSupabaseTodayForVenue(context, date) {
     .eq('work_date', date);
   if (checklistError) {
     console.error('[supabase] daily checklist load failed', { venueId: context.realId, date, error: checklistError });
-    throw accessError('today-load', `We could not load today's checklist for ${context.name}.`);
+    throw accessError('today-load', `We could not load today's operations for ${context.name}.`);
   }
 
   let checklists = initialChecklists || [];
   const missingTypes = ['open', 'close'].filter(type => !checklists.some(row => row.list_type === type));
   const canBootstrap = context.organisationRole === 'manager';
   if (missingTypes.length && !canBootstrap) {
-    throw accessError('today-not-initialized', `Today's checklist for ${context.name} has not been initialised by a venue manager yet.`);
+    throw accessError('today-not-initialized', `Today's operations for ${context.name} have not been initialised by a venue manager yet.`);
   }
   if (missingTypes.length) {
     const { error } = await DB.from('daily_checklists').insert(missingTypes.map(listType => ({
@@ -1292,7 +1295,7 @@ async function loadSupabaseTodayForVenue(context, date) {
     // A concurrent manager may have created the unique row between the read and insert.
     if (error && error.code !== '23505') {
       console.error('[supabase] daily checklist bootstrap failed', { venueId: context.realId, date, error });
-      throw accessError('today-bootstrap', `We could not initialise today's checklist for ${context.name}.`);
+      throw accessError('today-bootstrap', `We could not initialise today's operations for ${context.name}.`);
     }
     const refreshed = await DB.from('daily_checklists')
       .select(REMOTE_CHECKLIST_SELECT)
@@ -1300,13 +1303,13 @@ async function loadSupabaseTodayForVenue(context, date) {
       .eq('work_date', date);
     if (refreshed.error) {
       console.error('[supabase] daily checklist reload failed', { venueId: context.realId, date, error: refreshed.error });
-      throw accessError('today-load', `We could not reload today's checklist for ${context.name}.`);
+      throw accessError('today-load', `We could not reload today's operations for ${context.name}.`);
     }
     checklists = refreshed.data || [];
   }
 
   if (['open', 'close'].some(type => !checklists.some(row => row.list_type === type))) {
-    throw accessError('today-load', `Today's opening and closing checklists could not be loaded for ${context.name}.`);
+    throw accessError('today-load', `Today's Opening and Closing Shifts could not be loaded for ${context.name}.`);
   }
 
   let checklistIds = checklists.map(row => row.id);
@@ -1328,7 +1331,7 @@ async function loadSupabaseTodayForVenue(context, date) {
     const checklist = checklists.find(row => row.list_type === listType);
     if (tasks.some(row => row.checklist_id === checklist.id)) continue;
     if (!canBootstrap) {
-      throw accessError('today-not-initialized', `Today's ${LIST_META[listType].label.toLowerCase()} checklist for ${context.name} has no tasks yet. A venue manager must initialise it first.`);
+      throw accessError('today-not-initialized', `Today's ${LIST_META[listType].full} for ${context.name} has no tasks yet. A venue manager must initialise it first.`);
     }
     const demoTasks = (S.templates[context.id] && S.templates[context.id][listType]) || [];
     if (!demoTasks.length) continue;
@@ -1346,7 +1349,7 @@ async function loadSupabaseTodayForVenue(context, date) {
     const { error } = await DB.from('daily_tasks').insert(seedRows);
     if (error) {
       console.error('[supabase] daily task bootstrap failed', { venueId: context.realId, listType, date, error });
-      throw accessError('today-bootstrap', `We could not initialise today's ${LIST_META[listType].label.toLowerCase()} tasks for ${context.name}.`);
+      throw accessError('today-bootstrap', `We could not initialise today's ${LIST_META[listType].full.toLowerCase()} tasks for ${context.name}.`);
     }
   }
 
@@ -1357,7 +1360,7 @@ async function loadSupabaseTodayForVenue(context, date) {
     .order('id');
   if (taskResult.error) {
     console.error('[supabase] daily task reload failed', { venueId: context.realId, date, error: taskResult.error });
-    throw accessError('today-load', `We could not reload today's tasks for ${context.name}.`);
+    throw accessError('today-load', `We could not reload today's shift tasks for ${context.name}.`);
   }
   tasks = taskResult.data || [];
   return mapRemoteDay(context, date, checklists, tasks);
@@ -1413,7 +1416,7 @@ function today(vid) {
     const context = supabaseVenueContext(v);
     const remoteDay = context && SUPABASE_TODAY.byVenue[context.realId];
     if (!remoteDay || SUPABASE_TODAY.date !== k) {
-      throw new Error(`Today's Supabase checklist is not loaded for ${context ? context.name : 'this venue'}.`);
+      throw new Error(`Today's Supabase operations are not loaded for ${context ? context.name : 'this venue'}.`);
     }
     return remoteDay;
   }
@@ -1522,12 +1525,12 @@ function buildListComplete(v, day, lk) {
   const L = day.lists[lk], m = LIST_META[lk], st = listStats(L);
   const who = [...new Set(L.tasks.map(t => t.doneBy).filter(Boolean))].map(uname);
   return {
-    subject: `✅ ${v.name} — ${m.full} checklist complete, ${fmtDateShort(day.date)}`,
+    subject: `✅ ${v.name} — ${m.full} complete, ${fmtDateShort(day.date)}`,
     html: `<h4>All ${m.label.toLowerCase()} tasks are done</h4>
       <p style="color:var(--muted);margin:0 0 10px">${esc(fmtDate(day.date))} · ${esc(v.name)}</p>
       <p><b>${st.done} of ${st.total}</b> tasks ticked off by ${esc(who.join(', ') || 'the team')}.</p>
       <ul>${L.tasks.map(taskLineHtml).join('')}</ul>`,
-    text: `${v.name}: ${m.full} checklist is complete — all ${st.total} tasks done by ${who.join(', ') || 'the team'}. ${fmtDateShort(day.date)}.`
+    text: `${v.name}: ${m.full} is complete — all ${st.total} tasks done by ${who.join(', ') || 'the team'}. ${fmtDateShort(day.date)}.`
   };
 }
 function buildEndOfDay(v, day, auto) {
@@ -1694,7 +1697,7 @@ let R = { tab: 'today', list: 'open', historyKey: null };
 
 const NAV_MGR = [
   { id:'today',     label:'Today',      icon:'home'  },
-  { id:'templates', label:'Checklists', icon:'list'  },
+  { id:'templates', label:'Templates',  icon:'list'  },
   { id:'team',      label:'Team',       icon:'users' },
   { id:'history',   label:'History',    icon:'clock' },
   { id:'settings',  label:'Settings',   icon:'cog'   }
@@ -1781,7 +1784,7 @@ function renderChrome() {
   $('#venue-pick').title = mine.length < 2 ? v.name : 'Switch venue';
   $('#venue-switch').innerHTML = mine.map(x =>
     `<option value="${x.id}" ${x.id === v.id ? 'selected' : ''}>${esc(x.name)} — ${esc(x.sub)}</option>`).join('');
-  document.title = `${v.name} — Shift Checklist`;
+  document.title = `${v.name} — Daily Operations`;
 
   $('#cur-avatar').textContent = initials(m.name);
   $('#cur-avatar').className = 'avatar ' + (m.role === 'manager' ? 'is-mgr' : '');
@@ -1868,24 +1871,24 @@ function pageEmployee() {
   let banner = '';
   if (locked) {
     banner = `<div class="banner banner-ok">${ic('check', 17)}<div>
-      <b>Shift submitted.</b> ${esc(uname(L.submittedBy))} sent this list to the manager at ${esc(fmtTime(L.submittedAt))}. It's now read-only.</div></div>`;
+      <b>Shift submitted.</b> ${esc(uname(L.submittedBy))} sent this shift to the manager at ${esc(fmtTime(L.submittedAt))}. It's now read-only.</div></div>`;
   } else if (!rostered) {
     banner = `<div class="banner banner-warn">${ic('info', 17)}<div class="row-b" style="width:100%">
-      <span>You're not rostered on the ${esc(m.label.toLowerCase())} shift today.</span>
+      <span>You're not rostered on the ${esc(m.full)} today.</span>
       <button class="btn btn-sm" data-act="cover" data-list="${lk}">I'm covering</button></div></div>`;
   }
 
   const rows = L.tasks.length
     ? L.tasks.map(t => taskRowHtml(t, { listKey: lk, locked: locked || !me().active })).join('')
     : `<div class="empty"><div class="empty-icon">${ic('list', 20)}</div>
-        <div>No ${esc(m.label.toLowerCase())} tasks set for today.</div>
-        <div class="tiny mut" style="margin-top:4px">Your manager hasn't published this list yet.</div></div>`;
+        <div>No ${esc(m.full.toLowerCase())} tasks set for today.</div>
+        <div class="tiny mut" style="margin-top:4px">Your manager hasn't published this shift yet.</div></div>`;
 
   const bar = locked
     ? `<div class="actionbar"><div class="ab-text">
          <div class="row" style="gap:8px"><span class="chip chip-ok chip-dot">Submitted</span>
          <span class="tiny mut">${st.done} of ${st.total} done${st.flagged ? ` · ${st.flagged} flagged` : ''}</span></div></div>
-         <button class="btn btn-sm" data-act="reopen" data-list="${lk}">Reopen list</button></div>`
+         <button class="btn btn-sm" data-act="reopen" data-list="${lk}">Reopen shift</button></div>`
     : `<div class="actionbar">
          <div class="ab-text">
            <div class="row-b" style="margin-bottom:6px">
@@ -1909,7 +1912,7 @@ function pageEmployee() {
         <div class="card-head">
           ${ringHtml(st.pct, 44, st.complete)}
           <div style="flex:1;min-width:0">
-            <div class="h3">${esc(m.full)} checklist</div>
+            <div class="h3">${esc(m.full)}</div>
             <div class="tiny mut">${st.done} done · ${st.pending} to go${st.flagged ? ` · ${st.flagged} flagged` : ''}</div>
           </div>
           <div class="hide-sm">${avatarStack(day.roster[lk])}</div>
@@ -1928,10 +1931,10 @@ function activityFeed(day) {
   ['open','close'].forEach(lk => {
     day.lists[lk].tasks.forEach(t => {
       if (t.status === 'done' && t.doneAt) ev.push({ at: t.doneAt, who: t.doneBy, text: `ticked <b>${esc(t.title)}</b>`, lk });
-      if (t.source === 'adhoc' && t.addedBy) ev.push({ at: t.addedAt || day.date + 'T08:00:00', who: t.addedBy, text: `added <b>${esc(t.title)}</b> to the ${LIST_META[lk].label.toLowerCase()} list`, lk });
+      if (t.source === 'adhoc' && t.addedBy) ev.push({ at: t.addedAt || day.date + 'T08:00:00', who: t.addedBy, text: `added <b>${esc(t.title)}</b> to the ${LIST_META[lk].full.toLowerCase()}`, lk });
     });
     const L = day.lists[lk];
-    if (L.submitted) ev.push({ at: L.submittedAt, who: L.submittedBy, text: `submitted the <b>${LIST_META[lk].full.toLowerCase()}</b> checklist`, lk });
+    if (L.submitted) ev.push({ at: L.submittedAt, who: L.submittedBy, text: `submitted the <b>${LIST_META[lk].full.toLowerCase()}</b>`, lk });
   });
   return ev.sort((a, b) => new Date(b.at) - new Date(a.at)).slice(0, 14);
 }
@@ -1956,7 +1959,7 @@ function venueStripHtml() {
         </span>
         <span class="vcard-num">${d.done}<span class="mut" style="font-size:13px;font-weight:600">/${d.total}</span></span>
         <span class="bar" style="display:block;margin-top:7px"><i style="width:${d.pct}%;background:${col}"></i></span>
-        <span class="tiny mut" style="display:block;margin-top:7px">${d.open.done}/${d.open.total} open · ${d.close.done}/${d.close.total} close${
+        <span class="tiny mut" style="display:block;margin-top:7px">${d.open.done}/${d.open.total} opening · ${d.close.done}/${d.close.total} closing${
           crit ? ` · <span style="color:var(--danger);font-weight:640">${crit} critical</span>` : ''}</span>
       </button>`;
     }).join('')}</div></div>`;
@@ -1990,7 +1993,7 @@ function pageManagerToday() {
   const segs = ['open','close'].map(k => {
     const s = listStats(day.lists[k]);
     return `<button data-list="${k}" class="${k === lk ? 'is-active' : ''}">
-      ${ic(LIST_META[k].icon, 17)}<span>${LIST_META[k].label} list</span>
+      ${ic(LIST_META[k].icon, 17)}<span>${LIST_META[k].full}</span>
       <span class="seg-count">${s.done}/${s.total}</span></button>`;
   }).join('');
 
@@ -2002,7 +2005,7 @@ function pageManagerToday() {
   return `
     <div class="page-head row-b wrap">
       <div>
-        <div class="page-title">Today</div>
+        <div class="page-title">Today's Operations</div>
         <div class="page-sub">${esc(fmtDate(day.date))} · ${esc(V().name)}</div>
       </div>
       <div class="row wrap" style="gap:8px">
@@ -2015,7 +2018,7 @@ function pageManagerToday() {
       <div class="stats">
         <div class="stat"><div class="stat-k">Completed</div><div class="stat-v">${d.done}<span style="font-size:15px;color:var(--muted)">/${d.total}</span></div><div class="stat-s">${d.pct}% of today</div></div>
         <div class="stat"><div class="stat-k">Outstanding</div><div class="stat-v" style="color:${d.missed ? 'var(--accent)' : 'var(--ok)'}">${d.missed}</div><div class="stat-s">${d.missed ? 'still to do' : 'nothing left'}</div></div>
-        <div class="stat"><div class="stat-k">Critical open</div><div class="stat-v" style="color:${critOut.length ? 'var(--danger)' : 'var(--ok)'}">${critOut.length}</div><div class="stat-s">${critOut.length ? 'need attention' : 'all covered'}</div></div>
+        <div class="stat"><div class="stat-k">Critical outstanding</div><div class="stat-v" style="color:${critOut.length ? 'var(--danger)' : 'var(--ok)'}">${critOut.length}</div><div class="stat-s">${critOut.length ? 'need attention' : 'all covered'}</div></div>
         <div class="stat"><div class="stat-k">On shift</div><div class="stat-v">${new Set([...day.roster.open, ...day.roster.close]).size}</div><div class="stat-s">rostered today</div></div>
       </div>
 
@@ -2031,12 +2034,12 @@ function pageManagerToday() {
       <div class="card">
         <div class="card-head">
           <div style="flex:1;min-width:0">
-            <div class="h3">${esc(m.full)} checklist</div>
+            <div class="h3">${esc(m.full)}</div>
             <div class="tiny mut">${L.submitted ? `Submitted by ${esc(uname(L.submittedBy))} at ${esc(fmtTime(L.submittedAt))} — read-only` : 'Live — tap a task to tick it off on behalf of the team'}</div>
           </div>
           <span class="chip ${st.complete ? 'chip-ok' : ''}">${st.pct}%</span>
         </div>
-        <div class="tasklist">${rows || `<div class="empty">No tasks on this list.</div>`}</div>
+      <div class="tasklist">${rows || `<div class="empty">No tasks on this shift.</div>`}</div>
         <div class="card-foot row" style="gap:8px">
           <button class="btn btn-sm" data-act="review" data-list="${lk}">${ic('note', 15)} Review notes &amp; reasons</button>
           <button class="btn btn-sm" data-act="add-task" data-list="${lk}">${ic('plus', 15)} Add a one-off task</button>
@@ -2062,7 +2065,7 @@ function pageManagerToday() {
         <div class="card-head"><div class="h3">Demo controls</div></div>
         <div class="card-body row wrap" style="gap:8px">
           <button class="btn btn-sm" data-act="eod">${ic('send', 15)} Force end-of-day report</button>
-          <button class="btn btn-sm" data-act="tick-all" data-list="${lk}">${ic('check', 15)} Tick everything on ${esc(m.label.toLowerCase())}</button>
+          <button class="btn btn-sm" data-act="tick-all" data-list="${lk}">${ic('check', 15)} Tick everything on ${esc(m.full)}</button>
           <button class="btn btn-sm btn-danger" data-act="reset-day">${ic('reset', 15)} Reset today</button>
           <button class="btn btn-sm btn-danger" data-act="reset-all">${ic('trash', 15)} Wipe all demo data</button>
         </div>
@@ -2071,7 +2074,7 @@ function pageManagerToday() {
 }
 
 /* ==========================================================================
-   MANAGER · CHECKLIST TEMPLATES
+   MANAGER · RECURRING SHIFT TASK TEMPLATES
    ========================================================================== */
 function pageTemplates() {
   const card = k => {
@@ -2114,8 +2117,8 @@ function pageTemplates() {
   return `
     <div class="page-head row-b wrap">
       <div>
-        <div class="page-title">Checklists</div>
-        <div class="page-sub">The standard tasks published every day at <b>${esc(V().name)}</b>. One-off extras are added from the Today tab.</div>
+        <div class="page-title">Templates</div>
+        <div class="page-sub">The recurring shift tasks published every day at <b>${esc(V().name)}</b>. One-off extras are added from Today's Operations.</div>
       </div>
       ${venueCatalog().length > 1 ? `<button class="btn btn-sm" data-act="copy-tpl">${ic('list', 15)} Copy from another venue</button>` : ''}
     </div>
@@ -2181,7 +2184,7 @@ function pageTeam() {
           <div class="tiny mut">Only staff assigned to this venue can be rostered. Anyone else on shift can still tap "I'm covering".</div>
         </div></div>
         <div class="tablewrap"><table class="tbl">
-          <thead><tr><th>Employee</th><th style="text-align:center">Open</th><th style="text-align:center">Close</th></tr></thead>
+          <thead><tr><th>Employee</th><th style="text-align:center">Opening</th><th style="text-align:center">Closing</th></tr></thead>
           <tbody>${rosterRows}</tbody>
         </table></div>
       </div>
@@ -2249,12 +2252,12 @@ function pageHistory() {
     <div class="page-head row-b wrap">
       <div>
         <div class="page-title">History</div>
-        <div class="page-sub">Every checklist published at <b>${esc(V().name)}</b>, kept as a record.</div>
+        <div class="page-sub">Every shift operation recorded at <b>${esc(V().name)}</b>, kept as a record.</div>
       </div>
       <button class="btn btn-sm" data-act="csv-all">${ic('dl', 15)} Export CSV</button>
     </div>
     <div class="stack">
-      ${isSupabaseMode() ? `<div class="banner banner-info">${ic('info', 17)}<div>Historical days and CSV export are still local/demo data. Today's live Supabase checklist is shown in Today and is excluded from this historical view.</div></div>` : ''}
+      ${isSupabaseMode() ? `<div class="banner banner-info">${ic('info', 17)}<div>Historical days and CSV export are still local/demo data. Today's live Supabase operations are shown in Today's Operations and excluded from this historical view.</div></div>` : ''}
       <div class="stats">
         <div class="stat"><div class="stat-k">Days logged</div><div class="stat-v">${recent.length}</div><div class="stat-s">most recent 30</div></div>
         <div class="stat"><div class="stat-k">Completion</div><div class="stat-v">${pct(totals.d, totals.t)}%</div><div class="stat-s">${totals.d} of ${totals.t} tasks</div></div>
@@ -2265,7 +2268,7 @@ function pageHistory() {
       <div class="card">
         <div class="card-head"><div class="h3">Daily record</div></div>
         <div class="tablewrap"><table class="tbl">
-          <thead><tr><th>Date</th><th>Completion</th><th class="hide-sm">Open</th><th class="hide-sm">Close</th><th>Missed</th><th></th></tr></thead>
+          <thead><tr><th>Date</th><th>Completion</th><th class="hide-sm">Opening</th><th class="hide-sm">Closing</th><th>Missed</th><th></th></tr></thead>
           <tbody>${dayRows || `<tr><td colspan="6" class="mut" style="text-align:center;padding:22px">No history yet.</td></tr>`}</tbody>
         </table></div>
       </div>
@@ -2329,7 +2332,7 @@ function pageAlerts() {
             <span class="tiny mut nowrap">${esc(fmtDT(n.at))}</span>
           </button>`;
         }).join('') : `<div class="empty"><div class="empty-icon">${ic('mail', 20)}</div><div>No alerts yet.</div>
-          <div class="tiny mut" style="margin-top:4px">You'll get one when a list is fully ticked off, and again at end of day.</div></div>`}</div>
+          <div class="tiny mut" style="margin-top:4px">You'll get one when a shift is fully ticked off, and again at end of day.</div></div>`}</div>
       </div>
     </div>`;
 }
@@ -2369,7 +2372,7 @@ function pageSettings() {
     <div class="stack">
       <div class="card">
         <div class="card-head"><div style="flex:1"><div class="h3">Venues</div>
-          <div class="tiny mut">Each venue has its own checklists, roster, history and reports.</div></div>
+          <div class="tiny mut">Each venue has its own shift tasks, roster, history and reports.</div></div>
           <button class="btn btn-sm btn-primary" data-act="add-venue">${ic('plus', 15)} Add venue</button></div>
         <div class="card-body" style="padding-top:2px;padding-bottom:6px">${venueRows}</div>
       </div>
@@ -2401,15 +2404,15 @@ function pageSettings() {
               <input class="input" id="s-phone" data-set="managerPhone" value="${esc(s.managerPhone)}"></div>
             <div class="field"><label class="label" for="s-cut">End-of-day cutoff</label>
               <input class="input" id="s-cut" type="time" data-set="cutoff" value="${esc(s.cutoff)}">
-              <span class="hint">If ${esc(s.name)} hasn't submitted its close list by this time, the summary is sent anyway.</span></div>
+              <span class="hint">If ${esc(s.name)} hasn't submitted its Closing Shift by this time, the summary is sent anyway.</span></div>
           </div>
         </div>
 
         <div class="card">
           <div class="card-head"><div class="h3">Notification rules</div></div>
           <div class="card-body" style="padding-top:4px">
-            ${tog('notifyComplete', 'When a list is fully ticked off', 'Fires the moment the last task is done, any time of day')}
-            ${tog('notifyEndOfDay', 'End-of-day summary', 'Done vs left undone, across both lists')}
+            ${tog('notifyComplete', 'When a shift is fully ticked off', 'Fires the moment the last task is done, any time of day')}
+            ${tog('notifyEndOfDay', 'End-of-day summary', 'Done vs left undone, across both shifts')}
             ${tog('channelEmail', 'Send by email', esc(s.managerEmail))}
             ${tog('channelSms', 'Send by SMS', esc(s.managerPhone))}
           </div>
@@ -2418,7 +2421,7 @@ function pageSettings() {
         <div class="card">
           <div class="card-head"><div class="h3">Demo &amp; data</div></div>
           <div class="card-body stack" style="gap:11px">
-            <div class="tiny mut">Templates, rosters, history and notifications remain in this browser's localStorage under <code>${STORE_KEY}</code>. Supabase supplies identity, accessible venues, and today's open/close checklist task state.</div>
+            <div class="tiny mut">Templates, rosters, history and notifications remain in this browser's localStorage under <code>${STORE_KEY}</code>. Supabase supplies identity, accessible venues, and today's Opening/Closing Shift task state.</div>
             <div class="row wrap" style="gap:8px">
               <button class="btn btn-sm" data-act="csv-all">${ic('dl', 15)} Export ${esc(s.name)}</button>
               <button class="btn btn-sm" data-act="csv-group">${ic('dl', 15)} Export all venues</button>
@@ -2463,7 +2466,7 @@ function openReview(lk) {
           placeholder="Add detail${'…'}">${esc(draft[t.id].reason)}</textarea>
       </div>`).join('')}` : `
     <div class="banner banner-ok" style="margin-bottom:14px">${ic('check', 17)}<div>
-      <b>Every task is ticked off.</b> Nothing outstanding on the ${esc(m.label.toLowerCase())} list.</div></div>`;
+      <b>Every task is ticked off.</b> Nothing outstanding on the ${esc(m.full.toLowerCase())}.</div></div>`;
 
   const notesHtml = done.length ? `
     <details style="margin-top:16px">
@@ -2480,14 +2483,14 @@ function openReview(lk) {
 
   openModal(`
     <div class="modal-head"><div style="flex:1">
-      <div class="modal-title">${isMgr() ? `Review the ${esc(m.label.toLowerCase())} checklist` : `Submit the ${esc(m.label.toLowerCase())} checklist`}</div>
+      <div class="modal-title">${isMgr() ? `Review the ${esc(m.full)}` : `Submit the ${esc(m.full)}`}</div>
       <div class="modal-sub">${st.done} of ${st.total} ticked off · ${esc(fmtDate(day.date))}</div>
     </div>
     <button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
     <div class="modal-body">${pendingHtml}${notesHtml}</div>
     <div class="modal-foot">
       <button class="btn" data-x="close">Keep working</button>
-      <button class="btn btn-primary" data-x="submit">${ic('send', 16)} ${isMgr() ? (L.submitted ? 'Save changes' : 'Submit checklist') : 'Send to manager'}</button>
+      <button class="btn btn-primary" data-x="submit">${ic('send', 16)} ${isMgr() ? (L.submitted ? 'Save changes' : 'Submit shift') : 'Send to manager'}</button>
     </div>`, {
     wide: true,
     after(root) {
@@ -2531,14 +2534,14 @@ function openReview(lk) {
             try { await loadSupabaseToday(); }
             catch (reloadError) { console.error('[supabase] checklist resync after submission failure failed', reloadError); }
             render();
-            toast(`Could not save the ${m.label.toLowerCase()} checklist. Please try again.`, 'warn');
+            toast(`Could not save the ${m.full.toLowerCase()}. Please try again.`, 'warn');
             return;
           }
         } else {
           save(); runTriggers();
         }
         closeModal(); render();
-        toast(`${m.full} checklist sent to the manager`, 'ok');
+        toast(`${m.full} submitted`, 'ok');
       };
     }
   });
@@ -2547,21 +2550,21 @@ function openReview(lk) {
 /* ---- add a one-off task to today --------------------------------------- */
 function openAddTask(lk) {
   if (isSupabaseMode()) {
-    toast('One-off task creation is deferred while today\'s checklist uses Supabase.', 'warn');
+    toast('One-off task creation is deferred while today\'s operations use Supabase.', 'warn');
     return;
   }
   const m = LIST_META[lk];
   openModal(`
     <div class="modal-head"><div style="flex:1">
       <div class="modal-title">One-off task</div>
-      <div class="modal-sub">Added to today's ${esc(m.label.toLowerCase())} list only — the template stays untouched.</div>
+      <div class="modal-sub">Added to today's ${esc(m.full.toLowerCase())} only — the template stays untouched.</div>
     </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
     <div class="modal-body stack" style="gap:13px">
       <div class="field"><label class="label" for="nt-title">Task</label>
         <input class="input" id="nt-title" placeholder="e.g. Chase the linen delivery" autofocus></div>
       <div class="field"><label class="label" for="nt-detail">Detail <span class="mut">(optional)</span></label>
         <textarea class="textarea" id="nt-detail" rows="2" placeholder="Anything the team needs to know"></textarea></div>
-      <div class="field"><label class="label">Which list</label>
+      <div class="field"><label class="label">Which shift</label>
         <div class="pill-toggle" id="nt-list">
           ${['open','close'].map(k => `<button data-k="${k}" class="${k === lk ? 'is-active' : ''}">${LIST_META[k].full}</button>`).join('')}
         </div></div>
@@ -2593,7 +2596,7 @@ function openAddTask(lk) {
         });
         day.lists[list].completeNotified = false;
         R.list = list; save(); closeModal(); render();
-        toast(`Added to today's ${LIST_META[list].label.toLowerCase()} list`, 'ok');
+        toast(`Added to today's ${LIST_META[list].full.toLowerCase()}`, 'ok');
       };
     }
   });
@@ -2660,7 +2663,7 @@ function openUserEditor(id) {
         <input class="input" id="us-phone" value="${esc(u ? u.phone : '')}" placeholder="+61 4.. ... ..."></div>
       <div class="field"><label class="label">Venues</label>
         <div class="row wrap" style="gap:6px" id="us-venues">${chips()}</div>
-        <span class="hint">They only see the checklists for the venues you tick here.</span></div>
+        <span class="hint">They only see the shift operations for the venues you tick here.</span></div>
       <div class="row-b" style="padding-top:4px">
         <div><div style="font-weight:600;font-size:14px">Access enabled</div><div class="tiny mut">Turn off to keep the record but block the account</div></div>
         <button class="switch ${!u || u.active ? 'is-on' : ''}" id="us-active"></button>
@@ -2705,7 +2708,7 @@ function openVenueEditor(id) {
   openModal(`
     <div class="modal-head"><div style="flex:1">
       <div class="modal-title">${v ? 'Edit venue' : 'Add a venue'}</div>
-      <div class="modal-sub">${v ? 'Name, tagline and colour.' : 'It starts with empty checklists — build them, or copy another venue across.'}</div>
+      <div class="modal-sub">${v ? 'Name, tagline and colour.' : 'It starts with empty shift tasks — build them, or copy another venue across.'}</div>
     </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
     <div class="modal-body stack" style="gap:13px">
       <div class="field"><label class="label" for="vn-name">Venue name</label>
@@ -2742,13 +2745,13 @@ function openVenueEditor(id) {
           R.tab = 'templates';
         }
         save(); closeModal(); render();
-        toast(v ? 'Venue updated' : `${name} added — build its checklists next`, 'ok');
+        toast(v ? 'Venue updated' : `${name} added — build its shift tasks next`, 'ok');
       };
     }
   });
 }
 
-/* ---- copy a checklist template from another venue ----------------------- */
+/* ---- copy recurring shift tasks from another venue ----------------------- */
 function openCopyTemplate() {
   const others = venueCatalog().filter(v => v.id !== V().id);
   if (!others.length) { toast('There is only one venue', 'warn'); return; }
@@ -2756,14 +2759,14 @@ function openCopyTemplate() {
 
   openModal(`
     <div class="modal-head"><div style="flex:1">
-      <div class="modal-title">Copy checklists</div>
+      <div class="modal-title">Copy shift tasks</div>
       <div class="modal-sub">Into <b>${esc(V().name)}</b>. Copied tasks are added — nothing already there is removed.</div>
     </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
     <div class="modal-body stack" style="gap:13px">
       <div class="field"><label class="label" for="cp-src">Copy from</label>
         <select class="select" id="cp-src">${others.map(v =>
           `<option value="${v.id}">${esc(v.name)} — ${TPL(v.id).open.length + TPL(v.id).close.length} tasks</option>`).join('')}</select></div>
-      <div class="field"><label class="label">Which lists</label>
+      <div class="field"><label class="label">Which shifts</label>
         <div class="row wrap" style="gap:6px" id="cp-lists">
           ${['open','close'].map(k => `<button class="chip chip-accent" data-k="${k}" style="cursor:pointer;height:28px;padding:0 11px">${LIST_META[k].full}</button>`).join('')}
         </div></div>
@@ -2779,7 +2782,7 @@ function openCopyTemplate() {
         b.classList.toggle('chip-accent', lists[b.dataset.k]);
       });
       root.querySelector('[data-x=save]').onclick = () => {
-        if (!lists.open && !lists.close) { toast('Pick at least one list', 'warn'); return; }
+        if (!lists.open && !lists.close) { toast('Pick at least one shift', 'warn'); return; }
         let n = 0;
         ['open','close'].forEach(k => {
           if (!lists[k]) return;
@@ -2807,7 +2810,7 @@ function openNotif(id) {
        <div class="tiny mut" style="margin-top:12px">${n.text.length} characters · ${Math.ceil(n.text.length / 160)} segment(s)</div>`
     : `<div class="mailpv">
         <div class="mailpv-head">
-          <div class="kvline"><span>From</span><span>Peachy Checklists &lt;no-reply@peachybar.com.au&gt;</span></div>
+          <div class="kvline"><span>From</span><span>DailyOps &lt;no-reply@dailyops.app&gt;</span></div>
           <div class="kvline"><span>To</span><span>${esc(n.to)}</span></div>
           <div class="kvline"><span>Subject</span><span><b>${esc(n.subject)}</b></span></div>
           <div class="kvline"><span>Sent</span><span>${esc(fmtDT(n.at))}</span></div>
@@ -2862,7 +2865,7 @@ function openDay(key) {
    ========================================================================== */
 function toggleTask(lk, id) {
   const day = today(), L = day.lists[lk];
-  if (L.submitted) { toast('This list is submitted — reopen it to make changes', 'warn'); return; }
+  if (L.submitted) { toast('This shift is submitted — reopen it to make changes', 'warn'); return; }
   if (!me().active) { toast('This account is disabled', 'warn'); return; }
   const t = L.tasks.find(x => x.id === id); if (!t) return;
   if (isSupabaseMode()) {
@@ -2888,7 +2891,7 @@ function toggleTask(lk, id) {
 
 function syncTemplate(lk) {
   if (isSupabaseMode()) {
-    toast('Template sync is deferred while today\'s checklist uses Supabase.', 'warn');
+    toast('Template sync is deferred while today\'s operations use Supabase.', 'warn');
     return;
   }
   const day = today(), L = day.lists[lk], tpl = TPL()[lk];
@@ -2902,7 +2905,7 @@ function syncTemplate(lk) {
   L.tasks = kept.concat(orphansDone, L.tasks.filter(t => t.source === 'adhoc'));
   L.completeNotified = false;
   save(); runTriggers(); render();
-  toast(`${LIST_META[lk].full} list synced with the template`, 'ok');
+  toast(`${LIST_META[lk].full} synced with the template`, 'ok');
 }
 
 /* pulling someone off shift has to clear them from every venue, not just this one */
@@ -2920,16 +2923,16 @@ async function reopenList(lk) {
     L.submitted = false; L.submittedBy = null; L.submittedAt = null;
     try {
       await persistRemoteChecklist(L);
-      render(); toast('List reopened');
+      render(); toast(`${LIST_META[lk].full} reopened`);
     } catch (error) {
       Object.assign(L, previous);
       console.error('[supabase] checklist reopen failed', { checklistId: L.id, error });
-      render(); toast('Could not reopen this list. Please try again.', 'warn');
+      render(); toast('Could not reopen this shift. Please try again.', 'warn');
     }
     return;
   }
   L.submitted = false; L.submittedBy = null; L.submittedAt = null;
-  save(); render(); toast('List reopened');
+  save(); render(); toast(`${LIST_META[lk].full} reopened`);
 }
 
 function coverShift(lk) {
@@ -2940,7 +2943,7 @@ function coverShift(lk) {
 
 async function tickAll(lk) {
   const L = today().lists[lk];
-  if (L.submitted) { toast('Reopen the list first', 'warn'); return; }
+  if (L.submitted) { toast('Reopen the shift first', 'warn'); return; }
   const changed = L.tasks.filter(t => t.status !== 'done');
   if (isSupabaseMode()) {
     const previous = changed.map(t => ({ task: t, status: t.status, doneBy: t.doneBy, doneAt: t.doneAt, reason: t.reason }));
@@ -2967,7 +2970,7 @@ function handleAct(act, ds) {
     case 'review':    openReview(ds.list); break;
     case 'add-task':  openAddTask(ds.list || R.list); break;
     case 'del-task': {
-      if (isSupabaseMode()) { toast('Removing daily tasks is deferred while today\'s checklist uses Supabase.', 'warn'); break; }
+      if (isSupabaseMode()) { toast('Removing daily tasks is deferred while today\'s operations use Supabase.', 'warn'); break; }
       const L = day.lists[ds.list];
       L.tasks = L.tasks.filter(t => t.id !== ds.id);
       save(); runTriggers(); render(); toast('Task removed'); break;
@@ -3006,7 +3009,7 @@ function handleAct(act, ds) {
     }
     case 'del-user': {
       const u = user(ds.id);
-      confirmModal(`Remove ${u.name}?`, 'Their past checklist history stays in the record. This cannot be undone.', 'Remove', () => {
+      confirmModal(`Remove ${u.name}?`, 'Their past operational history stays in the record. This cannot be undone.', 'Remove', () => {
         S.users = S.users.filter(x => x.id !== ds.id);
         unrosterEverywhere(ds.id);
         if (S.session.userId === ds.id) S.session.userId = S.users.find(x => x.role === 'manager').id;
@@ -3031,7 +3034,7 @@ function handleAct(act, ds) {
       [arr[i], arr[j]] = [arr[j], arr[i]]; save(); render(); break;
     }
     case 'view-day':  openDay(ds.key); break;
-    case 'csv-all':   exportCsv(localHistoryKeys(V().id), `${V().name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-checklists.csv`); break;
+    case 'csv-all':   exportCsv(localHistoryKeys(V().id), `${V().name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-operations.csv`); break;
     case 'csv-group': exportAllVenues(); break;
     case 'open-notif': openNotif(ds.id); break;
     case 'mark-read': S.notifications.forEach(n => n.read = true); save(); render(); break;
@@ -3058,7 +3061,7 @@ function handleAct(act, ds) {
       else {
         if (S.venues.length < 2) { toast('You need at least one venue', 'warn'); break; }
         const v = venue(ds.id);
-        confirmModal(`Remove ${v.name}?`, 'Its checklists, roster and history go with it. Alerts already sent are kept. This cannot be undone.', 'Remove venue', () => {
+        confirmModal(`Remove ${v.name}?`, 'Its shift tasks, roster and history go with it. Alerts already sent are kept. This cannot be undone.', 'Remove venue', () => {
           S.venues = S.venues.filter(x => x.id !== ds.id);
           delete S.templates[ds.id]; delete S.days[ds.id];
           S.users.forEach(u => { u.venues = u.venues.filter(x => x !== ds.id); });
@@ -3070,11 +3073,11 @@ function handleAct(act, ds) {
       break;
     }
     case 'copy-tpl': {
-      if (isSupabaseMode()) { toast('Template copy is deferred while today\'s checklist uses Supabase.', 'warn'); break; }
+      if (isSupabaseMode()) { toast('Template copy is deferred while today\'s operations use Supabase.', 'warn'); break; }
       openCopyTemplate(); break;
     }
     case 'reset-day': {
-      if (isSupabaseMode()) { toast('Resetting a live Supabase checklist is deferred in this phase.', 'warn'); break; }
+      if (isSupabaseMode()) { toast('Resetting live Supabase operations is deferred in this phase.', 'warn'); break; }
       confirmModal(`Reset today at ${V().name}?`, 'Both lists go back to the template with nothing ticked. Other venues and all history are untouched.', 'Reset today', () => {
         const roster = DAYS()[dayKey()].roster;
         DAYS()[dayKey()] = makeDay(dayKey(), roster, V().id);
@@ -3239,7 +3242,7 @@ async function restoreAuthenticatedApp(session) {
     await loadSupabaseToday();
   } catch (error) {
     if (restoreId !== AUTH_RESTORE_ID) return;
-    console.error('[supabase] organisation, venue, and today checklist restore failed', error);
+    console.error('[supabase] organisation, venue, and today operations restore failed', error);
     showAccessError(error.accessCode ? error.message : 'We could not load your DailyOps organisation and venue access.');
     return;
   }
@@ -3338,7 +3341,7 @@ async function startApp() {
     else await restoreAuthenticatedApp(AUTH.session);
     tickClock();
     setInterval(tickClock, 30000);
-    console.info('%cDailyOps — Supabase Auth + venue + today checklist', 'font-weight:700;font-size:13px');
+    console.info('%cDailyOps — Supabase Auth + venue + today operations', 'font-weight:700;font-size:13px');
     return;
   }
 
@@ -3350,7 +3353,7 @@ async function startApp() {
   // cutoff watcher — in production this is a scheduled backend job, not a timer
   setInterval(() => { tickClock(); if (runTriggers()) render(); }, 30000);
 
-  console.info('%cDailyOps — Shift Checklist (demo, multi-venue)', 'font-weight:700;font-size:13px');
+  console.info('%cDailyOps — Daily Operations (demo, multi-venue)', 'font-weight:700;font-size:13px');
   console.info(`${S.venues.length} venues: ${S.venues.map(v => v.name).join(', ')}`);
   console.info('Notifications are stubbed: see Notifier.deliver(). State lives in localStorage["' + STORE_KEY + '"].');
 }

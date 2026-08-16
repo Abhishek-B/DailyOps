@@ -9,12 +9,12 @@
 ## Backend MVP
 - Supabase Auth
 - Organisation / venue membership
-- Persistent templates, rosters, daily lists and task history
+- Persistent recurring shift-task templates, rosters, daily operations and task history
 - RLS policies
 - Realtime completion updates
 
 ## Notifications
-- Immediate manager alert when a list is fully complete
+- Immediate manager alert when a shift is fully complete
 - Scheduled venue end-of-day report
 - Email summary and optional CSV attachment
 

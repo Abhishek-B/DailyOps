@@ -1,5 +1,7 @@
 # DailyOps architecture
 
+DailyOps models a venue's work as Daily Operations, divided into operational sections such as the Opening Shift and Closing Shift. The current production schema still contains legacy `checklist_*` names; those names are compatibility details, not the product's user-facing model.
+
 ## Current demo path
 
 ```text
@@ -28,19 +30,19 @@ Organisation
 Venue
 - belongs to one organisation
 - has venue settings and venue memberships
-- owns open/close checklist templates and daily checklist instances
+- owns recurring Opening/Closing Shift task templates and daily operation instances
 
-Checklist template and template tasks
+Recurring shift-task template and template tasks
 - define future routine work
-- are copied into daily task instances when a daily checklist is created
+- are copied into daily task instances when a daily operation is created
 
-Daily checklist and daily tasks
-- are keyed by venue, local work date and `open`/`close` list type
+Daily operation instance and daily tasks
+- are keyed by venue, local work date and the legacy `open`/`close` list type
 - keep title, detail, critical flag and task state as a snapshot
 - retain completion user/time, notes and incomplete reasons
 
 Roster assignment
-- records a user, venue, date and open/close shift
+- records a user, venue, date and Opening/Closing Shift assignment
 
 Notification event
 - reserves an auditable record for future Edge Function delivery
@@ -51,7 +53,9 @@ The browser key is publishable. RLS policies use the signed-in Auth UUID, organi
 
 ## Snapshot invariant
 
-`ensure_daily_checklists(venue_id, work_date)` creates an open and/or close checklist only when an active template exists and only copies template tasks when the checklist is first created. Later template edits do not change existing daily tasks. Explicit template synchronisation will be implemented in phase 2.
+`ensure_daily_checklists(venue_id, work_date)` is a legacy-named database helper. It creates an open and/or close daily operation instance only when an active template exists and only copies template tasks when the instance is first created. Later template edits do not change existing daily tasks. Explicit recurring shift-task synchronisation will be implemented in phase 2.
+
+The current `checklist_type` enum is intentionally retained for the deployed `open`/`close` data model. A future operation-section migration should be additive and backward compatible when sections such as Mid Shift, Kitchen Opening, Bar Opening, FOH Opening, Cleaning, or Maintenance become product requirements; this cleanup does not introduce that migration.
 
 ## Planned backend work
 
