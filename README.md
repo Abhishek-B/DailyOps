@@ -1,138 +1,88 @@
 # DailyOps Starter v2
 
-DailyOps is a framework-free, multi-venue opening/closing checklist app. It remains a single static `index.html` suitable for GitHub Pages. With Supabase configured, Auth and Postgres become the source of truth for the phase 1 vertical slice; with the placeholder config left unchanged, the original localStorage demo remains available.
+DailyOps is a framework-free, multi-venue opening/closing checklist app. It remains a single static `index.html` suitable for GitHub Pages.
 
-## What works in phase 1
+## Current phase
 
-- Supabase email/password sign-in and sign-out
-- Persisted Supabase Auth sessions across browser refreshes
-- Profile and organisation role loading
-- Venue access enforced by database RLS
-- Venue switching for the signed-in user
-- Today's separate opening and closing checklists
-- Daily task snapshots created once from active templates
-- Task completion, completion attribution, notes, and incomplete-task reasons persisted to Postgres
-- Existing localStorage demo mode, including the fake user switcher
+Supabase currently supplies authentication only:
 
-The remaining demo screens are deliberately read-only placeholders in Supabase mode until their database adapters are implemented. This prevents a phase 1 screen from appearing to save local changes that are not yet persisted remotely.
+- email/password sign-in and sign-out;
+- persisted sessions across browser refreshes; and
+- the signed-in user's `public.profiles` row.
 
-## Supabase setup - phase 1
+The existing application data, demo user switcher, checklists, venues, templates, rosters, history, CSV export, and simulated notifications remain localStorage-backed. Production defaults to Supabase Auth. The original demo can be enabled explicitly with `DEMO_MODE: true`.
 
-### 1. Run the migration
+## Supabase frontend auth setup
 
-In the Supabase dashboard, open **SQL Editor**, create a new query, paste the complete contents of [`supabase/migrations/001_initial_schema.sql`](supabase/migrations/001_initial_schema.sql), and run it once on a new project.
+### Configuration
 
-The migration creates organisations, profiles, organisation and venue memberships, venues, templates, template tasks, daily checklist snapshots, daily task instances, roster assignments, notification event storage, indexes, constraints, helper functions, an Auth-to-profile trigger, and RLS policies.
-
-### 2. Configure Supabase Auth
-
-In **Authentication > Providers**, enable **Email**. For a first local test, either disable email confirmation or confirm the manager email after creating the account. In **Authentication > URL Configuration**, add the URL where the static app will run, for example:
-
-```text
-http://localhost:8080
-```
-
-Add the eventual GitHub Pages URL before deploying. Do not enable or rely on anonymous access for this app.
-
-### 3. Add the public browser configuration
-
-Copy the values from **Project Settings > API** into [`supabase/config.js`](supabase/config.js):
+The public browser configuration is in [`supabase/config.js`](supabase/config.js):
 
 ```js
 window.DAILYOPS_SUPABASE_CONFIG = {
-  url: 'https://your-project.supabase.co',
-  publishableKey: 'your-publishable-or-anon-key'
+  SUPABASE_URL: 'https://your-project.supabase.co',
+  SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_...',
+  DEMO_MODE: false
 };
 ```
 
-These two values are intentionally browser-visible credentials. They identify the project but do not bypass RLS. Never paste a `service_role` key, database password, Edge Function secret, email provider key, or SMS provider key into this file, `index.html`, or GitHub Pages.
+Paste the project URL and publishable key from **Supabase > Project Settings > API** into that file. In this checkout, the values are already configured for the DailyOps project. Set `DEMO_MODE` to `true` only when you explicitly want the localStorage demo and fake user switcher.
 
-### 4. Create the first manager and seed one venue
+The URL and publishable key are public browser credentials. They identify the Supabase project; database access is still controlled by RLS. Never put a `service_role` key, secret key, database password, Edge Function secret, or other privileged credential in `supabase/config.js`, `index.html`, or GitHub Pages.
 
-In **Authentication > Users**, create an email/password user. The migration trigger creates the matching `public.profiles` row automatically.
+### Supabase Auth settings
 
-Copy the new user's UUID from the Auth user record and run this in **SQL Editor**, replacing the values in the first three lines. This creates one organisation, makes the user its manager, creates a venue, assigns the manager to it, and creates empty open/close templates:
+In the Supabase dashboard:
 
-```sql
--- Replace these values before running.
-select 'AUTH_USER_UUID'::uuid as manager_id;
+1. Enable the **Email** provider under **Authentication > Providers**.
+2. For local testing, either disable email confirmation or confirm the test user's email.
+3. Under **Authentication > URL Configuration**, allow the local URL used by Live Server, such as `http://127.0.0.1:5500`, and the production URL below.
 
-with manager as (
-  select 'AUTH_USER_UUID'::uuid as user_id
-), org as (
-  insert into public.organisations (name)
-  values ('My Organisation')
-  returning id
-), membership as (
-  insert into public.organisation_members (organisation_id, user_id, role)
-  select org.id, manager.user_id, 'manager'
-  from org cross join manager
-  returning organisation_id
-), venue as (
-  insert into public.venues (organisation_id, name, subtitle, accent_key)
-  select membership.organisation_id, 'Main Venue', 'Daily checklist', 'indigo'
-  from membership
-  returning id, organisation_id
-), venue_access as (
-  insert into public.venue_members (venue_id, user_id)
-  select venue.id, manager.user_id
-  from venue cross join manager
-  returning venue_id
-)
-insert into public.checklist_templates (venue_id, list_type, name)
-select venue.id, list_type, initcap(list_type::text) || ' Shift'
-from venue cross join (values ('open'::public.checklist_type), ('close'::public.checklist_type)) as lists(list_type);
+The app loads the authenticated user's profile with a query constrained to `profiles.id = auth.users.id`. The browser does not query venues, memberships, checklists, templates, rosters, or other application tables in this phase.
+
+### Create the first manager account
+
+Create an email/password user under **Authentication > Users**. The deployed profile trigger should create the matching `public.profiles` row. If the row is missing, repair it using an appropriately protected administrative workflow in the Supabase dashboard; do not put an admin or service-role key in the frontend.
+
+The frontend stores `id`, `display_name`, `email`, `active`, and `platform_role` in memory after login. The displayed role is not an authorization boundary. RLS must enforce all future organisation and venue permissions.
+
+### Run locally with VS Code Live Server
+
+Install the **Live Server** extension in VS Code, then right-click [`index.html`](index.html) and choose **Open with Live Server**. Open the URL shown by VS Code, for example:
+
+```text
+http://127.0.0.1:5500/
 ```
 
-Add at least one task to each template before signing in, or the app will correctly show empty lists. For example:
+Make sure the exact local origin is included in Supabase **Authentication > URL Configuration**. Do not open `index.html` directly with a `file://` URL.
 
-```sql
-insert into public.template_tasks (template_id, sort_order, title, detail, critical)
-select id, 1, 'Unlock and walk the venue', 'Check the floor before service.', true
-from public.checklist_templates
-where list_type = 'open';
+### Test login and logout
 
-insert into public.template_tasks (template_id, sort_order, title, detail, critical)
-select id, 1, 'Lock doors and set the alarm', 'Complete the final walk-through.', true
-from public.checklist_templates
-where list_type = 'close';
+1. Open the local URL. With no session, only the DailyOps login screen should be visible.
+2. Try an invalid password and confirm the Supabase error is shown on the login screen.
+3. Sign in with the test user and confirm the profile display name appears in the existing user area.
+4. Refresh the page and confirm the session is restored without signing in again.
+5. Select the sign-out action and confirm the app returns to the login screen.
+6. Confirm the existing checklist/demo UI still works after successful login and that its changes remain in localStorage.
+
+Production URL:
+
+```text
+https://abhishek-b.github.io/DailyOps/
 ```
 
-On the first manager sign-in, the app calls `ensure_daily_checklists` for each accessible venue. That function creates today's open/close checklist rows and copies the current template tasks into immutable daily task instances.
+### Verify RLS
 
-### 5. Run and test locally
+Use an authenticated browser session or the Supabase client with a test user's session when checking access. Do not use the SQL Editor as proof of RLS behavior because dashboard SQL runs with elevated privileges. Confirm that an authenticated user can read only their own profile row and that a user cannot read or update another user's profile unless the deployed RLS policies explicitly allow it.
 
-From the repository root:
+## Intentionally deferred
 
-```bash
-python -m http.server 8080
-```
+- organisation, membership, and venue queries;
+- database-backed venues, templates, daily checklist snapshots, tasks, rosters, and history;
+- realtime subscriptions;
+- notification delivery and scheduled jobs;
+- roster CSV import;
+- Postgres-backed reporting and CSV export;
+- Edge Functions, Storage, offline support, and PWA behaviour.
 
-Open `http://localhost:8080`. In Supabase mode, the app shows the login screen. Sign in with the manager account, switch venues if more than one is available, tick a task, add a note or incomplete reason through the existing submit flow, refresh the browser, and confirm the state remains.
-
-To use the original demo, restore the placeholders in `supabase/config.js` or leave them unchanged before loading the page. The demo uses `localStorage` and is intentionally not an authenticated security boundary.
-
-### 6. Verify RLS is protecting data
-
-Use two test users: a manager assigned to one organisation and an employee assigned to only one venue. Sign in as the employee and verify that a query such as the following only returns the employee's venue:
-
-```js
-const { data, error } = await db.from('venues').select('id,name');
-```
-
-Then use the Supabase SQL Editor or a second browser session to verify that the employee cannot read another venue's checklist and cannot update a task in that venue. Also verify that an employee cannot update `completed_by` to another user's UUID: the database trigger must reject it. The SQL Editor runs with elevated database privileges, so use an authenticated browser session or the Supabase client with the employee's session when testing policies.
-
-## Current data mapping
-
-The old local state remains a useful compatibility model: `S.venues` maps to `venues`, `S.users` to `profiles` plus memberships, `S.templates` to `checklist_templates` and `template_tasks`, `S.days[venue][date].lists[type]` to `daily_checklists`, and each task object to `daily_tasks`. `roster` arrays become `roster_assignments`; `notifications` becomes `notification_events` in the schema. Daily tasks carry their own title/detail/critical values so template edits do not mutate history.
-
-## Phase 2 intentionally left open
-
-- Template, venue, employee, and roster administration adapters
-- Full historical reporting and CSV export from Postgres
-- Realtime task subscriptions
-- Notification delivery and scheduled end-of-day jobs
-- Roster CSV import
-- File/photo evidence, Storage, audit UI, analytics, and offline/PWA behaviour
-
-The existing demo continues to exercise those workflows locally.
+The existing localStorage implementation remains available as the compatibility/demo repository while those adapters are developed incrementally.

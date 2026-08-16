@@ -1,7 +1,7 @@
-// Public browser configuration only. Replace these placeholders with values
-// from Supabase Project Settings > API before enabling Supabase mode.
+// Public browser configuration only.
 // Never put a secret/service-role key in this file.
 window.DAILYOPS_SUPABASE_CONFIG = {
-  url: 'https://zwebxycbrfwtlmqwxwwe.supabase.co', 
-  publishableKey: 'sb_publishable_-yR7JKVIMDpqD8Z_ii5GtA_IKGLaafk'
+  SUPABASE_URL: 'https://zwebxycbrfwtlmqwxwwe.supabase.co',
+  SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_-yR7JKVIMDpqD8Z_ii5GtA_IKGLaafk',
+  DEMO_MODE: false
 };

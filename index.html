@@ -127,6 +127,7 @@ body {
 .auth-brand .logo { width: 42px; height: 42px; }
 .auth-title { font-size: 24px; font-weight: 720; letter-spacing: -.03em; }
 .auth-sub { color: var(--muted); font-size: 13px; margin-top: 3px; }
+.auth-loading { color: var(--muted); font-size: 13px; padding: 10px 0 2px; }
 .auth-error { color: var(--danger); background: var(--danger-soft); border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--surface)); border-radius: var(--r-sm); padding: 10px 12px; font-size: 13px; }
 .auth-card .btn { width: 100%; justify-content: center; }
 .statusbar { display: none; }
@@ -562,23 +563,25 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
 
 <div class="viewport" id="viewport">
   <div class="frame" id="frame">
-    <div class="auth-screen" id="auth-screen" hidden>
+    <div class="auth-screen" id="auth-screen">
       <div class="auth-card">
         <div class="auth-brand">
           <div class="logo" aria-hidden="true">D</div>
           <div><div class="auth-title">DailyOps</div><div class="auth-sub">Shift checklists for every venue</div></div>
         </div>
-        <form id="login-form" class="stack" style="gap:14px">
+        <div class="auth-loading" id="auth-loading">Checking your DailyOps session…</div>
+        <form id="login-form" class="stack" style="gap:14px" hidden>
           <div class="field"><label class="label" for="login-email">Email</label>
             <input class="input" id="login-email" type="email" autocomplete="email" required></div>
           <div class="field"><label class="label" for="login-password">Password</label>
             <input class="input" id="login-password" type="password" autocomplete="current-password" required></div>
           <div class="auth-error" id="auth-error" hidden></div>
           <button class="btn btn-primary" id="login-submit" type="submit">Sign in</button>
+          <button class="btn" id="auth-logout" type="button" hidden>Sign out</button>
         </form>
       </div>
     </div>
-    <div class="app" id="app">
+    <div class="app" id="app" hidden>
 
       <div class="statusbar" id="statusbar">
         <span id="sb-time">9:41</span>
@@ -629,23 +632,22 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="./supabase/config.js"></script>
 <script>
-/* ==========================================================================
+/* ========================================================================== 
    DAILYOPS — SHIFT CHECKLIST  ·  demo build
-   Demo fallback mode has no backend and stores state in localStorage under STORE_KEY.
+   Supabase mode handles authentication only; application state remains in localStorage.
    Sections: icons · utils · store/seed · notifier · render · actions · init
    ========================================================================== */
 "use strict";
 
 /* ---------------------------------------------------------- backend mode */
 const PUBLIC_SUPABASE_CONFIG = window.DAILYOPS_SUPABASE_CONFIG || {};
-const isSupabaseMode = () => Boolean(
-  PUBLIC_SUPABASE_CONFIG.url &&
-  PUBLIC_SUPABASE_CONFIG.publishableKey &&
-  !PUBLIC_SUPABASE_CONFIG.url.includes('YOUR_PROJECT') &&
-  !PUBLIC_SUPABASE_CONFIG.publishableKey.includes('YOUR_')
-);
+const SUPABASE_URL = PUBLIC_SUPABASE_CONFIG.SUPABASE_URL || PUBLIC_SUPABASE_CONFIG.url || '';
+const SUPABASE_PUBLISHABLE_KEY = PUBLIC_SUPABASE_CONFIG.SUPABASE_PUBLISHABLE_KEY || PUBLIC_SUPABASE_CONFIG.publishableKey || '';
+const DEMO_MODE = PUBLIC_SUPABASE_CONFIG.DEMO_MODE === true;
+const isSupabaseMode = () => !DEMO_MODE;
 let DB = null;
 let AUTH = { session: null, profile: null };
+let AUTH_RESTORE_ID = 0;
 
 /* ------------------------------------------------------------------ icons */
 const P = {
@@ -719,8 +721,8 @@ const REASONS = {
 
 /* ==========================================================================
    SUPABASE BOUNDARY
-   Keep UI/rendering logic in this file for now. Demo persistence remains below;
-   the phase 1 Supabase session and task adapter sits beside it. See docs/SUPABASE_PLAN.md.
+   Keep UI/rendering logic in this file for now. Supabase is intentionally limited
+   to Auth and the signed-in user's profile during this phase.
    ========================================================================== */
 
 /* ------------------------------------------------------------- store/seed */
@@ -943,151 +945,49 @@ function repair() {
   if (!venue(S.session.venueId)) S.session.venueId = (S.venues[0] || {}).id;
 }
 function save() {
-  if (isSupabaseMode()) return;
   try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); } catch (e) { console.warn('[store] save failed', e); }
 }
 
-/* --------------------------------------------------------- Supabase state */
+/* ------------------------------------------------------------- Supabase Auth */
 function dbError(error) { return error && error.message ? error.message : 'Supabase request failed'; }
-async function dbRows(query) {
-  const { data, error } = await query;
+
+async function loadAuthenticatedProfile(session) {
+  const { data, error } = await DB.from('profiles')
+    .select('id,display_name,email,active,platform_role')
+    .eq('id', session.user.id)
+    .maybeSingle();
   if (error) throw error;
-  return data || [];
-}
-
-function stateVenue(row) {
-  return {
-    id: row.id, name: row.name, sub: row.subtitle || '', accent: row.accent_key || 'indigo',
-    cutoff: String(row.cutoff_time || '23:30').slice(0, 5),
-    managerEmail: row.manager_email || '', managerPhone: row.manager_phone || '',
-    notifyComplete: row.notify_complete, notifyEndOfDay: row.notify_end_of_day,
-    channelEmail: row.email_enabled, channelSms: row.sms_enabled
+  if (!data) throw new Error('Your account is signed in, but no DailyOps profile exists for it. Contact an administrator.');
+  if (!data.active) throw new Error('Your DailyOps account is inactive. Contact an administrator.');
+  AUTH.profile = {
+    id: data.id,
+    display_name: data.display_name,
+    email: data.email || session.user.email || '',
+    active: !!data.active,
+    platform_role: data.platform_role
   };
-}
-
-function stateTemplate(row) {
-  return { id: row.id, title: row.title, detail: row.detail || '', critical: !!row.critical };
-}
-
-function stateDay(key) {
-  return { date: key, roster: { open: [], close: [] }, lists: { open: blankList(), close: blankList() }, reported: false, reportedAt: null };
-}
-
-async function loadSupabaseState() {
-  if (!AUTH.session) return;
-  const userId = AUTH.session.user.id;
-  const profiles = await dbRows(DB.from('profiles').select('id,display_name,email,phone,active'));
-  const profile = profiles.find(x => x.id === userId);
-  if (!profile || !profile.active) throw new Error('Your DailyOps profile is missing or disabled. Ask a manager to check your access.');
-  AUTH.profile = profile;
-
-  const memberships = await dbRows(DB.from('organisation_members').select('organisation_id,user_id,role'));
-  const ownMembership = memberships.find(x => x.user_id === userId);
-  if (!ownMembership) throw new Error('Your account is not a member of a DailyOps organisation yet.');
-  const orgMemberships = memberships.filter(x => x.organisation_id === ownMembership.organisation_id);
-
-  const venueRows = await dbRows(DB.from('venues').select('*').order('name'));
-  if (!venueRows.length) throw new Error('No venues are available for this account yet.');
-  const venueIds = venueRows.map(x => x.id);
-  const venueMembers = await dbRows(DB.from('venue_members').select('venue_id,user_id').in('venue_id', venueIds));
-
-  const roleByUser = {};
-  orgMemberships.forEach(x => { roleByUser[x.user_id] = x.role; });
-  const venuesByUser = {};
-  venueMembers.forEach(x => { (venuesByUser[x.user_id] ||= []).push(x.venue_id); });
-  const users = profiles.map(x => ({
-    id: x.id, name: x.display_name, role: roleByUser[x.id] || 'employee', email: x.email || '',
-    phone: x.phone || '', active: x.active, venues: roleByUser[x.id] === 'manager' ? venueIds.slice() : (venuesByUser[x.id] || [])
-  }));
-
-  const key = dayKey();
-  if (roleByUser[userId] === 'manager') {
-    for (const venueId of venueIds) {
-      const { error } = await DB.rpc('ensure_daily_checklists', { p_venue_id: venueId, p_work_date: key });
-      if (error) throw error;
-    }
-  }
-
-  const checklists = await dbRows(DB.from('daily_checklists').select('*').in('venue_id', venueIds).eq('work_date', key));
-  const checklistIds = checklists.map(x => x.id);
-  const tasks = checklistIds.length
-    ? await dbRows(DB.from('daily_tasks').select('*').in('checklist_id', checklistIds).order('sort_order'))
-    : [];
-  const roster = await dbRows(DB.from('roster_assignments').select('venue_id,user_id,shift_type').in('venue_id', venueIds).eq('work_date', key));
-  const templates = await dbRows(DB.from('checklist_templates').select('id,venue_id,list_type,name,active').in('venue_id', venueIds));
-  const templateIds = templates.map(x => x.id);
-  const templateTasks = templateIds.length
-    ? await dbRows(DB.from('template_tasks').select('*').in('template_id', templateIds).order('sort_order'))
-    : [];
-
-  const templateById = {};
-  const stateTemplates = {};
-  venueRows.forEach(v => { stateTemplates[v.id] = { open: [], close: [] }; });
-  templates.forEach(x => {
-    templateById[x.id] = x;
-    stateTemplates[x.venue_id][x.list_type] = [];
-  });
-  templateTasks.forEach(x => {
-    const t = templateById[x.template_id];
-    if (t) stateTemplates[t.venue_id][t.list_type].push(stateTemplate(x));
-  });
-
-  const days = {};
-  venueRows.forEach(v => { days[v.id] = { [key]: stateDay(key) }; });
-  const checklistById = {};
-  checklists.forEach(x => {
-    const day = days[x.venue_id][key];
-    day.lists[x.list_type] = {
-      id: x.id, tasks: [], submitted: x.submitted, submittedBy: x.submitted_by,
-      submittedAt: x.submitted_at, completeNotified: x.complete_notified
-    };
-    checklistById[x.id] = { venueId: x.venue_id, listType: x.list_type };
-  });
-  tasks.forEach(x => {
-    const c = checklistById[x.checklist_id];
-    if (!c) return;
-    days[c.venueId][key].lists[c.listType].tasks.push({
-      id: x.id, tplId: x.template_task_id, title: x.title, detail: x.detail || '', critical: !!x.critical,
-      source: x.source, addedBy: x.added_by, addedAt: x.added_at, status: x.status,
-      doneBy: x.completed_by, doneAt: x.completed_at, note: x.note || '', reason: x.reason || ''
-    });
-  });
-  roster.forEach(x => {
-    const list = days[x.venue_id][key].roster[x.shift_type];
-    if (list && !list.includes(x.user_id)) list.push(x.user_id);
-  });
-
-  let selectedVenue = null;
-  try { selectedVenue = localStorage.getItem('dailyops.supabase.venueId'); } catch (e) {}
-  S = {
-    version: 3, venues: venueRows.map(stateVenue), users, templates: stateTemplates, days, notifications: [],
-    session: { userId, venueId: venueIds.includes(selectedVenue) ? selectedVenue : venueIds[0] },
-    organisationId: ownMembership.organisation_id
-  };
-}
-
-async function persistTask(task) {
-  if (!isSupabaseMode()) return;
-  const { data, error } = await DB.from('daily_tasks').update({
-    status: task.status, completed_by: task.doneBy, completed_at: task.doneAt,
-    note: task.note || null, reason: task.reason || null
-  }).eq('id', task.id).select('id,status,completed_by,completed_at,note,reason').single();
-  if (error || !data) throw error || new Error('The task was not updated');
-  task.status = data.status; task.doneBy = data.completed_by; task.doneAt = data.completed_at;
-  task.note = data.note || ''; task.reason = data.reason || '';
-}
-
-async function persistChecklist(list) {
-  if (!isSupabaseMode() || !list.id) return;
-  const { data, error } = await DB.from('daily_checklists').update({
-    submitted: list.submitted, submitted_by: list.submittedBy, submitted_at: list.submittedAt
-  }).eq('id', list.id).select('id').single();
-  if (error || !data) throw error || new Error('The checklist was not updated');
 }
 
 /* selectors */
-const user = id => S.users.find(u => u.id === id) || null;
-const me = () => user(S.session.userId) || S.users[0];
+function authDemoUser() {
+  if (!isSupabaseMode() || !AUTH.profile || !S) return null;
+  return {
+    id: AUTH.profile.id,
+    name: AUTH.profile.display_name || AUTH.profile.email,
+    // Keeps the existing localStorage demo UI available; this is not database authorization.
+    role: 'manager',
+    email: AUTH.profile.email,
+    phone: '',
+    active: AUTH.profile.active,
+    venues: S.venues.map(v => v.id)
+  };
+}
+function user(id) {
+  const signedIn = authDemoUser();
+  if (signedIn && signedIn.id === id) return signedIn;
+  return S.users.find(u => u.id === id) || null;
+}
+const me = () => authDemoUser() || user(S.session.userId) || S.users[0];
 const isMgr = () => (me() || {}).role === 'manager';
 const uname = id => (user(id) || {}).name || 'Unknown';
 
@@ -1107,7 +1007,7 @@ function today(vid) {
   const v = vid || V().id, k = dayKey();
   S.days[v] = S.days[v] || {};
   if (!S.days[v][k]) {
-    S.days[v][k] = isSupabaseMode() ? stateDay(k) : makeDay(k, { open: [], close: [] }, v);
+    S.days[v][k] = makeDay(k, { open: [], close: [] }, v);
     save();
   }
   return S.days[v][k];
@@ -1468,12 +1368,15 @@ function renderChrome() {
 
   $('#cur-avatar').textContent = initials(m.name);
   $('#cur-avatar').className = 'avatar ' + (m.role === 'manager' ? 'is-mgr' : '');
-  $('#cur-name').textContent = m.name.split(' ')[0];
+  $('#cur-name').textContent = m.name;
+  $('#user-pick').title = m.name;
   $('#user-chev').innerHTML = ic('down', 14);
   const sel = $('#user-switch');
   const supabase = isSupabaseMode();
   $('#user-pick').hidden = supabase;
   $('#btn-logout').hidden = !supabase;
+  $('#btn-logout').innerHTML = ic('right', 18);
+  $('#btn-logout').title = `Sign out ${m.name}`;
   if (!supabase) {
     sel.innerHTML = S.users.map(u =>
       `<option value="${u.id}" ${u.id === m.id ? 'selected' : ''}>${esc(u.name)}${u.role === 'manager' ? ' (Manager)' : ''}${u.active ? '' : ' — inactive'}</option>`).join('');
@@ -1513,19 +1416,11 @@ function renderChrome() {
       <span class="bn-ic">${ic(i.icon, 18)}</span><span>${i.label}</span></button>`).join('');
 }
 
-function pagePhase2(title) {
-  return `<div class="page-head"><div class="page-title">${esc(title)}</div>
-    <div class="page-sub">This screen is still using the demo repository and is planned for phase 2.</div></div>
-    <div class="banner banner-info">${ic('info', 17)}<div>
-      Supabase mode currently provides authentication, venue access, today’s opening and closing checklists, and persisted task updates. Template administration, roster management, history, CSV export and notifications remain available in demo mode until their database adapters are added.</div></div>`;
-}
-
 function render() {
   renderChrome();
   const page = $('#page');
   let html = '';
   if (!isMgr())                     html = pageEmployee();
-  else if (isSupabaseMode() && R.tab !== 'today') html = pagePhase2(NAV_MGR.find(x => x.id === R.tab)?.label || 'DailyOps');
   else if (R.tab === 'today')       html = pageManagerToday();
   else if (R.tab === 'templates')   html = pageTemplates();
   else if (R.tab === 'team')        html = pageTeam();
@@ -2104,7 +1999,7 @@ function pageSettings() {
         <div class="card">
           <div class="card-head"><div class="h3">Demo &amp; data</div></div>
           <div class="card-body stack" style="gap:11px">
-            <div class="tiny mut">Demo mode stores all venues in this browser's localStorage under <code>${STORE_KEY}</code>. Supabase mode uses the configured project as the source of truth.</div>
+            <div class="tiny mut">Application data remains in this browser's localStorage under <code>${STORE_KEY}</code> during the authentication-only integration. Supabase currently supplies the signed-in session and profile.</div>
             <div class="row wrap" style="gap:8px">
               <button class="btn btn-sm" data-act="csv-all">${ic('dl', 15)} Export ${esc(s.name)}</button>
               <button class="btn btn-sm" data-act="csv-group">${ic('dl', 15)} Export all venues</button>
@@ -2123,7 +2018,6 @@ function pageSettings() {
 /* ---- end-of-shift review: this is where notes and reasons are collected --- */
 function openReview(lk) {
   const day = today(), L = day.lists[lk], m = LIST_META[lk];
-  if (isSupabaseMode() && !L.id) { toast(`No ${m.label.toLowerCase()} checklist has been published yet`, 'warn'); return; }
   const st = listStats(L);
   const pending = L.tasks.filter(t => t.status !== 'done');
   const done = L.tasks.filter(t => t.status === 'done');
@@ -2194,26 +2088,10 @@ function openReview(lk) {
           if (!d.status) { toast(`Pick a reason for "${t.title.slice(0, 34)}…"`, 'warn'); root.querySelector(`[data-item="${t.id}"]`).scrollIntoView({ block: 'center' }); return; }
           if (REASONS[d.status].needsDetail && !d.reason.trim()) { toast('A blocked task needs a short explanation', 'warn'); root.querySelector(`[data-detail="${t.id}"]`).focus(); return; }
         }
-        const previous = pending.concat(done).map(t => ({ t, status: t.status, reason: t.reason, note: t.note, doneBy: t.doneBy, doneAt: t.doneAt }));
         pending.forEach(t => { t.status = draft[t.id].status; t.reason = draft[t.id].reason.trim(); });
         done.forEach(t => { const el = root.querySelector(`[data-note="${t.id}"]`); if (el) t.note = el.value.trim(); });
-        const oldChecklist = { submitted: L.submitted, submittedBy: L.submittedBy, submittedAt: L.submittedAt };
         L.submitted = true; L.submittedBy = me().id; L.submittedAt = new Date().toISOString();
-        if (isSupabaseMode()) {
-          try {
-            await Promise.all(pending.concat(done).map(t => persistTask(t)));
-            await persistChecklist(L);
-          } catch (error) {
-            try { await loadSupabaseState(); }
-            catch (reloadError) {
-              previous.forEach(x => Object.assign(x.t, { status: x.status, reason: x.reason, note: x.note, doneBy: x.doneBy, doneAt: x.doneAt }));
-              Object.assign(L, oldChecklist);
-            }
-            render(); toast(dbError(error), 'warn'); return;
-          }
-        } else {
-          save(); runTriggers();
-        }
+        save(); runTriggers();
         closeModal(); render();
         toast(`${m.full} checklist sent to the manager`, 'ok');
       };
@@ -2533,21 +2411,13 @@ function openDay(key) {
 /* ==========================================================================
    ACTIONS
    ========================================================================== */
-async function toggleTask(lk, id) {
+function toggleTask(lk, id) {
   const day = today(), L = day.lists[lk];
   if (L.submitted) { toast('This list is submitted — reopen it to make changes', 'warn'); return; }
   if (!me().active) { toast('This account is disabled', 'warn'); return; }
   const t = L.tasks.find(x => x.id === id); if (!t) return;
-  const previous = { status: t.status, doneBy: t.doneBy, doneAt: t.doneAt, reason: t.reason };
   if (t.status === 'done') { t.status = 'pending'; t.doneBy = null; t.doneAt = null; }
   else { t.status = 'done'; t.doneBy = me().id; t.doneAt = new Date().toISOString(); t.reason = ''; }
-  if (isSupabaseMode()) {
-    try { await persistTask(t); render(); }
-    catch (error) {
-      Object.assign(t, previous); render(); toast(dbError(error), 'warn');
-    }
-    return;
-  }
   save(); runTriggers(); render();
 }
 
@@ -2574,48 +2444,27 @@ function unrosterEverywhere(userId) {
   });
 }
 
-async function reopenList(lk) {
+function reopenList(lk) {
   const L = today().lists[lk];
-  const previous = { submitted: L.submitted, submittedBy: L.submittedBy, submittedAt: L.submittedAt };
   L.submitted = false; L.submittedBy = null; L.submittedAt = null;
-  if (isSupabaseMode()) {
-    try { await persistChecklist(L); render(); toast('List reopened'); }
-    catch (error) { Object.assign(L, previous); render(); toast(dbError(error), 'warn'); }
-    return;
-  }
   save(); render(); toast('List reopened');
 }
 
-async function coverShift(lk) {
+function coverShift(lk) {
   const day = today(), list = day.roster[lk];
   if (list.includes(me().id)) return;
-  if (isSupabaseMode()) {
-    const { error } = await DB.from('roster_assignments').upsert({
-      venue_id: V().id, user_id: me().id, work_date: day.date, shift_type: lk
-    }, { onConflict: 'venue_id,user_id,work_date,shift_type' });
-    if (error) { toast(dbError(error), 'warn'); return; }
-  }
   list.push(me().id); save(); render(); toast(`You're on the ${LIST_META[lk].label.toLowerCase()} shift`, 'ok');
 }
 
-async function tickAll(lk) {
+function tickAll(lk) {
   const L = today().lists[lk];
   if (L.submitted) { toast('Reopen the list first', 'warn'); return; }
   const changed = L.tasks.filter(t => t.status !== 'done');
   changed.forEach(t => { t.status = 'done'; t.doneBy = me().id; t.doneAt = new Date().toISOString(); t.reason = ''; });
-  if (isSupabaseMode()) {
-    try { await Promise.all(changed.map(t => persistTask(t))); render(); }
-    catch (error) { await loadSupabaseState(); render(); toast(dbError(error), 'warn'); }
-    return;
-  }
   save(); runTriggers(); render();
 }
 
 function handleAct(act, ds) {
-  if (isSupabaseMode() && ['add-task', 'del-task', 'sync-tpl', 'eod', 'roster', 'add-user', 'edit-user', 'toggle-user', 'toggle-user-venue', 'del-user', 'tpl-add', 'tpl-edit', 'tpl-crit', 'tpl-del', 'tpl-up', 'tpl-down', 'test-notif', 'setting-toggle', 'venue-accent', 'add-venue', 'edit-venue', 'copy-tpl', 'del-venue', 'reset-day', 'reset-all'].includes(act)) {
-    toast('This action is planned for the Supabase phase 2 adapter', 'warn');
-    return;
-  }
   const day = today();
   switch (act) {
     case 'review':    openReview(ds.list); break;
@@ -2749,6 +2598,7 @@ $('#app').addEventListener('click', e => {
 });
 
 $('#user-switch').addEventListener('change', e => {
+  if (isSupabaseMode()) return;
   S.session.userId = e.target.value;
   R.tab = 'today';
   ensureVenue();
@@ -2803,41 +2653,89 @@ function showAuthError(message) {
   el.hidden = !message;
 }
 
-function showLogin(message) {
+function showAuthLoading() {
   $('#app').hidden = true;
   $('#auth-screen').hidden = false;
+  $('#auth-loading').hidden = false;
+  $('#login-form').hidden = true;
+  $('#auth-logout').hidden = true;
+  showAuthError('');
+}
+
+function showLogin(message, allowLogout = false) {
+  $('#app').hidden = true;
+  $('#auth-screen').hidden = false;
+  $('#auth-loading').hidden = true;
+  $('#login-form').hidden = false;
+  $('#auth-logout').hidden = !allowLogout;
+  $('#login-submit').disabled = !DB;
   showAuthError(message);
 }
 
 function showApp() {
   $('#auth-screen').hidden = true;
   $('#app').hidden = false;
+  $('#login-form').hidden = false;
+  $('#login-submit').disabled = false;
+  showAuthError('');
+}
+
+async function restoreAuthenticatedApp(session) {
+  const restoreId = ++AUTH_RESTORE_ID;
+  AUTH.session = session;
+  if (!session) {
+    AUTH.profile = null;
+    S = null;
+    showLogin();
+    return;
+  }
+  showAuthLoading();
+  try {
+    await loadAuthenticatedProfile(session);
+  } catch (error) {
+    if (restoreId !== AUTH_RESTORE_ID) return;
+    AUTH.profile = null;
+    S = null;
+    showLogin(`We could not load your DailyOps profile. ${dbError(error)}`, true);
+    return;
+  }
+  if (restoreId !== AUTH_RESTORE_ID) return;
+  load();
+  showApp();
+  render();
 }
 
 async function signIn(event) {
   event.preventDefault();
-  if (!DB) return;
+  if (!DB) {
+    showAuthError('DailyOps could not initialise Supabase. Check the public configuration and try again.');
+    return;
+  }
   const button = $('#login-submit');
   button.disabled = true;
   showAuthError('');
   const email = $('#login-email').value.trim();
   const password = $('#login-password').value;
-  const { data, error } = await DB.auth.signInWithPassword({ email, password });
+  let data, error;
+  try {
+    ({ data, error } = await DB.auth.signInWithPassword({ email, password }));
+  } catch (authError) {
+    button.disabled = false;
+    showAuthError(dbError(authError));
+    return;
+  }
   if (error) {
     button.disabled = false;
     showAuthError(error.message);
     return;
   }
-  AUTH.session = data.session;
-  try {
-    await loadSupabaseState();
+  if (!data.session) {
     button.disabled = false;
-    showApp(); render();
-  } catch (error) {
-    button.disabled = false;
-    await DB.auth.signOut();
-    showLogin(dbError(error));
+    showAuthError('Supabase did not return an authenticated session. Please try again.');
+    return;
   }
+  await restoreAuthenticatedApp(data.session);
+  button.disabled = false;
 }
 
 async function startApp() {
@@ -2849,30 +2747,50 @@ async function startApp() {
   } catch (e) {}
 
   if (isSupabaseMode()) {
-    $('#app').hidden = true;
+    showAuthLoading();
+    const configError = !SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY
+      ? 'Supabase is not configured. Add SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY in supabase/config.js.'
+      : SUPABASE_URL.includes('YOUR_PROJECT') || SUPABASE_PUBLISHABLE_KEY.includes('YOUR_')
+        ? 'Supabase is still using placeholder configuration. Update supabase/config.js or enable DEMO_MODE explicitly.'
+        : '';
+    if (configError) { showLogin(configError); return; }
     if (!window.supabase || !window.supabase.createClient) {
       showLogin('The Supabase client library did not load. Check the network connection and try again.');
       return;
     }
-    DB = window.supabase.createClient(PUBLIC_SUPABASE_CONFIG.url, PUBLIC_SUPABASE_CONFIG.publishableKey);
-    const { data, error } = await DB.auth.getSession();
+    try {
+      DB = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
+        auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+      });
+    } catch (error) {
+      showLogin(`Supabase could not initialise. ${dbError(error)}`);
+      return;
+    }
+    let data, error;
+    try {
+      ({ data, error } = await DB.auth.getSession());
+    } catch (sessionError) {
+      showLogin(`Supabase could not restore your session. ${dbError(sessionError)}`);
+      return;
+    }
     if (error) { showLogin(error.message); return; }
     AUTH.session = data.session;
     DB.auth.onAuthStateChange((event, session) => {
       AUTH.session = session;
-      if (event === 'SIGNED_OUT') { S = null; showLogin(); }
+      if (event === 'SIGNED_OUT' || !session) {
+        AUTH_RESTORE_ID++;
+        AUTH.profile = null;
+        S = null;
+        showLogin();
+      } else if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
+        setTimeout(() => restoreAuthenticatedApp(session), 0);
+      }
     });
-    if (!AUTH.session) { showLogin(); return; }
-    try {
-      await loadSupabaseState();
-      showApp(); render();
-    } catch (error) {
-      await DB.auth.signOut();
-      showLogin(dbError(error));
-    }
+    if (!AUTH.session) showLogin();
+    else await restoreAuthenticatedApp(AUTH.session);
     tickClock();
     setInterval(tickClock, 30000);
-    console.info('%cDailyOps — Supabase phase 1', 'font-weight:700;font-size:13px');
+    console.info('%cDailyOps — Supabase Auth', 'font-weight:700;font-size:13px');
     return;
   }
 
@@ -2891,6 +2809,9 @@ async function startApp() {
 
 $('#login-form').addEventListener('submit', signIn);
 $('#btn-logout').addEventListener('click', async () => {
+  if (DB) await DB.auth.signOut();
+});
+$('#auth-logout').addEventListener('click', async () => {
   if (DB) await DB.auth.signOut();
 });
 
