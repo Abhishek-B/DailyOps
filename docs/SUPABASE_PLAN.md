@@ -6,19 +6,19 @@ The implementation is incremental. The static UI and localStorage demo stay in p
 
 - `supabase/migrations/001_initial_schema.sql` creates the multi-organisation relational model, constraints, indexes, Auth profile trigger, daily snapshot function, and RLS policies.
 - `supabase/config.js` contains only public browser configuration placeholders.
-- `index.html` loads Supabase JS v2 from a CDN when configured, uses Supabase Auth, loads the signed-in profile/role and accessible venues, manages recurring Opening/Closing Shift templates, and persists today's operation/task changes.
+- `index.html` loads Supabase JS v2 from a CDN when configured, uses Supabase Auth, loads the signed-in profile/role and accessible venues, manages organisation members, venue memberships, today's roster, recurring Opening/Closing Shift templates, and today's operation/task changes.
 - The existing demo is selected automatically while the public config contains placeholders.
 
 The first manager must still be created in the Supabase dashboard and assigned to an organisation and venue using the setup instructions in `README.md`. If the venue has no recurring templates, the manager's first app load performs the documented one-time local-template bootstrap.
 
 ## Phase 2 — next adapters
 
-Replace the phase 2 placeholder screens with repository-style functions for:
+Replace the remaining phase 2 placeholder screens with repository-style functions for:
 
-- venue and employee administration
-- roster administration and roster import
 - historical reporting and CSV export
 - notification event inbox
+
+Employee Auth-user creation and initial organisation membership bootstrap remain manual in the MVP. The browser must not use Supabase Auth admin APIs or a service-role key.
 
 ## Phase 3 — realtime and notifications
 

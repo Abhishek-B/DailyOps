@@ -19,7 +19,7 @@ Browser on GitHub Pages
   -> Postgres tables protected by RLS
 ```
 
-`index.html` keeps the rendering and interaction model while using Supabase for identity, recurring templates, and today's operational instances. The configured public URL/key selects this path; placeholders select demo mode.
+`index.html` keeps the rendering and interaction model while using Supabase for identity, organisation membership, venue access, team profiles, today's roster, recurring templates, and today's operational instances. The configured public URL/key selects this path; placeholders select demo mode.
 
 ## Core relational model
 
@@ -43,13 +43,15 @@ Daily operation instance and daily tasks
 
 Roster assignment
 - records a user, venue, date and Opening/Closing Shift assignment
+- managers create/remove assignments through RLS-scoped writes
+- employees may insert their own explicit current cover assignment; they cannot update or delete roster rows
 
 Notification event
 - reserves an auditable record for future Edge Function delivery
 
 ## Authorization boundary
 
-The browser key is publishable. RLS policies use the signed-in Auth UUID, organisation memberships, venue memberships, and active profiles to decide access. Managers inherit access to all venues in their organisation; employees require an active venue membership. Database triggers prevent employees from changing task definition fields or attributing a completion to another user.
+The browser key is publishable. RLS policies use the signed-in Auth UUID, organisation memberships, venue memberships, and active profiles to decide access. Managers inherit access to all venues in their organisation; employees require an active venue membership. Managers can administer members, profiles, venue memberships, and rosters only within managed organisations/venues. Migrations 006 and 007 narrow venue-membership reads and require manager-created memberships/rosters to stay within the target organisation; migration 008 records the authenticated helper grant required for manager profile updates. The browser does not create Auth users. Database triggers prevent employees from changing task definition fields or attributing a completion to another user.
 
 ## Snapshot invariant
 
@@ -59,6 +61,6 @@ The current `checklist_type` enum is intentionally retained for the deployed `op
 
 ## Planned backend work
 
-- phase 2: roster, employee, settings, history and CSV adapters
+- phase 2: history and CSV adapters
 - phase 3: Realtime task subscriptions
 - phase 4: Edge Functions and scheduled end-of-day notifications

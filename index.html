@@ -636,10 +636,11 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
 <script>
 /* ========================================================================== 
    DAILYOPS — DAILY OPERATIONS  ·  demo build
-   REAL NOW: auth, profile, organisation role, venues, recurring shift templates,
-   today's shift operations, today's routine/one-off tasks, and today's task status
+   REAL NOW: auth, profile, organisation role, venues, team membership, venue access,
+   today's roster, recurring shift templates, today's shift operations, today's routine/one-off tasks,
+   and today's task status
    are loaded from Supabase.
-   DEMO/LOCAL STILL: rosters, historical days, CSV history, and notifications remain
+   DEMO/LOCAL STILL: historical days, CSV history, and notifications remain
    in localStorage until their later migration phases.
    Sections: icons · utils · store/seed · notifier · render · actions · init
    ========================================================================== */
@@ -663,6 +664,7 @@ let AUTH = {
 };
 let SUPABASE_TODAY = { date: null, byVenue: {} };
 let SUPABASE_TEMPLATES = { byVenue: {} };
+let SUPABASE_TEAM = { members: [], profilesById: {}, venueIdsByUser: {} };
 const REMOTE_MUTATIONS = new Set();
 let AUTH_RESTORE_ID = 0;
 
@@ -741,8 +743,9 @@ const REASONS = {
 /* ==========================================================================
    SUPABASE BOUNDARY
    The current Supabase slice owns auth, identity, venue access, recurring templates,
-   and today's daily-operation/shift-task instance. Roster, history, and notification data
-   remain explicitly local/demo data.
+   and today's daily-operation/shift-task instance. Team membership, venue membership, and
+   today's roster are also real Supabase data. History and notification data remain explicitly
+   local/demo data.
    ========================================================================== */
 
 /* ------------------------------------------------------------- store/seed */
@@ -1083,7 +1086,7 @@ function loadSupabaseVenueContexts(rows) {
 
 async function loadAuthenticatedProfile(session) {
   const { data, error } = await DB.from('profiles')
-    .select('id,display_name,email,active,platform_role')
+    .select('id,display_name,email,phone,active,platform_role')
     .eq('id', session.user.id)
     .maybeSingle();
   if (error) throw error;
@@ -1093,6 +1096,7 @@ async function loadAuthenticatedProfile(session) {
     id: data.id,
     display_name: data.display_name,
     email: data.email || session.user.email || '',
+    phone: data.phone || '',
     active: !!data.active,
     platform_role: data.platform_role
   };
@@ -1138,6 +1142,111 @@ async function loadOrganisationAccess(session) {
     throw accessError('no-venues', 'Your organisation access is loaded, but you do not have access to any venues yet. Contact an administrator.');
   }
   loadSupabaseVenueContexts(venueRows);
+}
+
+/* --------------------------------------------------------------- team/roster */
+function currentSupabaseOrganisationId() {
+  return (currentVenueContext() && currentVenueContext().organisationId)
+    || (AUTH.organisationMemberships[0] && AUTH.organisationMemberships[0].organisation_id)
+    || null;
+}
+
+function supabaseMembersForOrganisation(organisationId) {
+  return SUPABASE_TEAM.members.filter(member => member.organisationId === organisationId);
+}
+
+function supabaseMemberForUser(userId, organisationId) {
+  const orgId = organisationId || currentSupabaseOrganisationId();
+  return SUPABASE_TEAM.members.find(member =>
+    member.id === userId && (!orgId || member.organisationId === orgId)
+  ) || null;
+}
+
+function localVenueIdsForMember(member) {
+  if (!member) return [];
+  return venueCatalog()
+    .filter(context => member.venueIds.includes(context.realId))
+    .map(context => context.id);
+}
+
+function localUserFromSupabaseMember(member) {
+  if (!member) return null;
+  return {
+    id: member.id,
+    name: member.displayName || member.email || 'DailyOps user',
+    role: member.role,
+    email: member.email || '',
+    phone: member.phone || '',
+    active: !!member.active,
+    venues: localVenueIdsForMember(member)
+  };
+}
+
+async function loadSupabaseTeam() {
+  const organisationIds = [...new Set(AUTH.organisationMemberships.map(row => row.organisation_id))];
+  const memberResult = await DB.from('organisation_members')
+    .select('organisation_id,user_id,role')
+    .in('organisation_id', organisationIds);
+  if (memberResult.error) {
+    console.error('[supabase] team membership load failed', { organisationIds, error: memberResult.error });
+    throw accessError('team-load', 'We could not load your organisation team.');
+  }
+
+  const memberRows = memberResult.data || [];
+  const memberIds = [...new Set(memberRows.map(row => row.user_id))];
+  const profileResult = memberIds.length
+    ? await DB.from('profiles').select('id,display_name,email,phone,active').in('id', memberIds)
+    : { data: [], error: null };
+  if (profileResult.error) {
+    console.error('[supabase] team profile load failed', { memberIds, error: profileResult.error });
+    throw accessError('team-load', 'We could not load the profiles for your organisation team.');
+  }
+  const missingProfiles = memberIds.filter(userId => !(profileResult.data || []).some(profile => profile.id === userId));
+  if (missingProfiles.length) {
+    console.error('[supabase] organisation members without profiles', { missingProfiles });
+    throw accessError('team-load', 'One or more organisation members do not have a DailyOps profile yet. Contact an administrator.');
+  }
+
+  const accessibleVenueIds = venueCatalog().map(context => context.realId);
+  const venueMemberResult = accessibleVenueIds.length
+    ? await DB.from('venue_members').select('venue_id,user_id').in('venue_id', accessibleVenueIds)
+    : { data: [], error: null };
+  if (venueMemberResult.error) {
+    console.error('[supabase] venue membership load failed', { accessibleVenueIds, error: venueMemberResult.error });
+    throw accessError('team-load', 'We could not load venue memberships for your organisation team.');
+  }
+
+  const profilesById = Object.fromEntries((profileResult.data || []).map(profile => [profile.id, profile]));
+  const venueIdsByUser = {};
+  (venueMemberResult.data || []).forEach(row => {
+    venueIdsByUser[row.user_id] = venueIdsByUser[row.user_id] || [];
+    venueIdsByUser[row.user_id].push(row.venue_id);
+  });
+
+  const members = memberRows.map(row => {
+    const profile = profilesById[row.user_id];
+    if (!profile) return null;
+    const organisationVenueIds = venueCatalog()
+      .filter(context => context.organisationId === row.organisation_id)
+      .map(context => context.realId);
+    const explicitVenueIds = [...new Set(venueIdsByUser[row.user_id] || [])]
+      .filter(venueId => organisationVenueIds.includes(venueId));
+    return {
+      id: row.user_id,
+      organisationId: row.organisation_id,
+      role: row.role,
+      displayName: profile.display_name || profile.email || 'DailyOps user',
+      email: profile.email || '',
+      phone: profile.phone || '',
+      active: !!profile.active,
+      explicitVenueIds,
+      // Managers inherit access to every venue in their organisation under the
+      // deployed RLS model. Employees use explicit venue_members rows.
+      venueIds: row.role === 'manager' ? organisationVenueIds : explicitVenueIds
+    };
+  }).filter(Boolean);
+
+  SUPABASE_TEAM = { members, profilesById, venueIdsByUser };
 }
 
 /* ---------------------------------------------------------------- templates */
@@ -1259,8 +1368,8 @@ async function loadSupabaseTemplates() {
 
 /* selectors */
 /* In Supabase mode these are real venue rows wrapped around local demo IDs.
-   The wrapper keeps deferred roster/history state keyed to S.days; templates use
-   the real venue IDs in SUPABASE_TEMPLATES. */
+   The wrapper keeps only deferred history/demo screens keyed to S.days; team,
+   roster, templates, and today's operations use their real Supabase IDs. */
 function venueCatalog() {
   return isSupabaseMode() ? AUTH.venueContexts : S.venues;
 }
@@ -1290,17 +1399,34 @@ function organisationRoleForVenue(v) {
 function authUserForLocalUi() {
   if (!isSupabaseMode() || !AUTH.profile || !S) return null;
   const selected = currentVenueContext();
+  const member = supabaseMemberForUser(AUTH.profile.id, selected && selected.organisationId);
+  const adapted = localUserFromSupabaseMember(member);
   return {
     id: AUTH.profile.id,
-    name: AUTH.profile.display_name || AUTH.profile.email,
-    role: organisationRoleForVenue(selected) || 'employee',
-    email: AUTH.profile.email,
-    phone: '',
+    name: adapted ? adapted.name : (AUTH.profile.display_name || AUTH.profile.email),
+    role: adapted ? adapted.role : (organisationRoleForVenue(selected) || 'employee'),
+    email: adapted ? adapted.email : AUTH.profile.email,
+    phone: adapted ? adapted.phone : (AUTH.profile.phone || ''),
     active: AUTH.profile.active,
-    venues: venueCatalog().map(v => v.id)
+    venues: adapted ? adapted.venues : venueCatalog().map(v => v.id)
   };
 }
 function user(id) {
+  if (isSupabaseMode()) {
+    const adapted = localUserFromSupabaseMember(supabaseMemberForUser(id));
+    if (adapted) return adapted;
+    const profile = SUPABASE_TEAM.profilesById[id];
+    if (profile) return {
+      id,
+      name: profile.display_name || profile.email || 'DailyOps user',
+      role: 'employee',
+      email: profile.email || '',
+      phone: profile.phone || '',
+      active: !!profile.active,
+      venues: []
+    };
+    return id === (AUTH.profile && AUTH.profile.id) ? authUserForLocalUi() : null;
+  }
   const signedIn = authUserForLocalUi();
   if (signedIn && signedIn.id === id) return signedIn;
   return S.users.find(u => u.id === id) || null;
@@ -1405,8 +1531,37 @@ function routineTaskKey(task) {
   return normalise(task.title);
 }
 
-function mapRemoteDay(context, date, checklists, tasks) {
-  const localDay = localDemoDayForVenue(context, date);
+async function loadSupabaseRosterForVenue(context, date) {
+  const result = await DB.from('roster_assignments')
+    .select('id,venue_id,user_id,work_date,shift_type,start_time,end_time')
+    .eq('venue_id', context.realId)
+    .eq('work_date', date);
+  if (result.error) {
+    console.error('[supabase] roster load failed', { venueId: context.realId, date, error: result.error });
+    throw accessError('roster-load', `We could not load today's roster for ${context.name}.`);
+  }
+  const rosterUserIds = [...new Set((result.data || []).map(row => row.user_id))];
+  if (rosterUserIds.length) {
+    const profileResult = await DB.from('profiles')
+      .select('id,display_name,email,phone,active')
+      .in('id', rosterUserIds);
+    if (profileResult.error) {
+      console.error('[supabase] roster profile load failed', { venueId: context.realId, rosterUserIds, error: profileResult.error });
+      throw accessError('roster-load', `We could not load the people assigned to today's roster for ${context.name}.`);
+    }
+    (profileResult.data || []).forEach(profile => { SUPABASE_TEAM.profilesById[profile.id] = profile; });
+  }
+  const roster = { open: [], close: [] };
+  const assignmentIds = { open: {}, close: {} };
+  (result.data || []).forEach(row => {
+    if (!roster[row.shift_type]) return;
+    roster[row.shift_type].push(row.user_id);
+    assignmentIds[row.shift_type][row.user_id] = row.id;
+  });
+  return { roster, assignmentIds };
+}
+
+function mapRemoteDay(context, date, checklists, tasks, rosterData) {
   const lists = { open: blankList(), close: blankList() };
   const checklistById = {};
   checklists.forEach(row => {
@@ -1429,8 +1584,8 @@ function mapRemoteDay(context, date, checklists, tasks) {
   });
   return {
     date,
-    // Roster data is deliberately still the local/demo roster for this phase.
-    roster: localDay.roster || { open: [], close: [] },
+    roster: rosterData ? rosterData.roster : { open: [], close: [] },
+    rosterAssignmentIds: rosterData ? rosterData.assignmentIds : { open: {}, close: {} },
     lists,
     reported: false,
     reportedAt: null
@@ -1504,7 +1659,8 @@ async function loadSupabaseTodayForVenue(context, date) {
     tasks = taskResult.data || [];
   }
 
-  return mapRemoteDay(context, date, checklists, tasks);
+  const rosterData = await loadSupabaseRosterForVenue(context, date);
+  return mapRemoteDay(context, date, checklists, tasks, rosterData);
 }
 
 async function loadSupabaseToday() {
@@ -2305,7 +2461,89 @@ function pageTemplates() {
 /* ==========================================================================
    MANAGER · TEAM & ROSTER
    ========================================================================== */
+function pageSupabaseTeam() {
+  const day = today();
+  const v = V();
+  const all = supabaseMembersForOrganisation(v.organisationId);
+  const employeesHere = all.filter(member =>
+    member.role === 'employee' && member.venueIds.includes(v.realId)
+  );
+  const activeHere = employeesHere.filter(member => member.active);
+
+  const rosterRows = activeHere.length ? activeHere.map(member => `
+    <tr>
+      <td><div class="row" style="gap:9px">${avatarHtml(member.id, 'sm')}<span>${esc(member.displayName)}</span></div></td>
+      ${['open','close'].map(k => `<td style="text-align:center">
+        <button class="switch ${day.roster[k].includes(member.id) ? 'is-on' : ''}" data-act="roster" data-list="${k}" data-id="${member.id}"
+          aria-label="${esc(member.displayName)} on ${k} shift" style="margin:0 auto"></button></td>`).join('')}
+    </tr>`).join('') : `<tr><td colspan="3" class="mut" style="text-align:center;padding:22px">Nobody is available to roster at ${esc(v.name)} yet.</td></tr>`;
+
+  const venueChips = member => member.role === 'manager'
+    ? `<span class="chip chip-info">All venues (manager)</span>`
+    : venueCatalog()
+      .filter(context => context.organisationId === member.organisationId)
+      .map(context => {
+        const assigned = member.explicitVenueIds.includes(context.realId);
+        return `<button class="chip ${assigned ? 'chip-accent' : ''}"
+          data-act="toggle-user-venue" data-id="${member.id}" data-venue="${context.realId}" style="cursor:pointer"
+          title="${assigned ? 'Remove from' : 'Assign to'} ${esc(context.name)}">
+          <span class="venue-dot" style="width:7px;height:7px;background:${assigned ? venueDotColor(context) : 'currentColor'};opacity:${assigned ? 1 : .4}"></span>${esc(context.name)}</button>`;
+      }).join('') || '<span class="tiny mut">No venue access</span>';
+
+  const staffRows = all.map(member => `
+    <tr>
+      <td><div class="row" style="gap:10px">${avatarHtml(member.id)}<div>
+        <div style="font-weight:600">${esc(member.displayName)}</div>
+        <div class="tiny mut">${esc(member.email)}</div></div></div></td>
+      <td><div class="row wrap" style="gap:5px">${venueChips(member)}</div></td>
+      <td><div class="stack" style="gap:4px"><span class="chip ${member.role === 'manager' ? 'chip-info' : ''}">${member.role === 'manager' ? 'Manager' : 'Employee'}</span>
+        <span class="chip ${member.active ? 'chip-ok' : ''} chip-dot">${member.active ? 'Active' : 'Disabled'}</span></div></td>
+      <td style="text-align:right"><div class="row" style="gap:4px;justify-content:flex-end">
+        <button class="switch ${member.active ? 'is-on' : ''}" data-act="toggle-user" data-id="${member.id}"
+          aria-label="Toggle access for ${esc(member.displayName)}" ${member.id === AUTH.profile.id ? 'disabled' : ''}></button>
+        <button class="btn btn-sm btn-icon btn-ghost" data-act="edit-user" data-id="${member.id}" title="Edit profile and access">${ic('pencil', 14)}</button>
+      </div></td>
+    </tr>`).join('');
+
+  const managers = all.filter(member => member.role === 'manager');
+  return `
+    <div class="page-head row-b wrap">
+      <div>
+        <div class="page-title">Team</div>
+        <div class="page-sub">Organisation members, venue access, and today's roster at ${esc(v.name)}.</div>
+      </div>
+      <button class="btn btn-sm btn-primary" data-act="add-user">${ic('plus', 15)} Add employee</button>
+    </div>
+    <div class="stack">
+      <div class="banner banner-info">${ic('info', 17)}<div>
+        Auth users are created securely in Supabase first. After an administrator adds the user to this organisation, this screen manages their profile, venue access, active state, and roster.</div></div>
+      <div class="card">
+        <div class="card-head"><div style="flex:1">
+          <div class="row" style="gap:8px"><span class="venue-dot" style="background:${venueDotColor(v)}"></span>
+            <div class="h3">Roster · ${esc(v.name)} · ${esc(fmtDateShort(day.date))}</div></div>
+          <div class="tiny mut">Only active employees with access to this venue can be assigned by a manager. Employees can use the existing "I'm covering" action.</div>
+        </div></div>
+        <div class="tablewrap"><table class="tbl">
+          <thead><tr><th>Employee</th><th style="text-align:center">Opening</th><th style="text-align:center">Closing</th></tr></thead>
+          <tbody>${rosterRows}</tbody>
+        </table></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div style="flex:1"><div class="h3">Organisation members</div>
+          <div class="tiny mut">Managers inherit access to every venue in this organisation. Employee venue access is controlled by venue memberships.</div></div>
+          <span class="tiny mut nowrap hide-sm">${activeHere.length} active here · ${all.length} total</span></div>
+        <div class="tablewrap"><table class="tbl">
+          <thead><tr><th>Member</th><th>Venues</th><th>Role / access</th><th></th></tr></thead>
+          <tbody>${staffRows || `<tr><td colspan="4" class="mut" style="text-align:center;padding:22px">No organisation members yet.</td></tr>`}</tbody>
+        </table></div>
+        <div class="card-foot tiny mut">Managers: ${managers.map(member => esc(member.displayName)).join(', ') || 'None'} — organisation role and platform role are separate.</div>
+      </div>
+    </div>`;
+}
+
 function pageTeam() {
+  if (isSupabaseMode()) return pageSupabaseTeam();
   const day = today();
   const v = V();
   const all = S.users.filter(u => u.role === 'employee');
@@ -2522,7 +2760,11 @@ function pageSettings() {
     </div>`;
 
   const venueRows = venueCatalog().map(v => {
-    const staff = S.users.filter(u => u.role === 'employee' && u.active && u.venues.includes(v.id)).length;
+    const staff = isSupabaseMode()
+      ? supabaseMembersForOrganisation(v.organisationId).filter(member =>
+          member.role === 'employee' && member.active && member.venueIds.includes(v.realId)
+        ).length
+      : S.users.filter(u => u.role === 'employee' && u.active && u.venues.includes(v.id)).length;
     const cur = v.id === V().id;
     return `<div class="venue-row">
       <span class="venue-dot" style="background:${venueDotColor(v)}"></span>
@@ -2594,7 +2836,7 @@ function pageSettings() {
         <div class="card">
           <div class="card-head"><div class="h3">Demo &amp; data</div></div>
           <div class="card-body stack" style="gap:11px">
-            <div class="tiny mut">Rosters, history and notifications remain in this browser's localStorage under <code>${STORE_KEY}</code>. Supabase supplies identity, accessible venues, recurring templates, and today's Opening/Closing Shift task state.</div>
+            <div class="tiny mut">History, CSV export and notifications remain in this browser's localStorage under <code>${STORE_KEY}</code>. Supabase supplies identity, team membership, venue access, today's roster, recurring templates, and today's Opening/Closing Shift task state.</div>
             <div class="row wrap" style="gap:8px">
               <button class="btn btn-sm" data-act="csv-all">${ic('dl', 15)} Export ${esc(s.name)}</button>
               <button class="btn btn-sm" data-act="csv-group">${ic('dl', 15)} Export all venues</button>
@@ -2918,7 +3160,142 @@ function openTemplateEditor(lk, id) {
 }
 
 /* ---- employee account add / edit --------------------------------------- */
+function openSupabaseOnboarding() {
+  const organisationId = currentSupabaseOrganisationId() || 'YOUR_ORGANISATION_UUID';
+  const sql = `insert into public.organisation_members (organisation_id, user_id, role)
+values ('${organisationId}', 'AUTH_USER_UUID_FROM_SUPABASE', 'employee')
+on conflict (organisation_id, user_id) do update set role = 'employee';`;
+  openModal(`
+    <div class="modal-head"><div style="flex:1">
+      <div class="modal-title">Add an existing Auth user</div>
+      <div class="modal-sub">The browser never creates Supabase Auth users or uses a service-role key.</div>
+    </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
+    <div class="modal-body stack" style="gap:13px">
+      <div class="banner banner-info">${ic('info', 17)}<div>
+        1. Create the employee under <b>Supabase → Authentication → Users</b> and set their email/password.<br>
+        2. The existing Auth trigger creates their <code>profiles</code> row.<br>
+        3. Run the SQL below in the Supabase SQL Editor, replacing the Auth user's UUID.<br>
+        4. Refresh this page, then edit the member to assign venues and active access.</div></div>
+      <pre style="white-space:pre-wrap;overflow:auto;background:var(--code-bg,var(--bg));padding:12px;border-radius:8px;font-size:12px">${esc(sql)}</pre>
+      <div class="tiny mut">Organisation: ${esc((AUTH.organisations.find(org => org.id === organisationId) || {}).name || organisationId)}</div>
+    </div>
+    <div class="modal-foot"><button class="btn btn-primary" data-x="close">Done</button></div>`, {
+    after(root) { root.querySelectorAll('[data-x=close]').forEach(button => button.onclick = closeModal); }
+  });
+}
+
+async function clearSupabaseTodayRoster(userId, venueIds) {
+  for (const venueId of venueIds) {
+    const { error } = await DB.from('roster_assignments')
+      .delete()
+      .eq('venue_id', venueId)
+      .eq('user_id', userId)
+      .eq('work_date', dayKey());
+    if (error) throw error;
+  }
+}
+
+function openSupabaseUserEditor(id) {
+  const member = supabaseMemberForUser(id, currentSupabaseOrganisationId());
+  if (!member) { toast('That organisation member is no longer available.', 'warn'); return; }
+  const isEmployee = member.role === 'employee';
+  const picked = new Set(member.explicitVenueIds);
+  const organisationVenues = venueCatalog().filter(context => context.organisationId === member.organisationId);
+  const chips = () => isEmployee
+    ? organisationVenues.map(context => `<button class="chip ${picked.has(context.realId) ? 'chip-accent' : ''}" data-venue="${context.realId}" style="cursor:pointer;height:28px;padding:0 11px">
+        <span class="venue-dot" style="width:7px;height:7px;background:${venueDotColor(context)}"></span>${esc(context.name)}</button>`).join('')
+    : '<span class="chip chip-info">All venues through manager role</span>';
+
+  openModal(`
+    <div class="modal-head"><div style="flex:1">
+      <div class="modal-title">Edit ${isEmployee ? 'employee' : 'manager'}</div>
+      <div class="modal-sub">Update the app profile, active state, and venue memberships.</div>
+    </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
+    <div class="modal-body stack" style="gap:13px">
+      <div class="field"><label class="label" for="us-name">Display name</label>
+        <input class="input" id="us-name" value="${esc(member.displayName)}" placeholder="e.g. Alex Moreau"></div>
+      <div class="field"><label class="label" for="us-mail">Auth email</label>
+        <input class="input" id="us-mail" type="email" value="${esc(member.email)}" disabled>
+        <span class="hint">Auth email changes are managed in Supabase Authentication, not by editing a profile row.</span></div>
+      <div class="field"><label class="label" for="us-phone">Mobile</label>
+        <input class="input" id="us-phone" value="${esc(member.phone)}" placeholder="+61 4.. ... ..."></div>
+      <div class="field"><label class="label">Organisation role</label>
+        <span class="chip ${isEmployee ? '' : 'chip-info'}">${isEmployee ? 'Employee' : 'Manager'}</span>
+        <span class="hint">Role changes are intentionally kept out of this browser flow; platform_role is separate.</span></div>
+      <div class="field"><label class="label">Venue access</label>
+        <div class="row wrap" style="gap:6px" id="us-venues">${chips()}</div>
+        <span class="hint">Employees only see venues with an explicit venue membership. Managers inherit all venues in their organisation.</span></div>
+      <div class="row-b" style="padding-top:4px">
+        <div><div style="font-weight:600;font-size:14px">Access enabled</div><div class="tiny mut">Turn off to retain history while blocking operational access</div></div>
+        <button class="switch ${member.active ? 'is-on' : ''}" id="us-active" ${member.id === AUTH.profile.id ? 'disabled title="You cannot disable your own signed-in access"' : ''}></button>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn" data-x="close">Cancel</button>
+      <button class="btn btn-primary" data-x="save">Save changes</button></div>`, {
+    after(root) {
+      let active = member.active;
+      root.querySelectorAll('[data-x=close]').forEach(button => button.onclick = closeModal);
+      root.querySelector('#us-active').onclick = () => {
+        if (member.id === AUTH.profile.id) return;
+        active = !active;
+        root.querySelector('#us-active').classList.toggle('is-on', active);
+      };
+      root.querySelector('#us-venues').addEventListener('click', event => {
+        const button = event.target.closest('[data-venue]'); if (!button || !isEmployee) return;
+        const venueId = button.dataset.venue;
+        if (picked.has(venueId)) picked.delete(venueId); else picked.add(venueId);
+        button.classList.toggle('chip-accent', picked.has(venueId));
+      });
+      root.querySelector('#us-name').focus();
+      root.querySelector('[data-x=save]').onclick = async () => {
+        const saveButton = root.querySelector('[data-x=save]');
+        const name = root.querySelector('#us-name').value.trim();
+        const phone = root.querySelector('#us-phone').value.trim();
+        if (!name) { toast('A display name is required', 'warn'); return; }
+        saveButton.disabled = true;
+        try {
+          const profileResult = await DB.from('profiles').update({ display_name: name, phone: phone || null, active })
+            .eq('id', member.id);
+          if (profileResult.error) throw profileResult.error;
+
+          if (isEmployee) {
+            const current = new Set(member.explicitVenueIds);
+            const added = [...picked].filter(venueId => !current.has(venueId));
+            const removed = [...current].filter(venueId => !picked.has(venueId));
+            for (const venueId of added) {
+              const result = await DB.from('venue_members').insert({ venue_id: venueId, user_id: member.id });
+              if (result.error && result.error.code !== '23505') throw result.error;
+            }
+            for (const venueId of removed) {
+              const result = await DB.from('venue_members').delete()
+                .eq('venue_id', venueId).eq('user_id', member.id);
+              if (result.error) throw result.error;
+              await clearSupabaseTodayRoster(member.id, [venueId]);
+            }
+            if (!active) await clearSupabaseTodayRoster(member.id, member.venueIds);
+          }
+
+          await loadSupabaseTeam();
+          await loadSupabaseToday();
+          closeModal();
+          render();
+          toast(`${name.split(' ')[0]} updated`, 'ok');
+        } catch (error) {
+          console.error('[supabase] team member update failed', { userId: member.id, error });
+          toast('Could not save that team member. Please try again.', 'warn');
+          saveButton.disabled = false;
+        }
+      };
+    }
+  });
+}
+
 function openUserEditor(id) {
+  if (isSupabaseMode()) {
+    if (!id) { openSupabaseOnboarding(); return; }
+    openSupabaseUserEditor(id);
+    return;
+  }
   const u = id ? user(id) : null;
   const picked = new Set(u ? u.venues : [V().id]);
   const chips = () => venueCatalog().map(v => `<button class="chip ${picked.has(v.id) ? 'chip-accent' : ''}" data-venue="${v.id}" style="cursor:pointer;height:28px;padding:0 11px">
@@ -3282,6 +3659,100 @@ function unrosterEverywhere(userId) {
   });
 }
 
+async function toggleRemoteRoster(lk, userId) {
+  if (!isMgr()) { toast('Only a manager can change the roster.', 'warn'); return; }
+  const context = V();
+  const member = supabaseMemberForUser(userId, context.organisationId);
+  if (!member || member.role !== 'employee' || !member.active || !member.venueIds.includes(context.realId)) {
+    toast('That employee is not active or does not have access to this venue.', 'warn');
+    return;
+  }
+  const day = today();
+  const existingId = day.rosterAssignmentIds && day.rosterAssignmentIds[lk]
+    ? day.rosterAssignmentIds[lk][userId]
+    : null;
+  const lockKey = `roster:${context.realId}:${day.date}:${lk}:${userId}`;
+  if (REMOTE_MUTATIONS.has(lockKey)) return;
+  REMOTE_MUTATIONS.add(lockKey);
+  try {
+    if (existingId) {
+      const result = await DB.from('roster_assignments').delete().eq('id', existingId);
+      if (result.error) throw result.error;
+      toast(`${member.displayName.split(' ')[0]} removed from the ${LIST_META[lk].label.toLowerCase()} shift`, 'ok');
+    } else {
+      const result = await DB.from('roster_assignments').insert({
+        id: crypto.randomUUID(), venue_id: context.realId, user_id: userId,
+        work_date: day.date, shift_type: lk
+      });
+      if (result.error && result.error.code !== '23505') throw result.error;
+      toast(`${member.displayName.split(' ')[0]} added to the ${LIST_META[lk].label.toLowerCase()} shift`, 'ok');
+    }
+    await loadSupabaseToday();
+    render();
+  } catch (error) {
+    console.error('[supabase] roster assignment change failed', { venueId: context.realId, userId, listType: lk, error });
+    toast('Could not save that roster change. Please try again.', 'warn');
+  } finally {
+    REMOTE_MUTATIONS.delete(lockKey);
+  }
+}
+
+async function toggleRemoteMemberActive(userId) {
+  const member = supabaseMemberForUser(userId, currentSupabaseOrganisationId());
+  if (!member) return;
+  if (userId === AUTH.profile.id) { toast('You cannot disable your own signed-in access.', 'warn'); return; }
+  const lockKey = `member-active:${member.organisationId}:${userId}`;
+  if (REMOTE_MUTATIONS.has(lockKey)) return;
+  REMOTE_MUTATIONS.add(lockKey);
+  try {
+    const active = !member.active;
+    const result = await DB.from('profiles').update({ active }).eq('id', userId);
+    if (result.error) throw result.error;
+    if (!active) await clearSupabaseTodayRoster(userId, member.venueIds);
+    await loadSupabaseTeam();
+    await loadSupabaseToday();
+    render();
+    toast(`${member.displayName.split(' ')[0]} ${active ? 'can now access DailyOps' : 'is now inactive'}`, 'ok');
+  } catch (error) {
+    console.error('[supabase] team member active state update failed', { userId, error });
+    toast('Could not update that member’s active state. Please try again.', 'warn');
+  } finally {
+    REMOTE_MUTATIONS.delete(lockKey);
+  }
+}
+
+async function toggleRemoteVenueMembership(userId, venueId) {
+  const context = venueCatalog().find(item => item.realId === venueId);
+  const member = context && supabaseMemberForUser(userId, context.organisationId);
+  if (!context || !member || member.role !== 'employee') {
+    toast('Only employee venue memberships can be changed here.', 'warn');
+    return;
+  }
+  const assigned = member.explicitVenueIds.includes(venueId);
+  const lockKey = `venue-member:${venueId}:${userId}`;
+  if (REMOTE_MUTATIONS.has(lockKey)) return;
+  REMOTE_MUTATIONS.add(lockKey);
+  try {
+    if (assigned) {
+      const result = await DB.from('venue_members').delete().eq('venue_id', venueId).eq('user_id', userId);
+      if (result.error) throw result.error;
+      await clearSupabaseTodayRoster(userId, [venueId]);
+    } else {
+      const result = await DB.from('venue_members').insert({ venue_id: venueId, user_id: userId });
+      if (result.error && result.error.code !== '23505') throw result.error;
+    }
+    await loadSupabaseTeam();
+    await loadSupabaseToday();
+    render();
+    toast(`${member.displayName.split(' ')[0]} ${assigned ? 'removed from' : 'added to'} ${context.name}`, 'ok');
+  } catch (error) {
+    console.error('[supabase] venue membership change failed', { venueId, userId, error });
+    toast('Could not save that venue membership. Please try again.', 'warn');
+  } finally {
+    REMOTE_MUTATIONS.delete(lockKey);
+  }
+}
+
 async function reopenList(lk) {
   const L = today().lists[lk];
   if (isSupabaseMode()) {
@@ -3329,7 +3800,33 @@ async function removeRemoteAdhocTask(lk, taskId) {
   }
 }
 
-function coverShift(lk) {
+async function coverShift(lk) {
+  if (isSupabaseMode()) {
+    const day = today();
+    if (day.lists[lk].submitted) { toast('This shift is already submitted.', 'warn'); return; }
+    if (!me().active) { toast('This account is disabled', 'warn'); return; }
+    if (day.roster[lk].includes(me().id)) return;
+    const context = V();
+    const lockKey = `cover:${context.realId}:${day.date}:${lk}:${me().id}`;
+    if (REMOTE_MUTATIONS.has(lockKey)) return;
+    REMOTE_MUTATIONS.add(lockKey);
+    try {
+      const result = await DB.from('roster_assignments').insert({
+        id: crypto.randomUUID(), venue_id: context.realId, user_id: me().id,
+        work_date: day.date, shift_type: lk
+      });
+      if (result.error && result.error.code !== '23505') throw result.error;
+      await loadSupabaseToday();
+      render();
+      toast(`You're on the ${LIST_META[lk].label.toLowerCase()} shift`, 'ok');
+    } catch (error) {
+      console.error('[supabase] self-cover roster assignment failed', { venueId: context.realId, listType: lk, error });
+      toast('Could not save your cover assignment. Please try again.', 'warn');
+    } finally {
+      REMOTE_MUTATIONS.delete(lockKey);
+    }
+    return;
+  }
   const day = today(), list = day.roster[lk];
   if (list.includes(me().id)) return;
   list.push(me().id); save(); render(); toast(`You're on the ${LIST_META[lk].label.toLowerCase()} shift`, 'ok');
@@ -3381,6 +3878,7 @@ function handleAct(act, ds) {
       runTriggers({ forceEod: true, venueId: V().id }); render(); break;
     }
     case 'roster': {
+      if (isSupabaseMode()) { toggleRemoteRoster(ds.list, ds.id); break; }
       const arr = day.roster[ds.list];
       const i = arr.indexOf(ds.id);
       if (i >= 0) arr.splice(i, 1); else arr.push(ds.id);
@@ -3389,11 +3887,13 @@ function handleAct(act, ds) {
     case 'add-user':    openUserEditor(null); break;
     case 'edit-user':   openUserEditor(ds.id); break;
     case 'toggle-user': {
+      if (isSupabaseMode()) { toggleRemoteMemberActive(ds.id); break; }
       const u = user(ds.id); u.active = !u.active;
       if (!u.active) unrosterEverywhere(ds.id);
       save(); render(); toast(`${u.name.split(' ')[0]} ${u.active ? 'can now sign in' : 'no longer has access'}`); break;
     }
     case 'toggle-user-venue': {
+      if (isSupabaseMode()) { toggleRemoteVenueMembership(ds.id, ds.venue); break; }
       const u = user(ds.id), i = u.venues.indexOf(ds.venue);
       if (i >= 0) {
         if (u.venues.length < 2) { toast('They need at least one venue', 'warn'); break; }
@@ -3404,6 +3904,7 @@ function handleAct(act, ds) {
       toast(`${u.name.split(' ')[0]} ${i >= 0 ? 'removed from' : 'added to'} ${venue(ds.venue).name}`); break;
     }
     case 'del-user': {
+      if (isSupabaseMode()) { toast('Deactivate the member instead so historical attribution is retained.', 'warn'); break; }
       const u = user(ds.id);
       confirmModal(`Remove ${u.name}?`, 'Their past operational history stays in the record. This cannot be undone.', 'Remove', () => {
         S.users = S.users.filter(x => x.id !== ds.id);
@@ -3640,6 +4141,7 @@ async function restoreAuthenticatedApp(session) {
     AUTH.selectedVenueId = null;
     SUPABASE_TODAY = { date: null, byVenue: {} };
     SUPABASE_TEMPLATES = { byVenue: {} };
+    SUPABASE_TEAM = { members: [], profilesById: {}, venueIdsByUser: {} };
     S = null;
     showLogin();
     return;
@@ -3659,6 +4161,7 @@ async function restoreAuthenticatedApp(session) {
   load();
   try {
     await loadOrganisationAccess(session);
+    await loadSupabaseTeam();
     await loadSupabaseTemplates();
     await loadSupabaseToday();
   } catch (error) {
@@ -3753,6 +4256,7 @@ async function startApp() {
         AUTH.selectedVenueId = null;
         SUPABASE_TODAY = { date: null, byVenue: {} };
         SUPABASE_TEMPLATES = { byVenue: {} };
+        SUPABASE_TEAM = { members: [], profilesById: {}, venueIdsByUser: {} };
         S = null;
         showLogin();
       } else if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {

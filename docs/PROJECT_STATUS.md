@@ -67,7 +67,13 @@ Important deployed enums include `app_role` (`manager`, `employee`), `checklist_
 
 The schema also contains SECURITY DEFINER access helpers, task/checklist update guards, and `ensure_daily_checklists(uuid, date)`. These helpers and guards remain part of the RLS boundary and are not renamed by this cleanup.
 
-Migration history currently consists of `001_initial_schema.sql`, `002_add_platform_role.sql`, `003_grant_helper_function_execute.sql`, `004_grant_can_update_task_execute.sql`, and `005_allow_managers_delete_adhoc_daily_tasks.sql`. Already-applied schema migrations remain immutable.
+Migration history currently consists of `001_initial_schema.sql`, `002_add_platform_role.sql`, `003_grant_helper_function_execute.sql`, `004_grant_can_update_task_execute.sql`, `005_allow_managers_delete_adhoc_daily_tasks.sql`, `006_restrict_venue_member_reads.sql`, `007_scope_team_and_roster_writes.sql`, and `008_grant_can_manage_profile_execute.sql`. Already-applied schema migrations remain immutable.
+
+Migration `006_restrict_venue_member_reads.sql` replaces the initial broad `venue_members` select policy with a manager-or-own-membership policy. It does not change venue-membership write policies or roster access.
+
+Migration `007_scope_team_and_roster_writes.sql` keeps manager-created venue memberships and roster assignments inside the target venue's organisation, requires manager-rostered employees to be active and explicitly assigned to the venue, and preserves the existing authenticated self-cover insert path.
+
+Migration `008_grant_can_manage_profile_execute.sql` grants authenticated EXECUTE on the existing `can_manage_profile(uuid)` helper so manager active-state/profile updates can pass the existing `profiles_update` policy.
 
 ## 6. What is live/real today
 
@@ -92,6 +98,11 @@ Migration history currently consists of `001_initial_schema.sql`, `002_add_platf
 - Manager re-application of missing routine tasks from the Supabase template, using stable `template_task_id` references without replacing existing state or removing one-off tasks.
 - Manager task controls for individual updates, notes/reasons, bulk completion, one-off tasks, shift submission, and reopening.
 - Today's progress, outstanding, critical-outstanding, per-shift progress, and submitted counts from the in-memory view loaded from Supabase `daily_tasks` and `daily_checklists`.
+- Organisation member loading and the manager Team view from `organisation_members` and `profiles`.
+- Employee active/inactive state updates through `profiles` while retaining historical profile rows.
+- Manager venue membership administration through `venue_members`.
+- Today's Opening/Closing Shift roster assignments through `roster_assignments`, including persistence and secure employee self-cover.
+- Employee roster-aware shift context and manager on-shift counts from real roster rows.
 
 ## 7. What is still local/demo/deferred
 
@@ -99,7 +110,7 @@ Migration history currently consists of `001_initial_schema.sql`, `002_add_platf
 
 - The explicit `DEMO_MODE: true` path retains localStorage-backed templates for standalone demo use.
 - A one-time manager bootstrap may read the existing local/demo routine definitions only when a venue has no remote template rows; normal Supabase operation does not use them as a source of truth.
-- Roster management and roster CSV import.
+- Roster CSV import.
 - Historical days, reporting, and CSV history export.
 - Simulated notification inbox and notification previews.
 
@@ -109,12 +120,12 @@ Migration history currently consists of `001_initial_schema.sql`, `002_add_platf
 - Production email/SMS notification delivery.
 - Edge Functions.
 - Scheduled end-of-day processing.
-- Full venue, employee, organisation-membership, and roster administration from the frontend.
+- Automated Auth-user invitation/creation and organisation-role editing; MVP onboarding creates Auth users manually in the Supabase dashboard and then bootstraps `organisation_members` with the Team screen instructions.
 - Offline/PWA support and evidence/photo attachments.
 
 ## 8. Completed milestones
 
-Steps 1–10 are complete in the current migration history and frontend implementation:
+Steps 1–11 are complete in the current migration history and frontend implementation:
 
 1. Initial multi-organisation Postgres schema, indexes, constraints, triggers, and RLS model.
 2. Additive `platform_role` schema migration for platform-level `user`/`admin` status.
@@ -126,6 +137,7 @@ Steps 1–10 are complete in the current migration history and frontend implemen
 8. Supabase task status, completion metadata, notes, incomplete reasons, and operation submission/review flow.
 9. Today's complete Supabase operation workflow: one-off tasks, safe routine re-apply, manager controls, shift submission/reopening, and real progress/critical counts.
 10. Supabase-backed recurring Opening/Closing Shift templates, manager template CRUD/order/copy, stable template-task references, and template-based daily snapshot generation.
+11. Supabase-backed organisation members/profiles, employee active state, venue memberships, today's roster assignments, manager Team controls, and employee roster-aware views.
 
 The repository does not use a separate generated milestone registry; this list reflects the current project history and implementation state.
 
@@ -136,7 +148,13 @@ The repository does not use a separate generated milestone registry; this list r
 - The current operational type model is still hard-coded to `open` and `close` in the deployed enum and several frontend loops. Additional operation sections need an additive design before implementation.
 - Existing daily rows created before Step 10 may need a one-time manager-side title match to backfill their `template_task_id`; unmatched legacy rows are preserved rather than rewritten.
 - The one-time template bootstrap still uses local/demo definitions when a venue has no remote template. It does not overwrite existing remote template data.
-- Deferred roster, history, and notification screens still depend on localStorage state and the temporary real-venue-to-demo-context mapping.
+- Deferred history and notification screens still depend on localStorage state and the temporary real-venue-to-demo-context mapping.
+- Auth-user creation and initial organisation membership bootstrap are manual because the static browser must not use Supabase Auth admin APIs or a service-role key.
+- Organisation role changes are intentionally not exposed in the Team UI; they remain an administrator/manual SQL operation until a narrower workflow is designed.
+- Employees may insert their own current roster assignment through the existing RLS policy for the explicit "I'm covering" flow; they cannot update or delete roster rows.
+- Migration `006_restrict_venue_member_reads.sql` narrows employee reads of venue membership data while preserving manager administration.
+- Migration `007_scope_team_and_roster_writes.sql` prevents cross-organisation venue membership/roster writes through raw browser requests.
+- Migration `008_grant_can_manage_profile_execute.sql` records the required authenticated EXECUTE grant for manager profile updates.
 - Realtime is not implemented, so another browser's task changes are not pushed into an already-open screen.
 - There is no production notification backend or scheduled end-of-day job.
 - RLS helper EXECUTE grants were initially missing in the live project and were corrected in migrations `003_grant_helper_function_execute.sql` and `004_grant_can_update_task_execute.sql`. The one-off delete capability is isolated in `005_allow_managers_delete_adhoc_daily_tasks.sql`. Keep these grants/policies and verify them when provisioning another Supabase project.
@@ -146,13 +164,12 @@ The repository does not use a separate generated milestone registry; this list r
 
 Use this order for the next phases:
 
-1. Roster, employees, and venue memberships.
-2. History, reporting, and CSV.
-3. Realtime.
-4. Notifications.
-5. Scheduled end-of-day processing.
-6. Final security testing.
-7. Custom domain and polish.
+1. History, reporting, and CSV.
+2. Realtime.
+3. Notifications.
+4. Scheduled end-of-day processing.
+5. Final security testing.
+6. Custom domain and polish.
 
 ## 11. Git workflow
 
