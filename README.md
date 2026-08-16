@@ -11,14 +11,14 @@ DailyOps is a framework-free, multi-venue daily-operations app for opening and c
 Supabase currently supplies authentication, organisation/venue identity, and today's live shift-operation instances:
 
 - email/password sign-in and sign-out;
-- persisted sessions across browser refreshes; and
+- persisted sessions across browser refreshes;
 - the signed-in user's `public.profiles` row;
-- the user's organisation memberships and organisation names; and
+- the user's organisation memberships and organisation names;
 - the venues returned by the deployed RLS policies;
-- today's `public.daily_checklists` Opening/Closing Shift rows; and
-- today's `public.daily_tasks` routine and one-off tasks, status, completion attribution/timestamps, notes, and incomplete reasons.
+- the selected venue's recurring Opening/Closing Shift templates and routine tasks; and
+- today's `public.daily_checklists` Opening/Closing Shift rows and `public.daily_tasks` routine/one-off tasks, status, completion attribution/timestamps, notes, and incomplete reasons.
 
-Recurring shift-task templates, roster data, history, CSV export, and simulated notifications remain localStorage-backed. Production defaults to Supabase mode. The original demo can be enabled explicitly with `DEMO_MODE: true`.
+Roster data, history, CSV export, and simulated notifications remain localStorage-backed. Production defaults to Supabase mode. The original demo can be enabled explicitly with `DEMO_MODE: true`.
 
 ## Supabase frontend auth setup
 
@@ -54,13 +54,19 @@ After authentication, the app reads the signed-in user's rows from `public.organ
 
 The app then queries `public.venues`. RLS is the access boundary: managers receive venues in organisations they manage, while employees receive only venues allowed by the deployed membership policies. The venue switcher uses the real venue name, subtitle, accent, cutoff time, and notification settings. The selected real venue ID is remembered in a user-specific local preference and is restored only if the user still has access.
 
-Recurring shift-task templates, roster assignments, history, notifications, and related demo screens still use the existing localStorage state. Real venue rows are mapped to temporary local operations contexts so real Supabase IDs do not overwrite or get persisted into the old demo state. The live daily operation/task state is kept in a separate in-memory Supabase view and is never silently replaced with local task state.
+Roster assignments, history, notifications, and related demo screens still use the existing localStorage state. Recurring templates now load from Supabase. Real venue rows are mapped to temporary local operations contexts only for deferred local screens, so real Supabase IDs do not overwrite or get persisted into the old demo state. The live template and daily operation/task state is kept in separate in-memory Supabase views and is never silently replaced with local task state.
+
+## Supabase recurring shift templates
+
+In Supabase mode, managers load and manage `public.checklist_templates` and `public.template_tasks` for the selected venue. The deployed RLS policies allow managers to insert, update, reorder, and delete only templates/tasks belonging to venues they manage; employees can read templates where their venue access permits it but do not receive template-management controls.
+
+If a manager opens a venue with no remote Opening or Closing template yet, the browser performs a one-time compatibility bootstrap from that venue's existing local/demo routine definitions. It creates the missing remote template rows and tasks without overwriting existing remote templates. After that, Supabase is the source of truth. Template changes affect future daily operations; today's task rows remain snapshots. “Apply to today” adds missing tasks by stable `template_task_id`, preserves task state and one-off tasks, and does not delete existing daily tasks.
 
 ## Supabase today's operation loading
 
-For each accessible real venue, the app loads today's `public.daily_checklists` rows for `list_type = open` and `list_type = close`, representing the Opening and Closing Shifts, then loads their `public.daily_tasks`. A manager can temporarily bootstrap missing rows: the legacy instance rows are inserted with the schema's unique `(venue_id, work_date, list_type)` key, and empty task lists are seeded from the matching local demo template. The seed tasks intentionally have `template_task_id = null`; this is temporary phase-1 bootstrap data until recurring shift-task snapshots are migrated. Repeated page loads see the existing rows/tasks and do not seed them again. Employees cannot bootstrap missing rows; RLS remains the boundary and they see an explicit initialisation message.
+For each accessible real venue, the app loads today's `public.daily_checklists` rows for `list_type = open` and `list_type = close`, representing the Opening and Closing Shifts, then loads their `public.daily_tasks`. When a manager opens a date with missing rows, the existing `ensure_daily_checklists(uuid, date)` SECURITY DEFINER helper creates the missing instances and copies the current Supabase template tasks as snapshots. Repeated page loads are idempotent because of the database unique key `(venue_id, work_date, list_type)`. Employees cannot bootstrap missing rows; RLS remains the boundary and they see an explicit initialisation message.
 
-Task changes use the schema's existing `pending`, `done`, `blocked`, `na`, and `skipped` values. Completion writes `completed_by` and `completed_at`; reopening clears those fields. Notes, reasons, and shift submission metadata are written to Supabase. Managers can add and remove `source = adhoc` one-off tasks, while routine tasks remain non-deletable. Re-apply routine tasks is a temporary local-template bridge that only adds missing tasks and preserves existing state. Notifications, rosters, history, and authoritative recurring templates remain deferred or local/demo.
+Task changes use the schema's existing `pending`, `done`, `blocked`, `na`, and `skipped` values. Completion writes `completed_by` and `completed_at`; reopening clears those fields. Notes, reasons, and shift submission metadata are written to Supabase. Managers can add and remove `source = adhoc` one-off tasks, while routine tasks remain non-deletable. Re-apply routine tasks reads the Supabase template, adds only missing routine snapshots, and preserves existing state and one-off tasks. Notifications, rosters, and history remain deferred or local/demo.
 
 Before testing one-off deletion, apply `supabase/migrations/005_allow_managers_delete_adhoc_daily_tasks.sql` in the Supabase SQL Editor. It adds only a manager-scoped delete policy for `source = 'adhoc'` daily tasks.
 
@@ -87,7 +93,7 @@ Make sure the exact local origin is included in Supabase **Authentication > URL 
 3. Sign in with the test user and confirm the profile display name appears in the existing user area.
 4. Refresh the page and confirm the session is restored without signing in again.
 5. Select the sign-out action and confirm the app returns to the login screen.
-6. Confirm the existing demo/template UI still works after successful login and that its deferred changes remain in localStorage.
+6. Open Templates and confirm the manager can load the remote Opening/Closing Shift templates; roster, history, and notification changes remain deferred/local.
 
 Production URL:
 
@@ -102,7 +108,6 @@ Use an authenticated browser session or the Supabase client with a test user's s
 ## Intentionally deferred
 
 - organisation and venue administration mutations;
-- database-backed recurring shift-task template administration and snapshots;
 - roster migration and roster administration;
 - historical days, reporting, and CSV export migration;
 - realtime subscriptions;

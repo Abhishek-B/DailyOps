@@ -636,10 +636,11 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
 <script>
 /* ========================================================================== 
    DAILYOPS — DAILY OPERATIONS  ·  demo build
-   REAL NOW: auth, profile, organisation role, venues, today's shift operations,
-   today's routine/one-off tasks, and today's task status are loaded from Supabase.
-   DEMO/LOCAL STILL: recurring templates, rosters, historical days, CSV history, and
-   notifications remain in localStorage until their later migration phases.
+   REAL NOW: auth, profile, organisation role, venues, recurring shift templates,
+   today's shift operations, today's routine/one-off tasks, and today's task status
+   are loaded from Supabase.
+   DEMO/LOCAL STILL: rosters, historical days, CSV history, and notifications remain
+   in localStorage until their later migration phases.
    Sections: icons · utils · store/seed · notifier · render · actions · init
    ========================================================================== */
 "use strict";
@@ -661,6 +662,7 @@ let AUTH = {
   ephemeralDemoVenueIds: []
 };
 let SUPABASE_TODAY = { date: null, byVenue: {} };
+let SUPABASE_TEMPLATES = { byVenue: {} };
 const REMOTE_MUTATIONS = new Set();
 let AUTH_RESTORE_ID = 0;
 
@@ -738,8 +740,8 @@ const REASONS = {
 
 /* ==========================================================================
    SUPABASE BOUNDARY
-   The current Supabase slice owns auth, identity, venue access, and today's
-   daily-operation/shift-task instance. Template, roster, history, and notification data
+   The current Supabase slice owns auth, identity, venue access, recurring templates,
+   and today's daily-operation/shift-task instance. Roster, history, and notification data
    remain explicitly local/demo data.
    ========================================================================== */
 
@@ -1138,9 +1140,127 @@ async function loadOrganisationAccess(session) {
   loadSupabaseVenueContexts(venueRows);
 }
 
+/* ---------------------------------------------------------------- templates */
+/* Supabase is the source of truth in normal mode. The local template data is
+   used only once, to initialise a venue that has no remote template rows yet. */
+async function bootstrapMissingSupabaseTemplates(contexts, existingHeaders) {
+  const existing = new Set(existingHeaders.map(row => `${row.venue_id}:${row.list_type}`));
+  for (const context of contexts) {
+    if (context.organisationRole !== 'manager') continue;
+    for (const listType of ['open', 'close']) {
+      const key = `${context.realId}:${listType}`;
+      if (existing.has(key)) continue;
+
+      const templateId = crypto.randomUUID();
+      const { error: templateError } = await DB.from('checklist_templates').insert({
+        id: templateId,
+        venue_id: context.realId,
+        list_type: listType,
+        name: LIST_META[listType].full,
+        active: true
+      });
+      if (templateError) {
+        if (templateError.code === '23505') continue;
+        console.error('[supabase] template bootstrap failed', { venueId: context.realId, listType, error: templateError });
+        throw accessError('template-bootstrap', `We could not initialise the ${LIST_META[listType].full} template for ${context.name}.`);
+      }
+
+      const localTasks = (S.templates[context.id] && S.templates[context.id][listType]) || [];
+      if (!localTasks.length) continue;
+      const taskRows = localTasks.map((task, index) => ({
+        id: crypto.randomUUID(),
+        template_id: templateId,
+        sort_order: index,
+        title: task.title,
+        detail: task.detail || null,
+        critical: !!task.critical
+      }));
+      const { error: taskError } = await DB.from('template_tasks').insert(taskRows);
+      if (taskError) {
+        console.error('[supabase] template task bootstrap failed', { venueId: context.realId, listType, error: taskError });
+        throw accessError('template-bootstrap', `We could not initialise the ${LIST_META[listType].full} routine tasks for ${context.name}.`);
+      }
+    }
+  }
+}
+
+async function loadSupabaseTemplates() {
+  const contexts = venueCatalog();
+  const venueIds = contexts.map(context => context.realId);
+  const headerResult = await DB.from('checklist_templates')
+    .select('id,venue_id,list_type,name,active')
+    .in('venue_id', venueIds);
+  if (headerResult.error) {
+    console.error('[supabase] template load failed', { venueIds, error: headerResult.error });
+    throw accessError('template-load', 'We could not load the recurring shift templates.');
+  }
+
+  let headers = headerResult.data || [];
+  const managerContexts = contexts.filter(context => context.organisationRole === 'manager');
+  const missingManagerTemplates = managerContexts.some(context =>
+    ['open', 'close'].some(listType => !headers.some(row => row.venue_id === context.realId && row.list_type === listType))
+  );
+  if (missingManagerTemplates) {
+    await bootstrapMissingSupabaseTemplates(contexts, headers);
+    const refreshedHeaders = await DB.from('checklist_templates')
+      .select('id,venue_id,list_type,name,active')
+      .in('venue_id', venueIds);
+    if (refreshedHeaders.error) {
+      console.error('[supabase] template reload failed', { venueIds, error: refreshedHeaders.error });
+      throw accessError('template-load', 'We could not reload the recurring shift templates.');
+    }
+    headers = refreshedHeaders.data || [];
+  }
+
+  const templateIds = headers.map(row => row.id);
+  let taskRows = [];
+  if (templateIds.length) {
+    const taskResult = await DB.from('template_tasks')
+      .select('id,template_id,sort_order,title,detail,critical')
+      .in('template_id', templateIds)
+      .order('sort_order')
+      .order('id');
+    if (taskResult.error) {
+      console.error('[supabase] template task load failed', { templateIds, error: taskResult.error });
+      throw accessError('template-load', 'We could not load the routine tasks in the recurring templates.');
+    }
+    taskRows = taskResult.data || [];
+  }
+
+  const headerById = Object.fromEntries(headers.map(row => [row.id, row]));
+  const byVenue = Object.fromEntries(contexts.map(context => [context.realId, {
+    open: [],
+    close: [],
+    templateIds: { open: null, close: null }
+  }]));
+  headers.forEach(row => {
+    if (!byVenue[row.venue_id] || !byVenue[row.venue_id][row.list_type]) return;
+    byVenue[row.venue_id].templateIds[row.list_type] = row.id;
+  });
+  taskRows.forEach(row => {
+    const header = headerById[row.template_id];
+    if (!header || !byVenue[header.venue_id] || !byVenue[header.venue_id][header.list_type]) return;
+    byVenue[header.venue_id][header.list_type].push({
+      id: row.id,
+      templateId: row.template_id,
+      sortOrder: row.sort_order,
+      title: row.title,
+      detail: row.detail || '',
+      critical: !!row.critical
+    });
+  });
+  Object.values(byVenue).forEach(bucket => {
+    ['open', 'close'].forEach(listType => bucket[listType].sort((a, b) =>
+      a.sortOrder - b.sortOrder || a.id.localeCompare(b.id)
+    ));
+  });
+  SUPABASE_TEMPLATES = { byVenue };
+}
+
 /* selectors */
 /* In Supabase mode these are real venue rows wrapped around local demo IDs.
-   The wrapper keeps deferred template/roster/history state keyed to S.templates and S.days. */
+   The wrapper keeps deferred roster/history state keyed to S.days; templates use
+   the real venue IDs in SUPABASE_TEMPLATES. */
 function venueCatalog() {
   return isSupabaseMode() ? AUTH.venueContexts : S.venues;
 }
@@ -1193,7 +1313,13 @@ const uname = id => (user(id) || {}).name || 'Unknown';
 
 const venue  = id => venueCatalog().find(v => v.id === id || (isSupabaseMode() && v.realId === id)) || null;
 const V      = () => currentVenueContext() || venueCatalog()[0];
-const TPL    = vid => S.templates[vid || V().id];
+const TPL    = vid => {
+  if (!isSupabaseMode()) return S.templates[vid || V().id];
+  const context = supabaseVenueContext(vid || (V() && V().id));
+  return context && SUPABASE_TEMPLATES.byVenue[context.realId]
+    ? SUPABASE_TEMPLATES.byVenue[context.realId]
+    : { open: [], close: [], templateIds: { open: null, close: null } };
+};
 const DAYS   = vid => S.days[vid || V().id];
 /* Supabase has already filtered this catalog through the venues RLS policy. */
 const venuesFor = u => !u ? [] : isSupabaseMode()
@@ -1328,14 +1454,14 @@ async function loadSupabaseTodayForVenue(context, date) {
     throw accessError('today-not-initialized', `Today's operations for ${context.name} have not been initialised by a venue manager yet.`);
   }
   if (missingTypes.length) {
-    const { error } = await DB.from('daily_checklists').insert(missingTypes.map(listType => ({
-      venue_id: context.realId,
-      work_date: date,
-      list_type: listType
-    })));
-    // A concurrent manager may have created the unique row between the read and insert.
-    if (error && error.code !== '23505') {
-      console.error('[supabase] daily checklist bootstrap failed', { venueId: context.realId, date, error });
+    // The deployed SECURITY DEFINER helper creates missing instances and copies
+    // the current Supabase template tasks as immutable daily snapshots.
+    const { error } = await DB.rpc('ensure_daily_checklists', {
+      p_venue_id: context.realId,
+      p_work_date: date
+    });
+    if (error) {
+      console.error('[supabase] daily operation bootstrap failed', { venueId: context.realId, date, error });
       throw accessError('today-bootstrap', `We could not initialise today's operations for ${context.name}.`);
     }
     const refreshed = await DB.from('daily_checklists')
@@ -1365,45 +1491,19 @@ async function loadSupabaseTodayForVenue(context, date) {
   }
   let tasks = taskResult.data || [];
 
-  // Temporary phase-1 bootstrap: seed empty instances from the matching local
-  // demo template. template_task_id stays null because those IDs are not live
-  // template_tasks rows. Later phases will replace this with template snapshots.
-  for (const listType of ['open', 'close']) {
-    const checklist = checklists.find(row => row.list_type === listType);
-    if (tasks.some(row => row.checklist_id === checklist.id)) continue;
-    if (!canBootstrap) {
-      throw accessError('today-not-initialized', `Today's ${LIST_META[listType].full} for ${context.name} has no tasks yet. A venue manager must initialise it first.`);
+  if (await backfillLegacyRemoteTemplateTaskIds(context, checklists, tasks)) {
+    taskResult = await DB.from('daily_tasks')
+      .select(REMOTE_TASK_SELECT)
+      .in('checklist_id', checklistIds)
+      .order('sort_order')
+      .order('id');
+    if (taskResult.error) {
+      console.error('[supabase] daily task reload after template link failed', { venueId: context.realId, date, error: taskResult.error });
+      throw accessError('today-load', `We could not reload today's tasks for ${context.name}.`);
     }
-    const demoTasks = (S.templates[context.id] && S.templates[context.id][listType]) || [];
-    if (!demoTasks.length) continue;
-    const seedRows = demoTasks.map((task, index) => ({
-      checklist_id: checklist.id,
-      template_task_id: null,
-      sort_order: index,
-      title: task.title,
-      detail: task.detail || '',
-      critical: !!task.critical,
-      source: 'template',
-      status: 'pending',
-      added_by: AUTH.profile.id
-    }));
-    const { error } = await DB.from('daily_tasks').insert(seedRows);
-    if (error) {
-      console.error('[supabase] daily task bootstrap failed', { venueId: context.realId, listType, date, error });
-      throw accessError('today-bootstrap', `We could not initialise today's ${LIST_META[listType].full.toLowerCase()} tasks for ${context.name}.`);
-    }
+    tasks = taskResult.data || [];
   }
 
-  taskResult = await DB.from('daily_tasks')
-    .select(REMOTE_TASK_SELECT)
-    .in('checklist_id', checklistIds)
-    .order('sort_order')
-    .order('id');
-  if (taskResult.error) {
-    console.error('[supabase] daily task reload failed', { venueId: context.realId, date, error: taskResult.error });
-    throw accessError('today-load', `We could not reload today's shift tasks for ${context.name}.`);
-  }
-  tasks = taskResult.data || [];
   return mapRemoteDay(context, date, checklists, tasks);
 }
 
@@ -1431,6 +1531,38 @@ async function persistRemoteTask(task) {
     .single();
   if (error) throw error;
   applyRemoteTaskRow(task, data);
+}
+
+async function linkRemoteDailyTaskTemplate(taskId, templateTaskId) {
+  const { error } = await DB.from('daily_tasks')
+    .update({ template_task_id: templateTaskId })
+    .eq('id', taskId);
+  if (error) throw error;
+}
+
+async function backfillLegacyRemoteTemplateTaskIds(context, checklists, tasks) {
+  if (context.organisationRole !== 'manager') return false;
+  const checklistTypeById = Object.fromEntries(checklists.map(row => [row.id, row.list_type]));
+  const bucket = SUPABASE_TEMPLATES.byVenue[context.realId] || { open: [], close: [] };
+  const updates = [];
+  tasks.forEach(row => {
+    if (row.source !== 'template' || row.template_task_id) return;
+    const listType = checklistTypeById[row.checklist_id];
+    const matches = (bucket[listType] || []).filter(templateTask =>
+      routineTaskKey(templateTask) === routineTaskKey(row)
+    );
+    if (matches.length === 1) updates.push({ taskId: row.id, templateTaskId: matches[0].id });
+  });
+  if (!updates.length) return false;
+  try {
+    await Promise.all(updates.map(update =>
+      linkRemoteDailyTaskTemplate(update.taskId, update.templateTaskId)
+    ));
+  } catch (error) {
+    console.error('[supabase] legacy daily task template link failed', { venueId: context.realId, error });
+    throw accessError('today-load', `We could not link today's routine tasks to their recurring templates for ${context.name}.`);
+  }
+  return true;
 }
 
 async function persistRemoteChecklist(list) {
@@ -2462,7 +2594,7 @@ function pageSettings() {
         <div class="card">
           <div class="card-head"><div class="h3">Demo &amp; data</div></div>
           <div class="card-body stack" style="gap:11px">
-            <div class="tiny mut">Templates, rosters, history and notifications remain in this browser's localStorage under <code>${STORE_KEY}</code>. Supabase supplies identity, accessible venues, and today's Opening/Closing Shift task state.</div>
+            <div class="tiny mut">Rosters, history and notifications remain in this browser's localStorage under <code>${STORE_KEY}</code>. Supabase supplies identity, accessible venues, recurring templates, and today's Opening/Closing Shift task state.</div>
             <div class="row wrap" style="gap:8px">
               <button class="btn btn-sm" data-act="csv-all">${ic('dl', 15)} Export ${esc(s.name)}</button>
               <button class="btn btn-sm" data-act="csv-group">${ic('dl', 15)} Export all venues</button>
@@ -2666,6 +2798,62 @@ function openAddTask(lk) {
 }
 
 /* ---- template task add / edit ------------------------------------------ */
+function remoteTemplateId(listType, venueId) {
+  const context = supabaseVenueContext(venueId || (V() && V().id));
+  const bucket = context && SUPABASE_TEMPLATES.byVenue[context.realId];
+  return bucket && bucket.templateIds[listType];
+}
+
+async function insertRemoteTemplateTask(listType, fields, venueId) {
+  const templateId = remoteTemplateId(listType, venueId);
+  if (!templateId) throw new Error(`No ${LIST_META[listType].full} template exists for this venue.`);
+  const { error } = await DB.from('template_tasks').insert({
+    id: crypto.randomUUID(),
+    template_id: templateId,
+    sort_order: fields.sortOrder,
+    title: fields.title,
+    detail: fields.detail || null,
+    critical: !!fields.critical
+  });
+  if (error) throw error;
+}
+
+async function updateRemoteTemplateTask(taskId, fields) {
+  const { error } = await DB.from('template_tasks')
+    .update(fields)
+    .eq('id', taskId);
+  if (error) throw error;
+}
+
+async function deleteRemoteTemplateTask(taskId) {
+  const { error } = await DB.from('template_tasks')
+    .delete()
+    .eq('id', taskId);
+  if (error) throw error;
+}
+
+async function refreshRemoteTemplates() {
+  await loadSupabaseTemplates();
+  render();
+}
+
+function mutateRemoteTemplate(lockKey, details, action, successMessage) {
+  if (REMOTE_MUTATIONS.has(lockKey)) return;
+  REMOTE_MUTATIONS.add(lockKey);
+  (async () => {
+    try {
+      await action();
+      await refreshRemoteTemplates();
+      toast(successMessage, 'ok');
+    } catch (error) {
+      console.error('[supabase] template mutation failed', { ...details, error });
+      toast('Could not save the template change. Please try again.', 'warn');
+    } finally {
+      REMOTE_MUTATIONS.delete(lockKey);
+    }
+  })();
+}
+
 function openTemplateEditor(lk, id) {
   const tpl = TPL()[lk];
   const t = id ? tpl.find(x => x.id === id) : null;
@@ -2692,10 +2880,34 @@ function openTemplateEditor(lk, id) {
       const sw = root.querySelector('#tt-crit');
       sw.onclick = () => { crit = !crit; sw.classList.toggle('is-on', crit); };
       root.querySelector('#tt-title').focus();
-      root.querySelector('[data-x=save]').onclick = () => {
+      root.querySelector('[data-x=save]').onclick = async () => {
         const title = root.querySelector('#tt-title').value.trim();
         const detail = root.querySelector('#tt-detail').value.trim();
         if (!title) { toast('Give the task a name', 'warn'); return; }
+        const saveButton = root.querySelector('[data-x=save]');
+        if (isSupabaseMode()) {
+          saveButton.disabled = true;
+          try {
+            if (t) {
+              await updateRemoteTemplateTask(t.id, { title, detail: detail || null, critical: crit });
+            } else {
+              await insertRemoteTemplateTask(lk, {
+                sortOrder: tpl.length,
+                title,
+                detail,
+                critical: crit
+              });
+            }
+            await refreshRemoteTemplates();
+            closeModal();
+            toast(t ? 'Routine task updated' : 'Added to the recurring template', 'ok');
+          } catch (error) {
+            console.error('[supabase] template task save failed', { listType: lk, taskId: id, error });
+            toast('Could not save that routine task. Please try again.', 'warn');
+            saveButton.disabled = false;
+          }
+          return;
+        }
         if (t) { t.title = title; t.detail = detail; t.critical = crit; }
         else tpl.push({ id: uid('t'), title, detail, critical: crit });
         save(); closeModal(); render();
@@ -2816,7 +3028,8 @@ function openVenueEditor(id) {
 
 /* ---- copy recurring shift tasks from another venue ----------------------- */
 function openCopyTemplate() {
-  const others = venueCatalog().filter(v => v.id !== V().id);
+  const others = venueCatalog().filter(v => v.id !== V().id &&
+    (!isSupabaseMode() || v.organisationRole === 'manager'));
   if (!others.length) { toast('There is only one venue', 'warn'); return; }
   let src = others[0].id, lists = { open: true, close: true };
 
@@ -2844,8 +3057,41 @@ function openCopyTemplate() {
         lists[b.dataset.k] = !lists[b.dataset.k];
         b.classList.toggle('chip-accent', lists[b.dataset.k]);
       });
-      root.querySelector('[data-x=save]').onclick = () => {
+      root.querySelector('[data-x=save]').onclick = async () => {
         if (!lists.open && !lists.close) { toast('Pick at least one shift', 'warn'); return; }
+        const saveButton = root.querySelector('[data-x=save]');
+        if (isSupabaseMode()) {
+          saveButton.disabled = true;
+          let copied = 0;
+          try {
+            for (const k of ['open', 'close']) {
+              if (!lists[k]) continue;
+              const destination = TPL()[k];
+              const have = new Set(destination.map(t => routineTaskKey(t)));
+              let nextOrder = destination.length;
+              for (const task of TPL(src)[k]) {
+                const key = routineTaskKey(task);
+                if (have.has(key)) continue;
+                await insertRemoteTemplateTask(k, {
+                  sortOrder: nextOrder++,
+                  title: task.title,
+                  detail: task.detail,
+                  critical: task.critical
+                }, V().id);
+                have.add(key);
+                copied++;
+              }
+            }
+            await refreshRemoteTemplates();
+            closeModal();
+            toast(copied ? `${plural(copied, 'task')} copied from ${venue(src).name}` : 'Nothing new to copy', copied ? 'ok' : 'warn');
+          } catch (error) {
+            console.error('[supabase] template copy failed', { sourceVenueId: src, error });
+            toast('Could not copy those routine tasks. Please try again.', 'warn');
+            saveButton.disabled = false;
+          }
+          return;
+        }
         let n = 0;
         ['open','close'].forEach(k => {
           if (!lists[k]) return;
@@ -2971,9 +3217,8 @@ function syncTemplate(lk) {
   toast(`${LIST_META[lk].full} synced with the template`, 'ok');
 }
 
-/* Temporary Step 9 bridge: local routine definitions can add missing remote
-   daily tasks, but they never replace today's Supabase state. Step 10 will
-   replace this path with Supabase-backed recurring templates. */
+/* Re-apply the current Supabase template to today's snapshot. Existing task
+   state and one-off tasks are retained; only missing routine snapshots are added. */
 async function reapplyRemoteRoutineTasks(lk) {
   if (!isMgr()) { toast('Only a venue manager can re-apply routine tasks.', 'warn'); return; }
   const day = today(), L = day.lists[lk];
@@ -2981,14 +3226,17 @@ async function reapplyRemoteRoutineTasks(lk) {
   const lockKey = `reapply:${L.id}`;
   if (REMOTE_MUTATIONS.has(lockKey)) return;
   const routine = (TPL()[lk] || []);
-  // Match against every existing task so a same-named one-off is not
-  // duplicated by this temporary compatibility action.
-  const existing = new Set(L.tasks.map(routineTaskKey));
+  const existingIds = new Set(L.tasks
+    .filter(task => task.source === 'template' && task.tplId)
+    .map(task => task.tplId));
+  const existingTitles = new Set(L.tasks
+    .filter(task => task.source === 'template')
+    .map(routineTaskKey));
   const missing = [];
   routine.forEach(task => {
     const key = routineTaskKey(task);
-    if (existing.has(key)) return;
-    existing.add(key);
+    if (existingIds.has(task.id) || existingTitles.has(key)) return;
+    existingTitles.add(key);
     missing.push(task);
   });
   if (!missing.length) {
@@ -3001,15 +3249,13 @@ async function reapplyRemoteRoutineTasks(lk) {
   try {
     let sortOrder = nextRemoteSortOrder(L);
     for (const task of missing) {
-      // Local template IDs are not live template_tasks IDs, so leave the
-      // snapshot reference null until the recurring-template migration.
       const remoteTask = await insertRemoteDailyTask(L, {
         sortOrder: sortOrder++,
         title: task.title,
         detail: task.detail || '',
         critical: !!task.critical,
         source: 'template',
-        templateTaskId: null
+        templateTaskId: task.id
       });
       L.tasks.push(remoteTask);
       added++;
@@ -3169,19 +3415,43 @@ function handleAct(act, ds) {
     case 'tpl-add':  openTemplateEditor(ds.list, null); break;
     case 'tpl-edit': openTemplateEditor(ds.list, ds.id); break;
     case 'tpl-crit': {
-      const t = TPL()[ds.list].find(x => x.id === ds.id); t.critical = !t.critical; save(); render(); break;
+      const t = TPL()[ds.list].find(x => x.id === ds.id);
+      if (!t) break;
+      if (isSupabaseMode()) {
+        mutateRemoteTemplate(`template-critical:${t.id}`, { listType: ds.list, taskId: t.id },
+          () => updateRemoteTemplateTask(t.id, { critical: !t.critical }),
+          t.critical ? 'Routine task marked non-critical' : 'Routine task marked critical');
+      } else {
+        t.critical = !t.critical; save(); render();
+      }
+      break;
     }
     case 'tpl-del': {
       const arr = TPL()[ds.list], t = arr.find(x => x.id === ds.id);
       confirmModal('Remove from template?', `"${t.title}" will stop appearing on new ${LIST_META[ds.list].label.toLowerCase()} lists.`, 'Remove', () => {
-        TPL()[ds.list] = arr.filter(x => x.id !== ds.id); save(); render(); toast('Removed from the template');
+        if (isSupabaseMode()) {
+          mutateRemoteTemplate(`template-delete:${t.id}`, { listType: ds.list, taskId: t.id },
+            () => deleteRemoteTemplateTask(t.id),
+            'Removed from the recurring template');
+        } else {
+          TPL()[ds.list] = arr.filter(x => x.id !== ds.id); save(); render(); toast('Removed from the template');
+        }
       }, true); break;
     }
     case 'tpl-up': case 'tpl-down': {
       const arr = TPL()[ds.list], i = arr.findIndex(x => x.id === ds.id);
       const j = act === 'tpl-up' ? i - 1 : i + 1;
       if (j < 0 || j >= arr.length) break;
-      [arr[i], arr[j]] = [arr[j], arr[i]]; save(); render(); break;
+      if (isSupabaseMode()) {
+        const reordered = arr.slice();
+        [reordered[i], reordered[j]] = [reordered[j], reordered[i]];
+        mutateRemoteTemplate(`template-reorder:${ds.list}`, { listType: ds.list },
+          () => Promise.all(reordered.map((task, index) => updateRemoteTemplateTask(task.id, { sort_order: index }))),
+          `${LIST_META[ds.list].full} routine tasks reordered`);
+      } else {
+        [arr[i], arr[j]] = [arr[j], arr[i]]; save(); render();
+      }
+      break;
     }
     case 'view-day':  openDay(ds.key); break;
     case 'csv-all':   exportCsv(localHistoryKeys(V().id), `${V().name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-operations.csv`); break;
@@ -3223,7 +3493,6 @@ function handleAct(act, ds) {
       break;
     }
     case 'copy-tpl': {
-      if (isSupabaseMode()) { toast('Template copy is deferred while today\'s operations use Supabase.', 'warn'); break; }
       openCopyTemplate(); break;
     }
     case 'reset-day': {
@@ -3370,6 +3639,7 @@ async function restoreAuthenticatedApp(session) {
     AUTH.venueContexts = [];
     AUTH.selectedVenueId = null;
     SUPABASE_TODAY = { date: null, byVenue: {} };
+    SUPABASE_TEMPLATES = { byVenue: {} };
     S = null;
     showLogin();
     return;
@@ -3389,6 +3659,7 @@ async function restoreAuthenticatedApp(session) {
   load();
   try {
     await loadOrganisationAccess(session);
+    await loadSupabaseTemplates();
     await loadSupabaseToday();
   } catch (error) {
     if (restoreId !== AUTH_RESTORE_ID) return;
@@ -3481,6 +3752,7 @@ async function startApp() {
         AUTH.venueContexts = [];
         AUTH.selectedVenueId = null;
         SUPABASE_TODAY = { date: null, byVenue: {} };
+        SUPABASE_TEMPLATES = { byVenue: {} };
         S = null;
         showLogin();
       } else if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {

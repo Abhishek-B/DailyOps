@@ -19,7 +19,7 @@ Browser on GitHub Pages
   -> Postgres tables protected by RLS
 ```
 
-`index.html` keeps the rendering and interaction model but replaces the source of truth for the first vertical slice. The configured public URL/key selects this path; placeholders select demo mode.
+`index.html` keeps the rendering and interaction model while using Supabase for identity, recurring templates, and today's operational instances. The configured public URL/key selects this path; placeholders select demo mode.
 
 ## Core relational model
 
@@ -53,12 +53,12 @@ The browser key is publishable. RLS policies use the signed-in Auth UUID, organi
 
 ## Snapshot invariant
 
-`ensure_daily_checklists(venue_id, work_date)` is a legacy-named database helper. It creates an open and/or close daily operation instance only when an active template exists and only copies template tasks when the instance is first created. Later template edits do not change existing daily tasks. Explicit recurring shift-task synchronisation will be implemented in phase 2.
+`ensure_daily_checklists(venue_id, work_date)` is a legacy-named database helper. It creates an open and/or close daily operation instance only when an active Supabase template exists and copies template tasks, including their stable IDs, only when the instance is first created. Later template edits do not change existing daily tasks. The frontend's explicit re-apply action only adds missing routine snapshots and never resets existing state or one-off tasks.
 
 The current `checklist_type` enum is intentionally retained for the deployed `open`/`close` data model. A future operation-section migration should be additive and backward compatible when sections such as Mid Shift, Kitchen Opening, Bar Opening, FOH Opening, Cleaning, or Maintenance become product requirements; this cleanup does not introduce that migration.
 
 ## Planned backend work
 
-- phase 2: template, roster, employee, settings, history and CSV adapters
+- phase 2: roster, employee, settings, history and CSV adapters
 - phase 3: Realtime task subscriptions
 - phase 4: Edge Functions and scheduled end-of-day notifications

@@ -6,24 +6,23 @@ The implementation is incremental. The static UI and localStorage demo stay in p
 
 - `supabase/migrations/001_initial_schema.sql` creates the multi-organisation relational model, constraints, indexes, Auth profile trigger, daily snapshot function, and RLS policies.
 - `supabase/config.js` contains only public browser configuration placeholders.
-- `index.html` loads Supabase JS v2 from a CDN when configured, uses Supabase Auth, loads the signed-in profile/role and accessible venues, and persists today's Opening/Closing Shift task changes.
+- `index.html` loads Supabase JS v2 from a CDN when configured, uses Supabase Auth, loads the signed-in profile/role and accessible venues, manages recurring Opening/Closing Shift templates, and persists today's operation/task changes.
 - The existing demo is selected automatically while the public config contains placeholders.
 
-The first manager must still be created in the Supabase dashboard and assigned to an organisation, venue, and templates using the setup instructions in `README.md`.
+The first manager must still be created in the Supabase dashboard and assigned to an organisation and venue using the setup instructions in `README.md`. If the venue has no recurring templates, the manager's first app load performs the documented one-time local-template bootstrap.
 
 ## Phase 2 — next adapters
 
 Replace the phase 2 placeholder screens with repository-style functions for:
 
 - venue and employee administration
-- recurring shift-task template editing and explicit daily-operation synchronisation
 - roster administration and roster import
 - historical reporting and CSV export
 - notification event inbox
 
 ## Phase 3 — realtime and notifications
 
-- Subscribe to `daily_tasks` and legacy `daily_checklists` instance changes for the selected venue/date.
+- Subscribe to `template_tasks`, `daily_tasks`, and legacy `daily_checklists` instance changes for the selected venue/date.
 - Move notification composition and delivery to Edge Functions.
 - Run cutoff/end-of-day summaries as scheduled server-side work so they do not depend on an open browser.
 
