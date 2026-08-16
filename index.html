@@ -1247,7 +1247,9 @@ function nextRemoteSortOrder(list) {
 }
 
 async function insertRemoteDailyTask(list, fields) {
+  const taskId = crypto.randomUUID();
   const payload = {
+    id: taskId,
     checklist_id: list.id,
     template_task_id: fields.templateTaskId || null,
     sort_order: fields.sortOrder,
@@ -1261,11 +1263,14 @@ async function insertRemoteDailyTask(list, fields) {
     note: null,
     reason: null
   };
-  const { data, error } = await DB.from('daily_tasks')
-    .insert(payload)
+  const { error: insertError } = await DB.from('daily_tasks').insert(payload);
+  if (insertError) throw insertError;
+
+  const { data, error: selectError } = await DB.from('daily_tasks')
     .select(REMOTE_TASK_SELECT)
+    .eq('id', taskId)
     .single();
-  if (error) throw error;
+  if (selectError) throw selectError;
   return applyRemoteTaskRow({}, data);
 }
 
