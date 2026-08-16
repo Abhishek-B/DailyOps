@@ -2038,6 +2038,7 @@ function pageManagerToday() {
         </div>
         <div class="tasklist">${rows || `<div class="empty">No tasks on this list.</div>`}</div>
         <div class="card-foot row" style="gap:8px">
+          <button class="btn btn-sm" data-act="review" data-list="${lk}">${ic('note', 15)} Review notes &amp; reasons</button>
           <button class="btn btn-sm" data-act="add-task" data-list="${lk}">${ic('plus', 15)} Add a one-off task</button>
           <button class="btn btn-sm btn-ghost" data-act="sync-tpl" data-list="${lk}">${ic('reset', 15)} Re-apply template</button>
           ${L.submitted ? `<button class="btn btn-sm btn-ghost" data-act="reopen" data-list="${lk}">Reopen</button>` : ''}
@@ -2479,14 +2480,14 @@ function openReview(lk) {
 
   openModal(`
     <div class="modal-head"><div style="flex:1">
-      <div class="modal-title">Submit the ${esc(m.label.toLowerCase())} checklist</div>
+      <div class="modal-title">${isMgr() ? `Review the ${esc(m.label.toLowerCase())} checklist` : `Submit the ${esc(m.label.toLowerCase())} checklist`}</div>
       <div class="modal-sub">${st.done} of ${st.total} ticked off · ${esc(fmtDate(day.date))}</div>
     </div>
     <button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
     <div class="modal-body">${pendingHtml}${notesHtml}</div>
     <div class="modal-foot">
       <button class="btn" data-x="close">Keep working</button>
-      <button class="btn btn-primary" data-x="submit">${ic('send', 16)} Send to manager</button>
+      <button class="btn btn-primary" data-x="submit">${ic('send', 16)} ${isMgr() ? (L.submitted ? 'Save changes' : 'Submit checklist') : 'Send to manager'}</button>
     </div>`, {
     wide: true,
     after(root) {
