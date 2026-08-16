@@ -4,13 +4,15 @@ DailyOps is a framework-free, multi-venue opening/closing checklist app. It rema
 
 ## Current phase
 
-Supabase currently supplies authentication only:
+Supabase currently supplies authentication and organisation/venue identity:
 
 - email/password sign-in and sign-out;
 - persisted sessions across browser refreshes; and
-- the signed-in user's `public.profiles` row.
+- the signed-in user's `public.profiles` row;
+- the user's organisation memberships and organisation names; and
+- the venues returned by the deployed RLS policies.
 
-The existing application data, demo user switcher, checklists, venues, templates, rosters, history, CSV export, and simulated notifications remain localStorage-backed. Production defaults to Supabase Auth. The original demo can be enabled explicitly with `DEMO_MODE: true`.
+Checklist templates, daily tasks, roster data, history, CSV export, and simulated notifications remain localStorage-backed. Production defaults to Supabase mode. The original demo can be enabled explicitly with `DEMO_MODE: true`.
 
 ## Supabase frontend auth setup
 
@@ -38,7 +40,15 @@ In the Supabase dashboard:
 2. For local testing, either disable email confirmation or confirm the test user's email.
 3. Under **Authentication > URL Configuration**, allow the local URL used by Live Server, such as `http://127.0.0.1:5500`, and the production URL below.
 
-The app loads the authenticated user's profile with a query constrained to `profiles.id = auth.users.id`. The browser does not query venues, memberships, checklists, templates, rosters, or other application tables in this phase.
+The app loads the authenticated user's profile with a query constrained to `profiles.id = auth.users.id`, then loads organisation memberships, organisation names, and RLS-filtered venues. It does not query checklist templates, daily tasks, rosters, history, or notifications in this phase.
+
+## Supabase organisation and venue loading
+
+After authentication, the app reads the signed-in user's rows from `public.organisation_members` and loads the related `public.organisations` rows. The `organisation_members.role` value (`manager` or `employee`) determines the manager or employee UI for the selected venue. `platform_role` is a separate platform-level field and is not used for this decision.
+
+The app then queries `public.venues`. RLS is the access boundary: managers receive venues in organisations they manage, while employees receive only venues allowed by the deployed membership policies. The venue switcher uses the real venue name, subtitle, accent, cutoff time, and notification settings. The selected real venue ID is remembered in a user-specific local preference and is restored only if the user still has access.
+
+Checklist templates, daily task instances, roster assignments, history, notifications, and related demo screens still use the existing localStorage state. Real venue rows are mapped to temporary local checklist contexts so real Supabase IDs do not overwrite or get persisted into the old demo state.
 
 ### Create the first manager account
 
@@ -73,12 +83,12 @@ https://abhishek-b.github.io/DailyOps/
 
 ### Verify RLS
 
-Use an authenticated browser session or the Supabase client with a test user's session when checking access. Do not use the SQL Editor as proof of RLS behavior because dashboard SQL runs with elevated privileges. Confirm that an authenticated user can read only their own profile row and that a user cannot read or update another user's profile unless the deployed RLS policies explicitly allow it.
+Use an authenticated browser session or the Supabase client with a test user's session when checking access. Do not use the SQL Editor as proof of RLS behavior because dashboard SQL runs with elevated privileges. Confirm that memberships and venues returned to a signed-in user match their organisation/venue access, and that a user cannot read or update another user's profile unless the deployed RLS policies explicitly allow it.
 
 ## Intentionally deferred
 
-- organisation, membership, and venue queries;
-- database-backed venues, templates, daily checklist snapshots, tasks, rosters, and history;
+- organisation and venue administration mutations;
+- database-backed checklist templates, daily checklist snapshots, tasks, rosters, and history;
 - realtime subscriptions;
 - notification delivery and scheduled jobs;
 - roster CSV import;

@@ -128,6 +128,7 @@ body {
 .auth-title { font-size: 24px; font-weight: 720; letter-spacing: -.03em; }
 .auth-sub { color: var(--muted); font-size: 13px; margin-top: 3px; }
 .auth-loading { color: var(--muted); font-size: 13px; padding: 10px 0 2px; }
+.auth-status { margin-bottom: 14px; }
 .auth-error { color: var(--danger); background: var(--danger-soft); border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--surface)); border-radius: var(--r-sm); padding: 10px 12px; font-size: 13px; }
 .auth-card .btn { width: 100%; justify-content: center; }
 .statusbar { display: none; }
@@ -570,6 +571,7 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
           <div><div class="auth-title">DailyOps</div><div class="auth-sub">Shift checklists for every venue</div></div>
         </div>
         <div class="auth-loading" id="auth-loading">Checking your DailyOps session…</div>
+        <div class="auth-error auth-status" id="auth-status" hidden></div>
         <form id="login-form" class="stack" style="gap:14px" hidden>
           <div class="field"><label class="label" for="login-email">Email</label>
             <input class="input" id="login-email" type="email" autocomplete="email" required></div>
@@ -577,8 +579,8 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
             <input class="input" id="login-password" type="password" autocomplete="current-password" required></div>
           <div class="auth-error" id="auth-error" hidden></div>
           <button class="btn btn-primary" id="login-submit" type="submit">Sign in</button>
-          <button class="btn" id="auth-logout" type="button" hidden>Sign out</button>
         </form>
+        <button class="btn" id="auth-logout" type="button" hidden>Sign out</button>
       </div>
     </div>
     <div class="app" id="app" hidden>
@@ -634,7 +636,8 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
 <script>
 /* ========================================================================== 
    DAILYOPS — SHIFT CHECKLIST  ·  demo build
-   Supabase mode handles authentication only; application state remains in localStorage.
+   Supabase mode handles authentication plus organisation/venue identity;
+   application state remains in localStorage.
    Sections: icons · utils · store/seed · notifier · render · actions · init
    ========================================================================== */
 "use strict";
@@ -646,7 +649,15 @@ const SUPABASE_PUBLISHABLE_KEY = PUBLIC_SUPABASE_CONFIG.SUPABASE_PUBLISHABLE_KEY
 const DEMO_MODE = PUBLIC_SUPABASE_CONFIG.DEMO_MODE === true;
 const isSupabaseMode = () => !DEMO_MODE;
 let DB = null;
-let AUTH = { session: null, profile: null };
+let AUTH = {
+  session: null,
+  profile: null,
+  organisationMemberships: [],
+  organisations: [],
+  venueContexts: [],
+  selectedVenueId: null,
+  ephemeralDemoVenueIds: []
+};
 let AUTH_RESTORE_ID = 0;
 
 /* ------------------------------------------------------------------ icons */
@@ -942,14 +953,124 @@ function repair() {
     if (u.role === 'manager') u.venues = S.venues.map(v => v.id);
     u.venues = u.venues.filter(id => S.venues.some(v => v.id === id));
   });
-  if (!venue(S.session.venueId)) S.session.venueId = (S.venues[0] || {}).id;
+  if (!S.venues.some(v => v.id === S.session.venueId)) S.session.venueId = (S.venues[0] || {}).id;
 }
 function save() {
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); } catch (e) { console.warn('[store] save failed', e); }
+  try {
+    let snapshot = S;
+    if (isSupabaseMode() && AUTH.ephemeralDemoVenueIds.length) {
+      snapshot = JSON.parse(JSON.stringify(S));
+      const ephemeral = new Set(AUTH.ephemeralDemoVenueIds);
+      snapshot.venues = snapshot.venues.filter(v => !ephemeral.has(v.id));
+      snapshot.users.forEach(u => { u.venues = u.venues.filter(id => !ephemeral.has(id)); });
+      AUTH.ephemeralDemoVenueIds.forEach(id => {
+        delete snapshot.templates[id];
+        delete snapshot.days[id];
+      });
+      if (ephemeral.has(snapshot.session.venueId)) snapshot.session.venueId = snapshot.venues[0]?.id || null;
+    }
+    localStorage.setItem(STORE_KEY, JSON.stringify(snapshot));
+  } catch (e) { console.warn('[store] save failed', e); }
 }
 
 /* ------------------------------------------------------------- Supabase Auth */
 function dbError(error) { return error && error.message ? error.message : 'Supabase request failed'; }
+
+function accessError(code, message) {
+  const error = new Error(message);
+  error.accessCode = code;
+  return error;
+}
+
+function readStorageJson(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (error) {
+    console.warn('[store] could not read local preference', key, error);
+    return fallback;
+  }
+}
+
+function writeStorageJson(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); }
+  catch (error) { console.warn('[store] could not save local preference', key, error); }
+}
+
+function createLocalDemoVenue(index) {
+  const source = S.venues[index % S.venues.length];
+  const id = uid('v');
+  const venue = {
+    id, name: `Local checklist context ${index + 1}`, sub: 'Demo data',
+    accent: source.accent, cutoff: source.cutoff,
+    managerEmail: source.managerEmail, managerPhone: source.managerPhone,
+    notifyComplete: source.notifyComplete, notifyEndOfDay: source.notifyEndOfDay,
+    channelEmail: source.channelEmail, channelSms: source.channelSms
+  };
+  S.venues.push(venue);
+  S.templates[id] = JSON.parse(JSON.stringify(S.templates[source.id] || { open: [], close: [] }));
+  S.days[id] = {};
+  AUTH.ephemeralDemoVenueIds.push(id);
+  return venue;
+}
+
+function loadSupabaseVenueContexts(rows) {
+  const mapKey = `dailyops.supabase.venue-map.${AUTH.profile.id}`;
+  const selectionKey = `dailyops.supabase.venue-selection.${AUTH.profile.id}`;
+  const savedMap = readStorageJson(mapKey, {});
+  const localVenues = new Map(S.venues.map(v => [v.id, v]));
+  const usedLocalIds = new Set();
+  const assignments = {};
+
+  rows.forEach(row => {
+    const localId = savedMap[row.id];
+    if (localId && localVenues.has(localId) && !usedLocalIds.has(localId)) {
+      assignments[row.id] = localId;
+      usedLocalIds.add(localId);
+    }
+  });
+
+  rows.forEach((row, index) => {
+    if (assignments[row.id]) return;
+    const available = S.venues.find(v => !usedLocalIds.has(v.id) && !AUTH.ephemeralDemoVenueIds.includes(v.id));
+    const localVenue = available || createLocalDemoVenue(index);
+    assignments[row.id] = localVenue.id;
+    usedLocalIds.add(localVenue.id);
+  });
+
+  const roleByOrganisation = Object.fromEntries(
+    AUTH.organisationMemberships.map(m => [m.organisation_id, m.role])
+  );
+  AUTH.venueContexts = rows.map(row => {
+    const localId = assignments[row.id];
+    return {
+      id: localId,
+      realId: row.id,
+      organisationId: row.organisation_id,
+      organisationRole: roleByOrganisation[row.organisation_id],
+      name: row.name,
+      sub: row.subtitle || '',
+      accent: row.accent_key || 'indigo',
+      cutoff: String(row.cutoff_time || '23:30').slice(0, 5),
+      managerEmail: row.manager_email || '',
+      managerPhone: row.manager_phone || '',
+      notifyComplete: row.notify_complete,
+      notifyEndOfDay: row.notify_end_of_day,
+      channelEmail: row.email_enabled,
+      channelSms: row.sms_enabled
+    };
+  });
+  writeStorageJson(mapKey, assignments);
+
+  const savedSelection = (() => {
+    try { return localStorage.getItem(selectionKey); } catch (error) { return null; }
+  })();
+  AUTH.selectedVenueId = AUTH.venueContexts.some(v => v.realId === savedSelection)
+    ? savedSelection
+    : AUTH.venueContexts[0].realId;
+  try { localStorage.setItem(selectionKey, AUTH.selectedVenueId); }
+  catch (error) { console.warn('[store] could not save venue selection', error); }
+}
 
 async function loadAuthenticatedProfile(session) {
   const { data, error } = await DB.from('profiles')
@@ -968,40 +1089,115 @@ async function loadAuthenticatedProfile(session) {
   };
 }
 
+async function loadOrganisationAccess(session) {
+  const { data: membershipRows, error: membershipError } = await DB.from('organisation_members')
+    .select('organisation_id,user_id,role')
+    .eq('user_id', session.user.id);
+  if (membershipError) {
+    console.error('[supabase] organisation membership load failed', membershipError);
+    throw accessError('organisation-load', 'We could not load your DailyOps organisation access.');
+  }
+  if (!membershipRows || !membershipRows.length) {
+    throw accessError('no-membership', 'Your account is signed in, but it is not assigned to a DailyOps organisation yet. Contact an administrator.');
+  }
+
+  const organisationIds = [...new Set(membershipRows.map(row => row.organisation_id))];
+  const { data: organisationRows, error: organisationError } = await DB.from('organisations')
+    .select('id,name')
+    .in('id', organisationIds);
+  if (organisationError || (organisationRows || []).length !== organisationIds.length) {
+    console.error('[supabase] organisation load failed', organisationError || { organisationIds });
+    throw accessError('organisation-load', 'We could not load the organisations attached to your account.');
+  }
+
+  const organisationById = Object.fromEntries(organisationRows.map(row => [row.id, row]));
+  AUTH.organisations = organisationRows;
+  AUTH.organisationMemberships = membershipRows.map(row => ({
+    ...row,
+    organisation: organisationById[row.organisation_id]
+  }));
+
+  const { data: venueRows, error: venueError } = await DB.from('venues')
+    .select('id,organisation_id,name,subtitle,accent_key,cutoff_time,manager_email,manager_phone,notify_complete,notify_end_of_day,email_enabled,sms_enabled')
+    .in('organisation_id', organisationIds)
+    .order('name');
+  if (venueError) {
+    console.error('[supabase] venue load failed', venueError);
+    throw accessError('venue-load', 'We could not load the venues available to your account.');
+  }
+  if (!venueRows || !venueRows.length) {
+    throw accessError('no-venues', 'Your organisation access is loaded, but you do not have access to any venues yet. Contact an administrator.');
+  }
+  loadSupabaseVenueContexts(venueRows);
+}
+
 /* selectors */
-function authDemoUser() {
+/* In Supabase mode these are real venue rows wrapped around local demo IDs.
+   The wrapper keeps checklist/demo state keyed to S.templates and S.days. */
+function venueCatalog() {
+  return isSupabaseMode() ? AUTH.venueContexts : S.venues;
+}
+function selectedVenueKey() {
+  return isSupabaseMode() ? AUTH.selectedVenueId : S.session.venueId;
+}
+function currentVenueContext() {
+  const key = selectedVenueKey();
+  return venueCatalog().find(v => isSupabaseMode() ? v.realId === key : v.id === key) || null;
+}
+function selectVenue(id) {
+  const selected = venueCatalog().find(v => v.id === id || (isSupabaseMode() && v.realId === id));
+  if (!selected) return false;
+  if (isSupabaseMode()) {
+    AUTH.selectedVenueId = selected.realId;
+    try { localStorage.setItem(`dailyops.supabase.venue-selection.${AUTH.profile.id}`, selected.realId); }
+    catch (error) { console.warn('[store] could not save venue selection', error); }
+  } else {
+    S.session.venueId = selected.id;
+  }
+  return true;
+}
+function organisationRoleForVenue(v) {
+  return isSupabaseMode() ? (v && v.organisationRole) : null;
+}
+/* Adapter for the existing local UI; its role comes from the selected real membership. */
+function authUserForLocalUi() {
   if (!isSupabaseMode() || !AUTH.profile || !S) return null;
+  const selected = currentVenueContext();
   return {
     id: AUTH.profile.id,
     name: AUTH.profile.display_name || AUTH.profile.email,
-    // Keeps the existing localStorage demo UI available; this is not database authorization.
-    role: 'manager',
+    role: organisationRoleForVenue(selected) || 'employee',
     email: AUTH.profile.email,
     phone: '',
     active: AUTH.profile.active,
-    venues: S.venues.map(v => v.id)
+    venues: venueCatalog().map(v => v.id)
   };
 }
 function user(id) {
-  const signedIn = authDemoUser();
+  const signedIn = authUserForLocalUi();
   if (signedIn && signedIn.id === id) return signedIn;
   return S.users.find(u => u.id === id) || null;
 }
-const me = () => authDemoUser() || user(S.session.userId) || S.users[0];
-const isMgr = () => (me() || {}).role === 'manager';
+const me = () => authUserForLocalUi() || user(S.session.userId) || S.users[0];
+const isMgr = () => isSupabaseMode()
+  ? organisationRoleForVenue(currentVenueContext()) === 'manager'
+  : (me() || {}).role === 'manager';
 const uname = id => (user(id) || {}).name || 'Unknown';
 
-const venue  = id => S.venues.find(v => v.id === id) || null;
-const V      = () => venue(S.session.venueId) || S.venues[0];
+const venue  = id => venueCatalog().find(v => v.id === id || (isSupabaseMode() && v.realId === id)) || null;
+const V      = () => currentVenueContext() || venueCatalog()[0];
 const TPL    = vid => S.templates[vid || V().id];
 const DAYS   = vid => S.days[vid || V().id];
-/* venues a given user is allowed to see — managers see all */
-const venuesFor = u => !u ? [] : u.role === 'manager' ? S.venues.slice() : S.venues.filter(v => (u.venues || []).includes(v.id));
+/* Supabase has already filtered this catalog through the venues RLS policy. */
+const venuesFor = u => !u ? [] : isSupabaseMode()
+  ? AUTH.venueContexts.slice()
+  : u.role === 'manager' ? S.venues.slice() : S.venues.filter(v => (u.venues || []).includes(v.id));
 /* keep the selected venue legal for whoever is signed in */
 function ensureVenue() {
   const allowed = venuesFor(me());
   if (!allowed.length) return;
-  if (!allowed.some(v => v.id === S.session.venueId)) S.session.venueId = allowed[0].id;
+  const selected = currentVenueContext();
+  if (!selected || !allowed.some(v => v.id === selected.id)) selectVenue(allowed[0].id);
 }
 function today(vid) {
   const v = vid || V().id, k = dayKey();
@@ -1148,7 +1344,7 @@ function runTriggers(opts) {
   let fired = 0;
   const here = V().id;
 
-  S.venues.forEach(v => {
+  venueCatalog().forEach(v => {
     const day = today(v.id);
     const tag = v.id === here ? '' : ` · ${v.name}`;
 
@@ -1266,7 +1462,7 @@ function exportCsv(keys, filename, vid) {
 }
 function exportAllVenues() {
   const rows = [CSV_HEAD];
-  S.venues.forEach(v => rows.push(...csvRows(v, Object.keys(S.days[v.id] || {}).sort().reverse())));
+  venueCatalog().forEach(v => rows.push(...csvRows(v, Object.keys(S.days[v.id] || {}).sort().reverse())));
   downloadCsv(rows, 'peachy-all-venues.csv');
 }
 
@@ -1522,11 +1718,11 @@ function activityFeed(day) {
 /* a one-row roll-up of every site, so the manager isn't blind to the venues
    they aren't currently looking at. Clicking a card switches venue. */
 function venueStripHtml() {
-  if (S.venues.length < 2) return '';
+  if (venueCatalog().length < 2) return '';
   return `<div class="card">
     <div class="card-head"><div class="h3">Across the group</div>
-      <span class="tiny mut" style="margin-left:auto">${plural(S.venues.length, 'venue')} · today</span></div>
-    <div class="vstrip">${S.venues.map(v => {
+      <span class="tiny mut" style="margin-left:auto">${plural(venueCatalog().length, 'venue')} · today</span></div>
+    <div class="vstrip">${venueCatalog().map(v => {
       const d = dayStats(today(v.id));
       const col = venueDotColor(v);
       const cur = v.id === V().id;
@@ -1699,7 +1895,7 @@ function pageTemplates() {
         <div class="page-title">Checklists</div>
         <div class="page-sub">The standard tasks published every day at <b>${esc(V().name)}</b>. One-off extras are added from the Today tab.</div>
       </div>
-      ${S.venues.length > 1 ? `<button class="btn btn-sm" data-act="copy-tpl">${ic('list', 15)} Copy from another venue</button>` : ''}
+      ${venueCatalog().length > 1 ? `<button class="btn btn-sm" data-act="copy-tpl">${ic('list', 15)} Copy from another venue</button>` : ''}
     </div>
     <div class="stack">
       <div class="banner banner-info">${ic('info', 17)}<div>
@@ -1726,7 +1922,7 @@ function pageTeam() {
           aria-label="${esc(u.name)} on ${k} shift" style="margin:0 auto"></button></td>`).join('')}
     </tr>`).join('') : `<tr><td colspan="3" class="mut" style="text-align:center;padding:22px">Nobody is assigned to ${esc(v.name)} yet.</td></tr>`;
 
-  const venueChips = u => S.venues.map(x => `<button class="chip ${u.venues.includes(x.id) ? 'chip-accent' : ''}"
+  const venueChips = u => venueCatalog().map(x => `<button class="chip ${u.venues.includes(x.id) ? 'chip-accent' : ''}"
       data-act="toggle-user-venue" data-id="${u.id}" data-venue="${x.id}" style="cursor:pointer"
       title="${u.venues.includes(x.id) ? 'Remove from' : 'Assign to'} ${esc(x.name)}">
       <span class="venue-dot" style="width:7px;height:7px;background:${u.venues.includes(x.id) ? venueDotColor(x) : 'currentColor'};opacity:${u.venues.includes(x.id) ? 1 : .4}"></span>${esc(x.name)}</button>`).join('');
@@ -1902,7 +2098,7 @@ function pageAlerts() {
             <span style="flex:1;min-width:0">
               <span style="display:block;font-weight:${n.read ? '540' : '680'};letter-spacing:-.012em">${esc(n.subject)}</span>
               <span class="tiny mut row wrap" style="margin-top:4px;gap:6px">
-                ${S.venues.length > 1 && n.venueName ? `<span class="chip"><span class="venue-dot" style="width:7px;height:7px;background:${
+                ${venueCatalog().length > 1 && n.venueName ? `<span class="chip"><span class="venue-dot" style="width:7px;height:7px;background:${
                   venueDotColor(venue(n.venueId) || { accent: 'graphite' })}"></span>${esc(n.venueName)}</span>` : ''}
                 <span>${n.channel === 'sms' ? 'SMS' : 'Email'} → ${esc(n.to)}</span>
               </span>
@@ -1926,7 +2122,7 @@ function pageSettings() {
       <button class="switch ${s[key] ? 'is-on' : ''}" data-act="setting-toggle" data-key="${key}" aria-label="${title}"></button>
     </div>`;
 
-  const venueRows = S.venues.map(v => {
+  const venueRows = venueCatalog().map(v => {
     const staff = S.users.filter(u => u.role === 'employee' && u.active && u.venues.includes(v.id)).length;
     const cur = v.id === V().id;
     return `<div class="venue-row">
@@ -1938,7 +2134,7 @@ function pageSettings() {
       </div>
       ${cur ? '' : `<button class="btn btn-sm btn-ghost" data-act="goto-venue" data-id="${v.id}">Open</button>`}
       <button class="btn btn-sm btn-icon btn-ghost" data-act="edit-venue" data-id="${v.id}" title="Edit venue">${ic('pencil', 14)}</button>
-      <button class="btn btn-sm btn-icon btn-ghost" data-act="del-venue" data-id="${v.id}" title="Remove venue" ${S.venues.length < 2 ? 'disabled' : ''}>${ic('trash', 14)}</button>
+      <button class="btn btn-sm btn-icon btn-ghost" data-act="del-venue" data-id="${v.id}" title="Remove venue" ${venueCatalog().length < 2 ? 'disabled' : ''}>${ic('trash', 14)}</button>
     </div>`;
   }).join('');
 
@@ -1999,7 +2195,7 @@ function pageSettings() {
         <div class="card">
           <div class="card-head"><div class="h3">Demo &amp; data</div></div>
           <div class="card-body stack" style="gap:11px">
-            <div class="tiny mut">Application data remains in this browser's localStorage under <code>${STORE_KEY}</code> during the authentication-only integration. Supabase currently supplies the signed-in session and profile.</div>
+            <div class="tiny mut">Checklist application data remains in this browser's localStorage under <code>${STORE_KEY}</code>. Supabase currently supplies the signed-in session, organisation membership, and accessible venue identity.</div>
             <div class="row wrap" style="gap:8px">
               <button class="btn btn-sm" data-act="csv-all">${ic('dl', 15)} Export ${esc(s.name)}</button>
               <button class="btn btn-sm" data-act="csv-group">${ic('dl', 15)} Export all venues</button>
@@ -2194,7 +2390,7 @@ function openTemplateEditor(lk, id) {
 function openUserEditor(id) {
   const u = id ? user(id) : null;
   const picked = new Set(u ? u.venues : [V().id]);
-  const chips = () => S.venues.map(v => `<button class="chip ${picked.has(v.id) ? 'chip-accent' : ''}" data-venue="${v.id}" style="cursor:pointer;height:28px;padding:0 11px">
+  const chips = () => venueCatalog().map(v => `<button class="chip ${picked.has(v.id) ? 'chip-accent' : ''}" data-venue="${v.id}" style="cursor:pointer;height:28px;padding:0 11px">
       <span class="venue-dot" style="width:7px;height:7px;background:${venueDotColor(v)}"></span>${esc(v.name)}</button>`).join('');
 
   openModal(`
@@ -2250,7 +2446,7 @@ function openUserEditor(id) {
 /* ---- venue add / edit --------------------------------------------------- */
 function openVenueEditor(id) {
   const v = id ? venue(id) : null;
-  let accent = v ? v.accent : Object.keys(ACCENTS)[S.venues.length % Object.keys(ACCENTS).length];
+  let accent = v ? v.accent : Object.keys(ACCENTS)[venueCatalog().length % Object.keys(ACCENTS).length];
   const dark = document.documentElement.dataset.theme === 'dark';
 
   openModal(`
@@ -2301,7 +2497,7 @@ function openVenueEditor(id) {
 
 /* ---- copy a checklist template from another venue ----------------------- */
 function openCopyTemplate() {
-  const others = S.venues.filter(v => v.id !== V().id);
+  const others = venueCatalog().filter(v => v.id !== V().id);
   if (!others.length) { toast('There is only one venue', 'warn'); return; }
   let src = others[0].id, lists = { open: true, close: true };
 
@@ -2438,7 +2634,7 @@ function syncTemplate(lk) {
 
 /* pulling someone off shift has to clear them from every venue, not just this one */
 function unrosterEverywhere(userId) {
-  S.venues.forEach(v => {
+  venueCatalog().forEach(v => {
     const d = today(v.id);
     ['open','close'].forEach(k => { d.roster[k] = d.roster[k].filter(x => x !== userId); });
   });
@@ -2545,25 +2741,32 @@ function handleAct(act, ds) {
     case 'setting-toggle': V()[ds.key] = !V()[ds.key]; save(); render(); break;
     case 'venue-accent':   V().accent = ds.key; save(); render(); break;
     case 'goto-venue': {
-      if (ds.id === S.session.venueId) break;
-      S.session.venueId = ds.id; R.list = 'open';
-      save(); render(); scrollTop(); toast(`Switched to ${V().name}`); break;
+      if (!selectVenue(ds.id)) break;
+      R.list = 'open';
+      if (!isSupabaseMode()) save();
+      render(); scrollTop(); toast(`Switched to ${V().name}`); break;
     }
-    case 'add-venue':  openVenueEditor(null); break;
-    case 'edit-venue': openVenueEditor(ds.id); break;
-    case 'copy-tpl':   openCopyTemplate(); break;
+    case 'add-venue':
+    case 'edit-venue':
     case 'del-venue': {
-      if (S.venues.length < 2) { toast('You need at least one venue', 'warn'); break; }
-      const v = venue(ds.id);
-      confirmModal(`Remove ${v.name}?`, 'Its checklists, roster and history go with it. Alerts already sent are kept. This cannot be undone.', 'Remove venue', () => {
-        S.venues = S.venues.filter(x => x.id !== ds.id);
-        delete S.templates[ds.id]; delete S.days[ds.id];
-        S.users.forEach(u => { u.venues = u.venues.filter(x => x !== ds.id); });
-        S.users.filter(u => u.role === 'employee' && !u.venues.length).forEach(u => { u.venues = [S.venues[0].id]; });
-        if (S.session.venueId === ds.id) S.session.venueId = S.venues[0].id;
-        save(); render(); toast(`${v.name} removed`);
-      }, true); break;
+      if (isSupabaseMode()) { toast('Venue administration is deferred; this screen is read-only in Supabase mode.', 'warn'); break; }
+      if (act === 'add-venue') openVenueEditor(null);
+      else if (act === 'edit-venue') openVenueEditor(ds.id);
+      else {
+        if (S.venues.length < 2) { toast('You need at least one venue', 'warn'); break; }
+        const v = venue(ds.id);
+        confirmModal(`Remove ${v.name}?`, 'Its checklists, roster and history go with it. Alerts already sent are kept. This cannot be undone.', 'Remove venue', () => {
+          S.venues = S.venues.filter(x => x.id !== ds.id);
+          delete S.templates[ds.id]; delete S.days[ds.id];
+          S.users.forEach(u => { u.venues = u.venues.filter(x => x !== ds.id); });
+          S.users.filter(u => u.role === 'employee' && !u.venues.length).forEach(u => { u.venues = [S.venues[0].id]; });
+          if (S.session.venueId === ds.id) S.session.venueId = S.venues[0].id;
+          save(); render(); toast(`${v.name} removed`);
+        }, true);
+      }
+      break;
     }
+    case 'copy-tpl':   openCopyTemplate(); break;
     case 'reset-day': {
       confirmModal(`Reset today at ${V().name}?`, 'Both lists go back to the template with nothing ticked. Other venues and all history are untouched.', 'Reset today', () => {
         const roster = DAYS()[dayKey()].roster;
@@ -2572,6 +2775,7 @@ function handleAct(act, ds) {
       }, true); break;
     }
     case 'reset-all': {
+      if (isSupabaseMode()) { toast('Demo reset is unavailable while using real Supabase venue identity.', 'warn'); break; }
       confirmModal('Wipe all demo data?', 'Everything goes back to the seeded demo — staff, templates, history and alerts.', 'Wipe and reseed', () => {
         localStorage.removeItem(STORE_KEY); S = defaultState(); save();
         R = { tab: 'today', list: 'open', historyKey: null };
@@ -2608,9 +2812,10 @@ $('#user-switch').addEventListener('change', e => {
 });
 
 $('#venue-switch').addEventListener('change', e => {
-  S.session.venueId = e.target.value;
+  if (!selectVenue(e.target.value)) return;
   R.list = 'open';
-  save(); render(); scrollTop();
+  if (!isSupabaseMode()) save();
+  render(); scrollTop();
   toast(`Switched to ${V().name}`);
 });
 
@@ -2657,6 +2862,7 @@ function showAuthLoading() {
   $('#app').hidden = true;
   $('#auth-screen').hidden = false;
   $('#auth-loading').hidden = false;
+  $('#auth-status').hidden = true;
   $('#login-form').hidden = true;
   $('#auth-logout').hidden = true;
   showAuthError('');
@@ -2666,16 +2872,30 @@ function showLogin(message, allowLogout = false) {
   $('#app').hidden = true;
   $('#auth-screen').hidden = false;
   $('#auth-loading').hidden = true;
+  $('#auth-status').hidden = true;
   $('#login-form').hidden = false;
   $('#auth-logout').hidden = !allowLogout;
   $('#login-submit').disabled = !DB;
   showAuthError(message);
 }
 
+function showAccessError(message) {
+  $('#app').hidden = true;
+  $('#auth-screen').hidden = false;
+  $('#auth-loading').hidden = true;
+  $('#auth-status').textContent = message || '';
+  $('#auth-status').hidden = !message;
+  $('#login-form').hidden = true;
+  $('#auth-logout').hidden = false;
+  showAuthError('');
+}
+
 function showApp() {
   $('#auth-screen').hidden = true;
   $('#app').hidden = false;
+  $('#auth-status').hidden = true;
   $('#login-form').hidden = false;
+  $('#auth-logout').hidden = true;
   $('#login-submit').disabled = false;
   showAuthError('');
 }
@@ -2685,6 +2905,10 @@ async function restoreAuthenticatedApp(session) {
   AUTH.session = session;
   if (!session) {
     AUTH.profile = null;
+    AUTH.organisationMemberships = [];
+    AUTH.organisations = [];
+    AUTH.venueContexts = [];
+    AUTH.selectedVenueId = null;
     S = null;
     showLogin();
     return;
@@ -2696,11 +2920,21 @@ async function restoreAuthenticatedApp(session) {
     if (restoreId !== AUTH_RESTORE_ID) return;
     AUTH.profile = null;
     S = null;
-    showLogin(`We could not load your DailyOps profile. ${dbError(error)}`, true);
+    showAccessError(`We could not load your DailyOps profile. ${dbError(error)}`);
     return;
   }
   if (restoreId !== AUTH_RESTORE_ID) return;
+  AUTH.ephemeralDemoVenueIds = [];
   load();
+  try {
+    await loadOrganisationAccess(session);
+  } catch (error) {
+    if (restoreId !== AUTH_RESTORE_ID) return;
+    console.error('[supabase] organisation and venue restore failed', error);
+    showAccessError(error.accessCode ? error.message : 'We could not load your DailyOps organisation and venue access.');
+    return;
+  }
+  if (restoreId !== AUTH_RESTORE_ID) return;
   showApp();
   render();
 }
@@ -2780,6 +3014,10 @@ async function startApp() {
       if (event === 'SIGNED_OUT' || !session) {
         AUTH_RESTORE_ID++;
         AUTH.profile = null;
+        AUTH.organisationMemberships = [];
+        AUTH.organisations = [];
+        AUTH.venueContexts = [];
+        AUTH.selectedVenueId = null;
         S = null;
         showLogin();
       } else if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
@@ -2790,7 +3028,7 @@ async function startApp() {
     else await restoreAuthenticatedApp(AUTH.session);
     tickClock();
     setInterval(tickClock, 30000);
-    console.info('%cDailyOps — Supabase Auth', 'font-weight:700;font-size:13px');
+    console.info('%cDailyOps — Supabase Auth + venue identity', 'font-weight:700;font-size:13px');
     return;
   }
 
