@@ -649,9 +649,9 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
    DAILYOPS — DAILY OPERATIONS  ·  demo build
    REAL NOW: auth, profile, organisation role, platform-admin access, venues, team membership,
    venue access, weekly roster planning, employee weekly roster, cover requests, recurring shift templates,
-   today's shift operations, today's routine/one-off tasks, and today's task status
+   today's and historical shift operations, today's and historical task status, reporting, and CSV export
    are loaded from Supabase.
-   DEMO/LOCAL STILL: historical days, CSV history, and the simulated notification inbox/delivery remain
+   DEMO/LOCAL STILL: the simulated notification inbox/delivery and explicit demo-mode seed data remain
    in localStorage until their later migration phases.
    Sections: icons · utils · store/seed · notifier · render · actions · init
    ========================================================================== */
@@ -680,8 +680,10 @@ let SUPABASE_TEAM = { members: [], profilesById: {}, venueIdsByUser: {} };
 let SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows: [], loading: false, error: null };
 let SUPABASE_MY_ROSTER_WEEK = { start: null, end: null, rows: [], loading: false, error: null };
 let SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
+let SUPABASE_HISTORY = { venueId: null, days: [], profilesById: {}, loading: false, error: null, selectedDate: null };
 const REMOTE_MUTATIONS = new Set();
 let AUTH_RESTORE_ID = 0;
+let SUPABASE_HISTORY_LOAD_ID = 0;
 
 /* ------------------------------------------------------------------ icons */
 const P = {
@@ -759,9 +761,10 @@ const REASONS = {
 /* ==========================================================================
    SUPABASE BOUNDARY
    The current Supabase slice owns auth, identity, venue access, recurring templates,
-   and today's daily-operation/shift-task instance. Team membership, venue membership, and
-   weekly roster planning, employee weekly roster, today's roster, and shift-cover requests are also real Supabase data.
-   History and the simulated notification inbox/delivery remain explicitly local/demo data.
+   today's and historical daily-operation/shift-task instances, reporting, and CSV export.
+   Team membership, venue membership, weekly roster planning, employee weekly roster,
+   today's roster, and shift-cover requests are also real Supabase data.
+   The simulated notification inbox/delivery remains explicitly local/demo data.
    ========================================================================== */
 
 /* ------------------------------------------------------------- store/seed */
@@ -1593,6 +1596,7 @@ async function selectOrganisation(id) {
     SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
     render();
     if (R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart, true);
+    if (R.tab === 'history' && isMgr()) loadSupabaseHistory(true);
     if (isMgr()) loadSupabaseCoverRequests();
     toast(`Viewing ${nextOrganisationId ? organisationName(nextOrganisationId) : 'all organisations'}`, 'ok');
   } catch (error) {
@@ -1648,7 +1652,13 @@ const me = () => authUserForLocalUi() || user(S.session.userId) || S.users[0];
 const isMgr = () => isSupabaseMode()
   ? organisationRoleForVenue(currentVenueContext()) === 'manager'
   : (me() || {}).role === 'manager';
-const uname = id => (user(id) || {}).name || 'Unknown';
+const uname = id => {
+  if (isSupabaseMode()) {
+    const profile = SUPABASE_HISTORY.profilesById[id] || SUPABASE_TEAM.profilesById[id];
+    if (profile) return profile.display_name || profile.email || 'DailyOps user';
+  }
+  return (user(id) || {}).name || 'Unknown';
+};
 
 const venue  = id => venueCatalog().find(v => v.id === id || (isSupabaseMode() && v.realId === id)) || null;
 const V      = () => currentVenueContext() || venueCatalog()[0];
@@ -2081,6 +2091,141 @@ async function loadSupabaseToday() {
   };
 }
 
+const SUPABASE_HISTORY_CHECKLIST_LIMIT = 120;
+
+function mapSupabaseHistoryDays(checklists, tasks, rosterRows) {
+  const taskRowsByChecklist = {};
+  (tasks || []).forEach(row => {
+    taskRowsByChecklist[row.checklist_id] = taskRowsByChecklist[row.checklist_id] || [];
+    taskRowsByChecklist[row.checklist_id].push(row);
+  });
+  const rowsByDate = {};
+  (checklists || []).forEach(row => {
+    rowsByDate[row.work_date] = rowsByDate[row.work_date] || [];
+    rowsByDate[row.work_date].push(row);
+  });
+  const rosterByDate = {};
+  (rosterRows || []).forEach(row => {
+    rosterByDate[row.work_date] = rosterByDate[row.work_date] || { open: [], close: [] };
+    if (rosterByDate[row.work_date][row.shift_type]) rosterByDate[row.work_date][row.shift_type].push(row.user_id);
+  });
+
+  return Object.keys(rowsByDate).sort().reverse().map(date => {
+    const lists = { open: blankList(), close: blankList() };
+    rowsByDate[date].forEach(row => {
+      if (!lists[row.list_type]) return;
+      lists[row.list_type] = {
+        id: row.id,
+        tasks: (taskRowsByChecklist[row.id] || [])
+          .sort((a, b) => a.sort_order - b.sort_order || a.id.localeCompare(b.id))
+          .map(rowData => applyRemoteTaskRow({ id: rowData.id }, rowData)),
+        submitted: !!row.submitted,
+        submittedBy: row.submitted_by,
+        submittedAt: row.submitted_at,
+        completeNotified: !!row.complete_notified
+      };
+    });
+    return {
+      date,
+      roster: rosterByDate[date] || { open: [], close: [] },
+      rosterAssignmentIds: { open: {}, close: {} },
+      lists,
+      reported: false,
+      reportedAt: null
+    };
+  });
+}
+
+async function loadSupabaseHistory(force = false) {
+  if (!isSupabaseMode() || !isMgr()) return;
+  const context = V();
+  if (!context || !context.realId) return;
+  const venueId = context.realId;
+  if (!force
+    && SUPABASE_HISTORY.venueId === venueId
+    && !SUPABASE_HISTORY.error
+    && !SUPABASE_HISTORY.loading) return;
+
+  const loadId = ++SUPABASE_HISTORY_LOAD_ID;
+  const previousDate = SUPABASE_HISTORY.venueId === venueId ? SUPABASE_HISTORY.selectedDate : null;
+  SUPABASE_HISTORY = {
+    venueId, days: [], profilesById: {}, loading: true, error: null,
+    selectedDate: previousDate
+  };
+  render();
+  const isCurrentRequest = () => loadId === SUPABASE_HISTORY_LOAD_ID
+    && SUPABASE_HISTORY.venueId === venueId;
+
+  try {
+    const checklistResult = await DB.from('daily_checklists')
+      .select(REMOTE_CHECKLIST_SELECT)
+      .eq('venue_id', venueId)
+      .lt('work_date', dayKey())
+      .order('work_date', { ascending: false })
+      .order('list_type')
+      .limit(SUPABASE_HISTORY_CHECKLIST_LIMIT);
+    if (checklistResult.error) throw checklistResult.error;
+    const checklists = checklistResult.data || [];
+    const checklistIds = checklists.map(row => row.id);
+
+    const taskResult = checklistIds.length
+      ? await DB.from('daily_tasks')
+        .select(REMOTE_TASK_SELECT)
+        .in('checklist_id', checklistIds)
+        .order('sort_order')
+        .order('id')
+      : { data: [], error: null };
+    if (taskResult.error) throw taskResult.error;
+    const tasks = taskResult.data || [];
+
+    const dates = [...new Set(checklists.map(row => row.work_date))].sort();
+    const rosterResult = dates.length
+      ? await DB.from('roster_assignments')
+        .select('id,venue_id,user_id,work_date,shift_type,start_time,end_time')
+        .eq('venue_id', venueId)
+        .gte('work_date', dates[0])
+        .lte('work_date', dates[dates.length - 1])
+        .order('work_date')
+        .order('shift_type')
+      : { data: [], error: null };
+    if (rosterResult.error) throw rosterResult.error;
+    const rosterRows = rosterResult.data || [];
+
+    const profileIds = [...new Set([
+      ...checklists.map(row => row.submitted_by),
+      ...tasks.flatMap(row => [row.completed_by, row.added_by]),
+      ...rosterRows.map(row => row.user_id)
+    ].filter(Boolean))];
+    const profileResult = profileIds.length
+      ? await DB.from('profiles').select('id,display_name,email,phone,active').in('id', profileIds)
+      : { data: [], error: null };
+    if (profileResult.error) throw profileResult.error;
+    if (!isCurrentRequest()) return;
+
+    const profilesById = Object.fromEntries((profileResult.data || []).map(profile => [profile.id, profile]));
+    Object.assign(SUPABASE_TEAM.profilesById, profilesById);
+    const days = mapSupabaseHistoryDays(checklists, tasks, rosterRows);
+    SUPABASE_HISTORY = {
+      venueId,
+      days,
+      profilesById,
+      loading: false,
+      error: null,
+      selectedDate: previousDate && days.some(day => day.date === previousDate)
+        ? previousDate
+        : (days[0] && days[0].date) || null
+    };
+  } catch (error) {
+    if (!isCurrentRequest()) return;
+    console.error('[supabase] history load failed', { venueId, error });
+    SUPABASE_HISTORY = {
+      venueId, days: [], profilesById: {}, loading: false,
+      error: 'We could not load historical operations for this venue.', selectedDate: null
+    };
+  }
+  if (isCurrentRequest()) render();
+}
+
 async function persistRemoteTask(task) {
   const payload = {
     status: task.status,
@@ -2431,6 +2576,39 @@ function exportAllVenues() {
   downloadCsv(rows, 'peachy-all-venues.csv');
 }
 
+const HISTORY_CSV_HEAD = [
+  'Organisation', 'Venue', 'Date', 'Shift', 'Task', 'Critical', 'Source', 'Status',
+  'Completed by', 'Completed at', 'Submitted', 'Submitted by', 'Submitted at', 'Reason', 'Note'
+];
+function supabaseHistoryCsvRows(v, days) {
+  const organisation = organisationName(v.organisationId);
+  const out = [];
+  (days || []).forEach(day => ['open', 'close'].forEach(lk => {
+    const list = day.lists[lk];
+    list.tasks.forEach(task => out.push([
+      organisation,
+      v.name,
+      day.date,
+      LIST_META[lk].full,
+      task.title,
+      task.critical ? 'Yes' : 'No',
+      task.source === 'adhoc' ? 'One-off' : 'Routine',
+      statusChipLabel(task),
+      task.doneBy ? uname(task.doneBy) : '',
+      task.doneAt ? new Date(task.doneAt).toLocaleString() : '',
+      list.submitted ? 'Yes' : 'No',
+      list.submittedBy ? uname(list.submittedBy) : '',
+      list.submittedAt ? new Date(list.submittedAt).toLocaleString() : '',
+      task.reason || '',
+      task.note || ''
+    ]));
+  }));
+  return out;
+}
+function exportSupabaseHistory(days, filename) {
+  downloadCsv([HISTORY_CSV_HEAD].concat(supabaseHistoryCsvRows(V(), days)), filename);
+}
+
 /* ==========================================================================
    RENDER
    ========================================================================== */
@@ -2477,7 +2655,8 @@ function taskRowHtml(t, o) {
   if (done && t.doneBy) meta.push(`<span class="row" style="gap:5px">${avatarHtml(t.doneBy, 'sm')}${esc(uname(t.doneBy).split(' ')[0])} · ${esc(fmtTime(t.doneAt))}</span>`);
   if (flag) meta.push(`<span class="chip ${REASONS[t.status].chip}">${esc(REASONS[t.status].label)}</span>`);
   if (t.critical) meta.push(`<span class="chip chip-accent">Critical</span>`);
-  if (t.source === 'adhoc') meta.push(`<span class="chip">Added today${t.addedBy ? ' · ' + esc(uname(t.addedBy).split(' ')[0]) : ''}</span>`);
+  if (t.source === 'adhoc') meta.push(`<span class="chip">${opt.historical ? 'One-off' : 'Added today'}${t.addedBy ? ' · ' + esc(uname(t.addedBy).split(' ')[0]) : ''}</span>`);
+  else if (opt.historical) meta.push('<span class="chip">Routine</span>');
 
   return `<${tag} class="${cls}" ${opt.locked ? '' : `data-task="${t.id}" data-list="${opt.listKey}" type="button"`}>
     ${t.critical ? '<span class="task-critical-mark"></span>' : ''}
@@ -3183,7 +3362,116 @@ function pageTeam() {
 /* ==========================================================================
    MANAGER · HISTORY & STATS
    ========================================================================== */
+function historySubmissionLabel(day) {
+  const open = day.lists.open.submitted, close = day.lists.close.submitted;
+  if (open && close) return 'Both submitted';
+  if (open) return 'Opening submitted';
+  if (close) return 'Closing submitted';
+  return 'Not submitted';
+}
+
+function pageSupabaseHistory() {
+  const state = SUPABASE_HISTORY;
+  const context = V();
+  const venueName = context ? venueDisplayLabel(context) : 'selected venue';
+  const head = `<div class="page-head row-b wrap">
+    <div><div class="page-title">History</div>
+      <div class="page-sub">Historical Daily Operations for <b>${esc(venueName)}</b>, kept as a read-only record.</div></div>
+    <div class="row wrap" style="gap:8px">
+      <button class="btn btn-sm" data-act="history-reload">${ic('reset', 15)} Refresh</button>
+      <button class="btn btn-sm btn-primary" data-act="csv-all" ${state.loading || state.error || !state.days.length ? 'disabled' : ''}>${ic('dl', 15)} Export CSV</button>
+    </div>
+  </div>`;
+  if (context && state.venueId && state.venueId !== context.realId) return `${head}<div class="empty"><div class="empty-icon">${ic('clock', 20)}</div><div>Loading historical operations for this venue…</div></div>`;
+  if (state.loading) return `${head}<div class="empty"><div class="empty-icon">${ic('clock', 20)}</div><div>Loading historical operations…</div><div class="tiny mut" style="margin-top:5px">Reading recent submitted and completed shift records from Supabase.</div></div>`;
+  if (state.error) return `${head}<div class="banner banner-warn">${ic('warn', 17)}<div>${esc(state.error)}<br><button class="btn btn-sm" data-act="history-reload" style="margin-top:9px">Try again</button></div></div>`;
+
+  const days = state.days || [];
+  const totals = days.reduce((summary, day) => {
+    const stats = dayStats(day);
+    summary.total += stats.total;
+    summary.done += stats.done;
+    summary.listCount += ['open', 'close'].filter(lk => day.lists[lk].id).length;
+    summary.criticalMissed += ['open', 'close'].reduce((count, lk) =>
+      count + day.lists[lk].tasks.filter(task => task.critical && task.status !== 'done').length, 0);
+    summary.submitted += ['open', 'close'].filter(lk => day.lists[lk].submitted).length;
+    return summary;
+  }, { total: 0, done: 0, listCount: 0, criticalMissed: 0, submitted: 0 });
+
+  const missCount = {};
+  const perUser = {};
+  days.forEach(day => ['open', 'close'].forEach(lk => day.lists[lk].tasks.forEach(task => {
+    if (task.status !== 'done') missCount[task.title] = (missCount[task.title] || 0) + 1;
+    if (task.status === 'done' && task.doneBy) {
+      perUser[task.doneBy] = perUser[task.doneBy] || { done: 0, shifts: new Set() };
+      perUser[task.doneBy].done++;
+      perUser[task.doneBy].shifts.add(`${day.date}:${lk}`);
+    }
+  })));
+  const worst = Object.entries(missCount).sort((a, b) => b[1] - a[1])[0];
+  const historyPercent = totals.total ? Math.round((totals.done / totals.total) * 100) : 0;
+  const dayRows = days.map(day => {
+    const stats = dayStats(day);
+    const criticalMissed = ['open', 'close'].reduce((count, lk) =>
+      count + day.lists[lk].tasks.filter(task => task.critical && task.status !== 'done').length, 0);
+    return `<tr>
+      <td class="nowrap"><b>${esc(fmtDateShort(day.date))}</b></td>
+      <td style="min-width:120px"><div class="row" style="gap:8px">
+        <div class="bar" style="flex:1;min-width:60px"><i style="width:${stats.total ? stats.pct : 0}%;background:${stats.pct === 100 ? 'var(--ok)' : 'var(--accent)'}"></i></div>
+        <span class="tiny num nowrap" style="font-weight:640">${stats.total ? `${stats.pct}%` : '—'}</span></div></td>
+      <td class="num nowrap hide-sm">${stats.open.total ? `${stats.open.done}/${stats.open.total}` : '—'}</td>
+      <td class="num nowrap hide-sm">${stats.close.total ? `${stats.close.done}/${stats.close.total}` : '—'}</td>
+      <td class="num"><span class="chip ${stats.missed ? 'chip-warn' : 'chip-ok'}">${stats.missed}</span></td>
+      <td class="num"><span class="chip ${criticalMissed ? 'chip-danger' : 'chip-ok'}">${criticalMissed}</span></td>
+      <td><span class="chip ${day.lists.open.submitted && day.lists.close.submitted ? 'chip-ok' : 'chip-warn'}">${esc(historySubmissionLabel(day))}</span></td>
+      <td style="text-align:right"><button class="btn btn-sm btn-ghost" data-act="view-history-day" data-key="${day.date}">View ${ic('right', 13)}</button></td>
+    </tr>`;
+  }).join('');
+
+  const staffStats = Object.entries(perUser).map(([id, stats]) => ({
+    id, done: stats.done, shifts: stats.shifts.size,
+    avg: stats.shifts.size ? Math.round(stats.done / stats.shifts.size) : 0
+  })).sort((a, b) => b.done - a.done);
+  const topDone = staffStats[0] ? staffStats[0].done : 1;
+  const staffRows = staffStats.map(stats => `<tr>
+    <td><div class="row" style="gap:9px">${avatarHtml(stats.id, 'sm')}<span>${esc(uname(stats.id))}</span></div></td>
+    <td class="num"><b>${stats.done}</b></td>
+    <td class="num hide-sm">${stats.shifts}</td>
+    <td class="num hide-sm">${stats.avg}</td>
+    <td style="min-width:90px"><div class="bar"><i style="width:${Math.round(stats.done / topDone * 100)}%"></i></div></td>
+  </tr>`).join('');
+
+  return `${head}<div class="stack">
+    <div class="banner banner-info">${ic('info', 17)}<div>Showing the most recent ${days.length} prior operation day${days.length === 1 ? '' : 's'} for this venue. Task titles, statuses, attribution, notes, and reasons are read from immutable daily snapshots.</div></div>
+    <div class="stats">
+      <div class="stat"><div class="stat-k">Days logged</div><div class="stat-v">${days.length}</div><div class="stat-s">recent prior operation days</div></div>
+      <div class="stat"><div class="stat-k">Completion</div><div class="stat-v">${historyPercent}%</div><div class="stat-s">${totals.done} of ${totals.total} tasks</div></div>
+      <div class="stat"><div class="stat-k">Outstanding</div><div class="stat-v">${totals.total - totals.done}</div><div class="stat-s">incomplete tasks</div></div>
+      <div class="stat"><div class="stat-k">Critical missed</div><div class="stat-v">${totals.criticalMissed}</div><div class="stat-s">incomplete critical tasks</div></div>
+      <div class="stat"><div class="stat-k">Submitted</div><div class="stat-v">${totals.submitted}/${totals.listCount}</div><div class="stat-s">shift records submitted</div></div>
+      <div class="stat"><div class="stat-k">Most missed</div><div class="stat-v" style="font-size:16px;letter-spacing:-.01em;line-height:1.25;margin-top:6px">${worst ? esc(worst[0]) : '—'}</div><div class="stat-s">${worst ? `${worst[1]}×` : 'nothing missed'}</div></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div style="flex:1"><div class="h3">Daily record</div><div class="tiny mut">Opening and Closing Shift records are read-only here. Use Today's Operations for current-day changes.</div></div></div>
+      <div class="tablewrap"><table class="tbl">
+        <thead><tr><th>Date</th><th>Completion</th><th class="hide-sm">Opening</th><th class="hide-sm">Closing</th><th>Outstanding</th><th>Critical</th><th>Submission</th><th></th></tr></thead>
+        <tbody>${dayRows || `<tr><td colspan="8" class="mut" style="text-align:center;padding:22px">No historical operations yet.</td></tr>`}</tbody>
+      </table></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div style="flex:1"><div class="h3">Completion attribution</div><div class="tiny mut">Tasks completed by profile across the loaded historical period. Inactive profiles remain included for historical accuracy.</div></div><span class="tiny mut">${totals.submitted} shift submissions</span></div>
+      <div class="tablewrap"><table class="tbl">
+        <thead><tr><th>Person</th><th class="num">Tasks done</th><th class="num hide-sm">Shifts worked</th><th class="num hide-sm">Avg / shift</th><th>Share</th></tr></thead>
+        <tbody>${staffRows || `<tr><td colspan="5" class="mut" style="text-align:center;padding:22px">No completed tasks in this period.</td></tr>`}</tbody>
+      </table></div>
+    </div>
+  </div>`;
+}
+
 function pageHistory() {
+  if (isSupabaseMode()) return pageSupabaseHistory();
   const keys = localHistoryKeys(V().id);
   const recent = keys.slice(0, 30);
   const totals = recent.reduce((a, k) => { const d = dayStats(DAYS()[k]); a.t += d.total; a.d += d.done; return a; }, { t: 0, d: 0 });
@@ -3235,7 +3523,6 @@ function pageHistory() {
       <button class="btn btn-sm" data-act="csv-all">${ic('dl', 15)} Export CSV</button>
     </div>
     <div class="stack">
-      ${isSupabaseMode() ? `<div class="banner banner-info">${ic('info', 17)}<div>Historical days and CSV export are still local/demo data. Today's live Supabase operations are shown in Today's Operations and excluded from this historical view.</div></div>` : ''}
       <div class="stats">
         <div class="stat"><div class="stat-k">Days logged</div><div class="stat-v">${recent.length}</div><div class="stat-s">most recent 30</div></div>
         <div class="stat"><div class="stat-k">Completion</div><div class="stat-v">${pct(totals.d, totals.t)}%</div><div class="stat-s">${totals.d} of ${totals.t} tasks</div></div>
@@ -3349,6 +3636,14 @@ function pageAlerts() {
    ========================================================================== */
 function pageSettings() {
   const s = V();
+  const dataTools = isSupabaseMode()
+    ? `<div class="tiny mut">Historical operations and CSV export now read from Supabase. Open History to review or export this venue's recent prior operations. The notification inbox remains demo/local for now.</div>`
+    : `<div class="tiny mut">History, CSV export and notifications remain in this browser's localStorage under <code>${STORE_KEY}</code>.</div>
+       <div class="row wrap" style="gap:8px">
+         <button class="btn btn-sm" data-act="csv-all">${ic('dl', 15)} Export ${esc(s.name)}</button>
+         <button class="btn btn-sm" data-act="csv-group">${ic('dl', 15)} Export all venues</button>
+         <button class="btn btn-sm btn-danger" data-act="reset-all">${ic('reset', 15)} Reset demo data</button>
+       </div>`;
   const tog = (key, title, sub) => `
     <div class="row-b" style="padding:11px 0;border-bottom:1px solid var(--line)">
       <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:14px">${title}</div><div class="tiny mut">${sub}</div></div>
@@ -3432,12 +3727,7 @@ function pageSettings() {
         <div class="card">
           <div class="card-head"><div class="h3">Demo &amp; data</div></div>
           <div class="card-body stack" style="gap:11px">
-            <div class="tiny mut">History, CSV export and notifications remain in this browser's localStorage under <code>${STORE_KEY}</code>. Supabase supplies identity, team membership, venue access, weekly roster planning, recurring templates, and today's Opening/Closing Shift task state.</div>
-            <div class="row wrap" style="gap:8px">
-              <button class="btn btn-sm" data-act="csv-all">${ic('dl', 15)} Export ${esc(s.name)}</button>
-              <button class="btn btn-sm" data-act="csv-group">${ic('dl', 15)} Export all venues</button>
-              <button class="btn btn-sm btn-danger" data-act="reset-all">${ic('reset', 15)} Reset demo data</button>
-            </div>
+            ${dataTools}
           </div>
         </div>
       </div>
@@ -4115,6 +4405,37 @@ function openNotif(id) {
 }
 
 /* ---- a past day, read-only --------------------------------------------- */
+function openSupabaseHistoryDay(key) {
+  const day = SUPABASE_HISTORY.days.find(item => item.date === key);
+  if (!day) { toast('That historical operation is no longer loaded.', 'warn'); return; }
+  const d = dayStats(day);
+  const block = lk => {
+    const L = day.lists[lk], s = listStats(L);
+    return `<div class="card" style="margin-bottom:14px">
+      <div class="card-head">${ringHtml(s.total ? s.pct : 0, 40, s.complete)}
+        <div style="flex:1"><div class="h3">${LIST_META[lk].full}</div>
+          <div class="tiny mut">${L.submitted ? `Submitted by ${esc(uname(L.submittedBy))} · ${esc(fmtDT(L.submittedAt))}` : 'Not submitted'}</div>
+          <div style="margin-top:6px">${avatarStack(day.roster[lk] || [])}</div></div></div>
+      <div class="tasklist">${L.tasks.length ? L.tasks.map(t => taskRowHtml(t, { locked: true, historical: true, listKey: lk })).join('') : '<div class="empty" style="padding:18px">No tasks recorded for this shift.</div>'}</div></div>`;
+  };
+  openModal(`
+    <div class="modal-head"><div style="flex:1">
+      <div class="modal-title">${esc(fmtDate(key))}</div>
+      <div class="modal-sub">${esc(venueDisplayLabel(V()))} · ${d.done} of ${d.total} tasks completed · ${d.total ? d.pct : 0}%${d.missed ? ` · ${d.missed} left undone` : ''}</div>
+    </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
+    <div class="modal-body" style="background:var(--bg)">${block('open')}${block('close')}</div>
+    <div class="modal-foot">
+      <button class="btn" data-x="csv">${ic('dl', 15)} Export this day</button>
+      <button class="btn btn-primary" data-x="close">Done</button></div>`, {
+    wide: true,
+    after(root) {
+      root.querySelectorAll('[data-x=close]').forEach(button => button.onclick = closeModal);
+      root.querySelector('[data-x=csv]').onclick = () =>
+        exportSupabaseHistory([day], `${V().name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${key}.csv`);
+    }
+  });
+}
+
 function openDay(key) {
   const day = DAYS()[key]; if (!day) return;
   const d = dayStats(day);
@@ -4612,9 +4933,26 @@ function handleAct(act, ds) {
       }
       break;
     }
-    case 'view-day':  openDay(ds.key); break;
-    case 'csv-all':   exportCsv(localHistoryKeys(V().id), `${V().name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-operations.csv`); break;
-    case 'csv-group': exportAllVenues(); break;
+    case 'view-day':
+      if (isSupabaseMode()) openSupabaseHistoryDay(ds.key);
+      else openDay(ds.key);
+      break;
+    case 'view-history-day':
+      if (isSupabaseMode()) openSupabaseHistoryDay(ds.key);
+      break;
+    case 'history-reload':
+      if (isSupabaseMode()) loadSupabaseHistory(true);
+      break;
+    case 'csv-all':
+      if (isSupabaseMode()) {
+        if (SUPABASE_HISTORY.loading || SUPABASE_HISTORY.error) { toast('Historical operations are not ready to export.', 'warn'); break; }
+        exportSupabaseHistory(SUPABASE_HISTORY.days, `${V().name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-historical-operations.csv`);
+      } else exportCsv(localHistoryKeys(V().id), `${V().name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-operations.csv`);
+      break;
+    case 'csv-group':
+      if (isSupabaseMode()) { toast('Export a selected venue from its History page.', 'warn'); break; }
+      exportAllVenues();
+      break;
     case 'open-notif': openNotif(ds.id); break;
     case 'cover-read':
       if (isSupabaseMode()) markSupabaseCoverRequests([ds.id]);
@@ -4644,6 +4982,7 @@ function handleAct(act, ds) {
       if (!isSupabaseMode()) save();
       render(); scrollTop();
       if (isSupabaseMode() && R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
+      if (isSupabaseMode() && R.tab === 'history' && isMgr()) loadSupabaseHistory(true);
       toast(`Switched to ${V().name}`); break;
     }
     case 'add-venue':
@@ -4704,6 +5043,7 @@ $('#app').addEventListener('click', e => {
     render();
     scrollTop();
     if (isSupabaseMode() && R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
+    if (isSupabaseMode() && R.tab === 'history' && isMgr()) loadSupabaseHistory();
     return;
   }
   const seg = e.target.closest('.segmented [data-list]');
@@ -4726,6 +5066,7 @@ $('#venue-switch').addEventListener('change', e => {
   if (!isSupabaseMode()) save();
   render(); scrollTop();
   if (isSupabaseMode() && R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
+  if (isSupabaseMode() && R.tab === 'history' && isMgr()) loadSupabaseHistory(true);
   toast(`Switched to ${V().name}`);
 });
 
@@ -4825,6 +5166,8 @@ async function restoreAuthenticatedApp(session) {
     AUTH.venueContexts = [];
     AUTH.selectedVenueId = null;
     SUPABASE_TODAY = { date: null, byVenue: {} };
+    SUPABASE_HISTORY_LOAD_ID++;
+    SUPABASE_HISTORY = { venueId: null, days: [], profilesById: {}, loading: false, error: null, selectedDate: null };
     SUPABASE_TEMPLATES = { byVenue: {} };
     SUPABASE_TEAM = { members: [], profilesById: {}, venueIdsByUser: {} };
     SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows: [], loading: false, error: null };
@@ -4861,7 +5204,10 @@ async function restoreAuthenticatedApp(session) {
   if (restoreId !== AUTH_RESTORE_ID) return;
   showApp();
   render();
-  if (isMgr()) loadSupabaseCoverRequests();
+  if (isMgr()) {
+    loadSupabaseCoverRequests();
+    if (R.tab === 'history') loadSupabaseHistory();
+  }
   else loadSupabaseMyRosterWeek(rosterWeekStartKey(dayKey()), true);
 }
 
@@ -4946,6 +5292,8 @@ async function startApp() {
         AUTH.venueContexts = [];
         AUTH.selectedVenueId = null;
         SUPABASE_TODAY = { date: null, byVenue: {} };
+        SUPABASE_HISTORY_LOAD_ID++;
+        SUPABASE_HISTORY = { venueId: null, days: [], profilesById: {}, loading: false, error: null, selectedDate: null };
         SUPABASE_TEMPLATES = { byVenue: {} };
         SUPABASE_TEAM = { members: [], profilesById: {}, venueIdsByUser: {} };
         SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows: [], loading: false, error: null };

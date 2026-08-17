@@ -118,6 +118,10 @@ Migration `010_add_shift_cover_requests.sql` stores an employee's confirmed curr
 - Multi-organisation venue labels show the organisation name alongside the venue in the venue picker and manager cross-venue summary.
 - Employee weekly roster and accessible-venue view across the current planning week.
 - Employee-confirmed cover requests persisted in `shift_cover_requests` and displayed as manager Alerts; confirmation adds the employee to the shift and does not require manager approval.
+- Historical Daily Operations for prior dates, loaded from `daily_checklists` and `daily_tasks` for the selected venue.
+- Read-only historical Opening/Closing Shift review, including task snapshot titles, statuses, critical flags, sources, notes, reasons, submission metadata, roster context, and profile attribution.
+- Historical completion, outstanding, critical-missed, submission, and per-profile summary metrics from Supabase rows.
+- Manual CSV export for the selected venue's loaded historical operations, including organisation, venue, shift, task, status, attribution, submission metadata, reasons, and notes.
 
 ## 7. What is still local/demo/deferred
 
@@ -126,7 +130,6 @@ Migration `010_add_shift_cover_requests.sql` stores an employee's confirmed curr
 - The explicit `DEMO_MODE: true` path retains localStorage-backed templates for standalone demo use.
 - A one-time manager bootstrap may read the existing local/demo routine definitions only when a venue has no remote template rows; normal Supabase operation does not use them as a source of truth.
 - Roster CSV import.
-- Historical days, reporting, and CSV history export.
 - Simulated notification inbox and notification previews.
 - The older local notification inbox remains demo data; shift-cover alerts are the separate real Supabase-backed in-app notification path.
 
@@ -142,14 +145,14 @@ Migration `010_add_shift_cover_requests.sql` stores an employee's confirmed curr
 
 ## 8. Completed milestones
 
-Steps 1–11 are complete, with the organisation-wide team and weekly roster follow-up now implemented in the frontend:
+Steps 1–12 are complete, with the organisation-wide team, weekly roster, and historical reporting follow-ups now implemented in the frontend:
 
 1. Initial multi-organisation Postgres schema, indexes, constraints, triggers, and RLS model.
 2. Additive `platform_role` schema migration for platform-level `user`/`admin` status.
 3. Public Supabase browser configuration, Supabase JS v2 client, Auth login/logout, session persistence, and profile loading.
 4. Authenticated EXECUTE grants for the deployed RLS helper functions, including `can_update_task`.
 5. Real organisation membership and venue loading, with organisation role driving manager/employee views.
-6. Real venue selection/persistence with a temporary local demo bridge for still-deferred template/roster/history screens.
+6. Real venue selection/persistence with a temporary local demo bridge for the remaining explicitly deferred notification/demo screens.
 7. Today's Supabase daily operation instances and task rows, including idempotent manager bootstrap for missing Opening/Closing rows.
 8. Supabase task status, completion metadata, notes, incomplete reasons, and operation submission/review flow.
 9. Today's complete Supabase operation workflow: one-off tasks, safe routine re-apply, manager controls, shift submission/reopening, and real progress/critical counts.
@@ -158,6 +161,7 @@ Steps 1–11 are complete, with the organisation-wide team and weekly roster fol
 12. Organisation-wide manager staff visibility, cross-venue assignment summaries, seven-day roster planning, and future-roster cleanup when access is disabled or removed.
 13. Platform-admin access across organisations, employee weekly roster/venue visibility, and employee-confirmed in-app shift-cover notifications.
 14. Combined multi-organisation Team visibility and cross-organisation roster planning for managers with multiple manager memberships and platform admins.
+15. Supabase-backed historical Daily Operations, read-only historical shift/task review, profile attribution, manager reporting metrics, and manual CSV export.
 
 The repository does not use a separate generated milestone registry; this list reflects the current project history and implementation state.
 
@@ -168,7 +172,8 @@ The repository does not use a separate generated milestone registry; this list r
 - The current operational type model is still hard-coded to `open` and `close` in the deployed enum and several frontend loops. Additional operation sections need an additive design before implementation.
 - Existing daily rows created before Step 10 may need a one-time manager-side title match to backfill their `template_task_id`; unmatched legacy rows are preserved rather than rewritten.
 - The one-time template bootstrap still uses local/demo definitions when a venue has no remote template. It does not overwrite existing remote template data.
-- Deferred history and notification screens still depend on localStorage state and the temporary real-venue-to-demo-context mapping.
+- The explicit demo mode still uses localStorage seed data; normal Supabase history/reporting no longer falls back to it.
+- The real-venue-to-demo-context mapping remains only for any legacy screens that are still explicitly local/demo.
 - Auth-user creation and initial organisation membership bootstrap are manual because the static browser must not use Supabase Auth admin APIs or a service-role key.
 - The current organisation/venue repair is a one-time SQL cleanup when duplicate organisation rows exist; the production model should retain one organisation row with multiple venue rows.
 - Organisation role changes are intentionally not exposed in the Team UI; they remain an administrator/manual SQL operation until a narrower workflow is designed.
@@ -187,12 +192,11 @@ The repository does not use a separate generated milestone registry; this list r
 Use this order for the next phases:
 
 1. Secure existing-user organisation assignment through a manager-scoped Edge Function or narrowly scoped SECURITY DEFINER RPC.
-2. History, reporting, and CSV.
-3. Realtime, including live cover alerts.
-4. Notifications and cover-request delivery.
-5. Scheduled end-of-day processing.
-6. Final security testing.
-7. Custom domain and polish.
+2. Realtime, including live cover alerts.
+3. Notifications and cover-request delivery.
+4. Scheduled end-of-day processing and automated reporting.
+5. Final security testing.
+6. Custom domain and polish.
 
 ## 11. Git workflow
 
