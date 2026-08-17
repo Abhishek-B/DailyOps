@@ -1,0 +1,7 @@
+project_id = "zwebxycbrfwtlmqwxwwe"
+
+[functions.notify-manager]
+verify_jwt = false
+
+[functions.end-of-day]
+verify_jwt = false

@@ -651,10 +651,9 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
    DAILYOPS — DAILY OPERATIONS  ·  demo build
    REAL NOW: auth, profile, organisation role, platform-admin access, venues, team membership,
    venue access, weekly roster planning, employee weekly roster, cover requests, recurring shift templates,
-   today's and historical shift operations, today's and historical task status, reporting, and CSV export
-   are loaded from Supabase.
-   DEMO/LOCAL STILL: the simulated notification inbox/delivery and explicit demo-mode seed data remain
-   in localStorage until their later migration phases.
+   today's and historical shift operations, today's and historical task status, reporting, CSV export,
+   and production email notification audit rows are loaded from Supabase.
+   DEMO/LOCAL STILL: the simulated notification inbox/delivery remains local only in explicit demo mode.
    Sections: icons · utils · store/seed · notifier · render · actions · init
    ========================================================================== */
 "use strict";
@@ -682,6 +681,7 @@ let SUPABASE_TEAM = { members: [], profilesById: {}, venueIdsByUser: {} };
 let SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows: [], loading: false, error: null };
 let SUPABASE_MY_ROSTER_WEEK = { start: null, end: null, rows: [], loading: false, error: null };
 let SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
+let SUPABASE_NOTIFICATIONS = { rows: [], loading: false, error: null };
 let SUPABASE_HISTORY = { venueId: null, days: [], profilesById: {}, loading: false, error: null, selectedDate: null };
 let SUPABASE_REALTIME = {
   channel: null,
@@ -778,7 +778,8 @@ const REASONS = {
    today's and historical daily-operation/shift-task instances, reporting, and CSV export.
    Team membership, venue membership, weekly roster planning, employee weekly roster,
    today's roster, and shift-cover requests are also real Supabase data.
-   The simulated notification inbox/delivery remains explicitly local/demo data.
+   Production email delivery and audit status are server-side Edge Function/Cron data;
+   the simulated notification inbox/delivery remains explicitly local/demo data.
    ========================================================================== */
 
 /* ------------------------------------------------------------- store/seed */
@@ -1099,6 +1100,7 @@ function loadSupabaseVenueContexts(rows) {
       cutoff: String(row.cutoff_time || '23:30').slice(0, 5),
       managerEmail: row.manager_email || '',
       managerPhone: row.manager_phone || '',
+      timezone: row.timezone || 'Australia/Sydney',
       notifyComplete: row.notify_complete,
       notifyEndOfDay: row.notify_end_of_day,
       channelEmail: row.email_enabled,
@@ -1224,7 +1226,7 @@ async function loadOrganisationAccess(session) {
   }));
 
   const { data: venueRows, error: venueError } = await DB.from('venues')
-    .select('id,organisation_id,name,subtitle,accent_key,cutoff_time,manager_email,manager_phone,notify_complete,notify_end_of_day,email_enabled,sms_enabled')
+    .select('id,organisation_id,name,subtitle,accent_key,cutoff_time,timezone,manager_email,manager_phone,notify_complete,notify_end_of_day,email_enabled,sms_enabled')
     .in('organisation_id', organisationIds)
     .order('name');
   if (venueError) {
@@ -1968,6 +1970,51 @@ async function loadSupabaseCoverRequests() {
   render();
 }
 
+async function loadSupabaseNotifications() {
+  if (!isSupabaseMode() || !isMgr()) return;
+  SUPABASE_NOTIFICATIONS = { rows: [], loading: true, error: null };
+  render();
+  try {
+    const result = await DB.from('notification_events')
+      .select('id,venue_id,venue_name,work_date,list_type,kind,channel,recipient,subject,body_text,delivery_status,provider_message_id,error_message,created_at,sent_at,updated_at')
+      .order('created_at', { ascending: false })
+      .limit(50);
+    if (result.error) throw result.error;
+    SUPABASE_NOTIFICATIONS = {
+      rows: (result.data || []).map(row => ({
+        id: row.id,
+        venueId: row.venue_id,
+        venueName: row.venue_name,
+        workDate: row.work_date,
+        listKey: row.list_type,
+        kind: row.kind,
+        channel: row.channel,
+        to: row.recipient || '',
+        subject: row.subject || 'DailyOps notification',
+        text: row.body_text || '',
+        html: '',
+        at: row.sent_at || row.created_at,
+        createdAt: row.created_at,
+        sentAt: row.sent_at,
+        updatedAt: row.updated_at,
+        deliveryStatus: row.delivery_status,
+        providerMessageId: row.provider_message_id,
+        errorMessage: row.error_message,
+        read: row.delivery_status === 'sent'
+      })),
+      loading: false,
+      error: null
+    };
+  } catch (error) {
+    console.error('[supabase] notification event load failed', { error });
+    SUPABASE_NOTIFICATIONS = {
+      rows: [], loading: false,
+      error: 'We could not load notification delivery status. Apply migration 012 and check the manager access policy.'
+    };
+  }
+  render();
+}
+
 async function markSupabaseCoverRequests(ids) {
   const requestIds = (ids || []).filter(Boolean);
   if (!requestIds.length) return;
@@ -2427,6 +2474,23 @@ async function persistRemoteTask(task) {
   applyRemoteTaskRow(task, data);
 }
 
+// The browser only reports the affected checklist. The Edge Function rechecks
+// access, task completeness, venue settings, recipient, and idempotency.
+async function requestSupabaseListComplete(checklistId) {
+  if (!isSupabaseMode() || !checklistId || !DB) return;
+  try {
+    const result = await DB.functions.invoke('notify-manager', {
+      body: { kind: 'list-complete', checklist_id: checklistId }
+    });
+    if (result.error) throw result.error;
+    if (R.tab === 'alerts' && isMgr()) loadSupabaseNotifications();
+  } catch (error) {
+    // Task persistence has already succeeded. Delivery is audited/retried on
+    // the server, so an unavailable function must not roll back the task UI.
+    console.warn('[supabase] list-complete notification request failed', { checklistId, error });
+  }
+}
+
 async function linkRemoteDailyTaskTemplate(taskId, templateTaskId) {
   const { error } = await DB.from('daily_tasks')
     .update({ template_task_id: templateTaskId })
@@ -2508,26 +2572,15 @@ function dayStats(day) {
   return { total, done, missed: total - done, pct: pct(done, total), open: a, close: b };
 }
 /* ==========================================================================
-   NOTIFICATIONS
+   DEMO NOTIFICATIONS
    --------------------------------------------------------------------------
-   Everything the app "sends" flows through Notifier.deliver(). In this demo it
-   only logs and stores the message so it can be previewed in the Alerts tab.
+   This local notifier is intentionally retained only for DEMO_MODE. Supabase
+   mode reports completed shifts to the server-side Edge Function and reads
+   delivery audit rows from notification_events.
 
-   >>> TO GO LIVE: replace the body of deliver() with a single call to your
-   >>> backend and nothing else in this file has to change. e.g.
-   >>>
-   >>>   async deliver(msg) {
-   >>>     const r = await fetch('/api/notify', {
-   >>>       method: 'POST',
-   >>>       headers: { 'Content-Type': 'application/json' },
-   >>>       body: JSON.stringify(msg)          // { channel, to, subject, html, text }
-   >>>     });
-   >>>     return r.json();
-   >>>   }
-   >>>
-   >>> Server side: SendGrid/Postmark for channel==='email', Twilio for 'sms'.
-   >>> The cutoff-time report should also exist as a scheduled Cloud Function so
-   >>> it fires even when no browser is open.
+   Production delivery is implemented in supabase/functions/notify-manager and
+   supabase/functions/end-of-day. Keeping this adapter makes DEMO_MODE useful
+   without allowing localStorage notifications into normal Supabase mode.
    ========================================================================== */
 const Notifier = {
   async deliver(msg) {
@@ -2674,7 +2727,12 @@ function cutoffPassed(v) {
 const remoteUnreadCoverCount = () => isSupabaseMode() && AUTH.profile && isMgr()
   ? SUPABASE_COVER_REQUESTS.rows.filter(row => !row.manager_seen_at).length
   : 0;
-const unreadCount = () => S.notifications.filter(n => !n.read).length + remoteUnreadCoverCount();
+const remoteUnreadNotificationCount = () => isSupabaseMode() && isMgr()
+  ? SUPABASE_NOTIFICATIONS.rows.filter(row => row.deliveryStatus !== 'sent').length
+  : 0;
+const unreadCount = () => isSupabaseMode()
+  ? remoteUnreadNotificationCount() + remoteUnreadCoverCount()
+  : S.notifications.filter(n => !n.read).length;
 
 /* ---------------------------------------------------------------- toasts */
 function toast(msg, tone) {
@@ -3760,7 +3818,7 @@ function pageHistory() {
    MANAGER · ALERTS
    ========================================================================== */
 function pageAlerts() {
-  const list = S.notifications;
+  const list = isSupabaseMode() ? SUPABASE_NOTIFICATIONS.rows : S.notifications;
   const coverRequests = SUPABASE_COVER_REQUESTS.rows || [];
   const coverItems = coverRequests.length ? coverRequests.map(request => {
     const employee = user(request.user_id) || {};
@@ -3789,14 +3847,15 @@ function pageAlerts() {
         <div class="page-sub">Everything the app has sent you, across every venue.</div>
       </div>
       <div class="row" style="gap:8px">
-        <button class="btn btn-sm btn-ghost" data-act="mark-read">Mark all read</button>
-        <button class="btn btn-sm" data-act="test-notif">${ic('bolt', 15)} Send test</button>
+        ${isSupabaseMode() ? `<button class="btn btn-sm btn-ghost" data-act="notifications-refresh">Refresh status</button>` : `<button class="btn btn-sm btn-ghost" data-act="mark-read">Mark all read</button>
+        <button class="btn btn-sm" data-act="test-notif">${ic('bolt', 15)} Send test</button>`}
       </div>
     </div>
     <div class="stack">
-      <div class="banner banner-info">${ic('info', 17)}<div>
+      ${isSupabaseMode() ? `<div class="banner ${SUPABASE_NOTIFICATIONS.error ? 'banner-warn' : 'banner-info'}">${ic(SUPABASE_NOTIFICATIONS.error ? 'warn' : 'info', 17)}<div>
+        ${SUPABASE_NOTIFICATIONS.error ? `<b>Delivery status is unavailable.</b> ${esc(SUPABASE_NOTIFICATIONS.error)}` : `<b>Email delivery is server-side.</b> Shift-complete messages are sent by the Edge Function, and end-of-day summaries are sent by Supabase Cron even when no browser is open.`}</div></div>` : `<div class="banner banner-info">${ic('info', 17)}<div>
         <b>Delivery is stubbed in this demo.</b> Messages are composed and logged exactly as they'd be sent, but nothing leaves the browser —
-        open the console to see each one. In production these go out over email and SMS from a single <code>Notifier.deliver()</code> call.</div></div>
+        open the console to see each one. Production Supabase mode uses Edge Functions instead.</div></div>`}
       ${isSupabaseMode() ? `<div class="card">
         <div class="card-head"><div class="h3">Shift cover requests</div>
           <div class="row" style="gap:7px;margin-left:auto">
@@ -3810,9 +3869,12 @@ function pageAlerts() {
           <span class="tiny mut" style="margin-left:auto">${plural(list.length, 'message')} · ${unreadCount()} unread</span></div>
         <div>${list.length ? list.map(n => {
           const isEod = n.kind === 'end-of-day';
-          const tone = isEod ? 'chip-info' : 'chip-ok';
+          const failed = n.deliveryStatus === 'failed';
+          const pending = n.deliveryStatus === 'pending';
+          const tone = failed ? 'chip-danger' : isEod ? 'chip-info' : 'chip-ok';
+          const statusLabel = n.deliveryStatus ? (failed ? 'Failed' : pending ? 'Pending' : 'Sent') : 'Preview';
           return `<button class="alert-item ${n.read ? '' : 'is-unread'}" data-act="open-notif" data-id="${n.id}">
-            <span class="alert-ic ${tone}" style="background:var(--${isEod ? 'info' : 'ok'}-soft);color:var(--${isEod ? 'info' : 'ok'})">
+            <span class="alert-ic ${tone}" style="background:var(--${failed ? 'danger' : isEod ? 'info' : 'ok'}-soft);color:var(--${failed ? 'danger' : isEod ? 'info' : 'ok'})">
               ${ic(n.channel === 'sms' ? 'sms' : 'mail', 17)}</span>
             <span style="flex:1;min-width:0">
               <span style="display:block;font-weight:${n.read ? '540' : '680'};letter-spacing:-.012em">${esc(n.subject)}</span>
@@ -3820,12 +3882,14 @@ function pageAlerts() {
                 ${venueCatalog().length > 1 && n.venueName ? `<span class="chip"><span class="venue-dot" style="width:7px;height:7px;background:${
                   venueDotColor(venue(n.venueId) || { accent: 'graphite' })}"></span>${esc(n.venueName)}</span>` : ''}
                 <span>${n.channel === 'sms' ? 'SMS' : 'Email'} → ${esc(n.to)}</span>
+                <span class="chip ${failed ? 'chip-danger' : pending ? 'chip-warn' : 'chip-ok'}">${statusLabel}</span>
+                ${failed && n.errorMessage ? `<span class="tiny" style="color:var(--danger)">${esc(n.errorMessage)}</span>` : ''}
               </span>
             </span>
             <span class="tiny mut nowrap">${esc(fmtDT(n.at))}</span>
           </button>`;
-        }).join('') : `<div class="empty"><div class="empty-icon">${ic('mail', 20)}</div><div>No alerts yet.</div>
-          <div class="tiny mut" style="margin-top:4px">You'll get one when a shift is fully ticked off, and again at end of day.</div></div>`}</div>
+        }).join('') : SUPABASE_NOTIFICATIONS.loading ? `<div class="empty"><div>Loading delivery status…</div></div>` : `<div class="empty"><div class="empty-icon">${ic('mail', 20)}</div><div>No delivery events yet.</div>
+          <div class="tiny mut" style="margin-top:4px">You'll see shift-complete and end-of-day email status here.</div></div>`}</div>
       </div>
     </div>`;
 }
@@ -3836,7 +3900,7 @@ function pageAlerts() {
 function pageSettings() {
   const s = V();
   const dataTools = isSupabaseMode()
-    ? `<div class="tiny mut">Historical operations and CSV export now read from Supabase. Open History to review or export this venue's recent prior operations. The notification inbox remains demo/local for now.</div>`
+    ? `<div class="tiny mut">Historical operations, CSV export and notification delivery status now read from Supabase. Open History for operations or Alerts for sent/failed Edge Function and scheduled EOD events. Provider secrets, Cron and the current venue notification switches are configured in Supabase, not this browser.</div>`
     : `<div class="tiny mut">History, CSV export and notifications remain in this browser's localStorage under <code>${STORE_KEY}</code>.</div>
        <div class="row wrap" style="gap:8px">
          <button class="btn btn-sm" data-act="csv-all">${ic('dl', 15)} Export ${esc(s.name)}</button>
@@ -3846,7 +3910,7 @@ function pageSettings() {
   const tog = (key, title, sub) => `
     <div class="row-b" style="padding:11px 0;border-bottom:1px solid var(--line)">
       <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:14px">${title}</div><div class="tiny mut">${sub}</div></div>
-      <button class="switch ${s[key] ? 'is-on' : ''}" data-act="setting-toggle" data-key="${key}" aria-label="${title}"></button>
+      <button class="switch ${s[key] ? 'is-on' : ''}" data-act="setting-toggle" data-key="${key}" aria-label="${title}" ${isSupabaseMode() ? 'disabled' : ''}></button>
     </div>`;
 
   const venueRows = venueCatalog().map(v => {
@@ -3888,9 +3952,9 @@ function pageSettings() {
             <div class="h3">${esc(s.name)}</div></div></div>
           <div class="card-body stack" style="gap:13px">
             <div class="field"><label class="label" for="s-venue">Venue name</label>
-              <input class="input" id="s-venue" data-set="name" value="${esc(s.name)}"></div>
+              <input class="input" id="s-venue" data-set="name" value="${esc(s.name)}" ${isSupabaseMode() ? 'disabled' : ''}></div>
             <div class="field"><label class="label" for="s-sub">Tagline</label>
-              <input class="input" id="s-sub" data-set="sub" value="${esc(s.sub)}"></div>
+              <input class="input" id="s-sub" data-set="sub" value="${esc(s.sub)}" ${isSupabaseMode() ? 'disabled' : ''}></div>
             <div class="field"><label class="label">Colour</label>
               <div class="swatches">${Object.entries(ACCENTS).map(([k, a]) =>
                 `<button class="swatch ${s.accent === k ? 'is-sel' : ''}" data-act="venue-accent" data-key="${k}"
@@ -3904,11 +3968,11 @@ function pageSettings() {
           <div class="card-head"><div class="h3">Where reports go</div></div>
           <div class="card-body stack" style="gap:13px">
             <div class="field"><label class="label" for="s-mail">Manager email</label>
-              <input class="input" id="s-mail" type="email" data-set="managerEmail" value="${esc(s.managerEmail)}"></div>
+              <input class="input" id="s-mail" type="email" data-set="managerEmail" value="${esc(s.managerEmail)}" ${isSupabaseMode() ? 'disabled' : ''}></div>
             <div class="field"><label class="label" for="s-phone">Manager mobile</label>
-              <input class="input" id="s-phone" data-set="managerPhone" value="${esc(s.managerPhone)}"></div>
+              <input class="input" id="s-phone" data-set="managerPhone" value="${esc(s.managerPhone)}" ${isSupabaseMode() ? 'disabled' : ''}></div>
             <div class="field"><label class="label" for="s-cut">End-of-day cutoff</label>
-              <input class="input" id="s-cut" type="time" data-set="cutoff" value="${esc(s.cutoff)}">
+              <input class="input" id="s-cut" type="time" data-set="cutoff" value="${esc(s.cutoff)}" ${isSupabaseMode() ? 'disabled' : ''}>
               <span class="hint">If ${esc(s.name)} hasn't submitted its Closing Shift by this time, the summary is sent anyway.</span></div>
           </div>
         </div>
@@ -4026,6 +4090,7 @@ function openTaskMeta(lk, taskId) {
           else { save(); runTriggers(); }
           closeModal();
           render();
+          if (isSupabaseMode() && task.status === 'done') requestSupabaseListComplete(L.id);
           toast('Task details saved', 'ok');
         } catch (error) {
           Object.assign(task, previous);
@@ -4142,6 +4207,7 @@ function openReview(lk) {
           save(); runTriggers();
         }
         closeModal(); render();
+        if (isSupabaseMode()) requestSupabaseListComplete(L.id);
         toast(`${m.full} submitted`, 'ok');
       };
     }
@@ -4676,6 +4742,30 @@ function openCopyTemplate() {
 
 /* ---- notification preview ---------------------------------------------- */
 function openNotif(id) {
+  if (isSupabaseMode()) {
+    const n = SUPABASE_NOTIFICATIONS.rows.find(x => x.id === id);
+    if (!n) return;
+    const failed = n.deliveryStatus === 'failed';
+    const status = failed ? 'Delivery failed' : n.deliveryStatus === 'pending' ? 'Delivery pending' : 'Delivered';
+    openModal(`
+      <div class="modal-head"><div style="flex:1">
+        <div class="modal-title">${esc(n.kind === 'end-of-day' ? 'End-of-day summary' : 'Shift complete')}</div>
+        <div class="modal-sub">${esc(status)} · ${esc(fmtDT(n.at))}</div>
+      </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
+      <div class="modal-body">
+        <div class="kvline"><span>Venue</span><span>${esc(n.venueName || '—')}</span></div>
+        <div class="kvline"><span>Recipient</span><span>${esc(n.to || 'Not configured')}</span></div>
+        <div class="kvline"><span>Subject</span><span><b>${esc(n.subject)}</b></span></div>
+        <div class="kvline"><span>Status</span><span class="chip ${failed ? 'chip-danger' : n.deliveryStatus === 'pending' ? 'chip-warn' : 'chip-ok'}">${esc(status)}</span></div>
+        ${failed && n.errorMessage ? `<div class="banner banner-warn" style="margin-top:13px">${ic('warn', 17)}<div>${esc(n.errorMessage)}</div></div>` : ''}
+        <pre style="white-space:pre-wrap;font:inherit;line-height:1.55;margin:16px 0 0;color:var(--ink-2)">${esc(n.text)}</pre>
+      </div>
+      <div class="modal-foot"><button class="btn" data-x="close">Close</button></div>`, {
+      wide: true,
+      after(root) { root.querySelectorAll('[data-x=close]').forEach(b => b.onclick = closeModal); }
+    });
+    return;
+  }
   const n = S.notifications.find(x => x.id === id); if (!n) return;
   n.read = true; save();
   const body = n.channel === 'sms'
@@ -4781,6 +4871,7 @@ function toggleTask(lk, id) {
     else { t.status = 'done'; t.doneBy = me().id; t.doneAt = new Date().toISOString(); t.reason = ''; }
     persistRemoteTask(t).then(() => {
       render();
+      if (t.status === 'done') requestSupabaseListComplete(L.id);
     }).catch(error => {
       Object.assign(t, previous);
       console.error('[supabase] task status update failed', { taskId: id, error });
@@ -5094,6 +5185,7 @@ async function tickAll(lk) {
     try {
       await Promise.all(changed.map(t => persistRemoteTask(t)));
       render();
+      requestSupabaseListComplete(L.id);
     } catch (error) {
       previous.forEach(x => Object.assign(x.task, { status: x.status, doneBy: x.doneBy, doneAt: x.doneAt, reason: x.reason }));
       console.error('[supabase] task bulk update failed', { checklistId: L.id, error });
@@ -5126,7 +5218,7 @@ function handleAct(act, ds) {
     case 'tick-all': tickAll(ds.list); break;
     case 'sync-tpl':  syncTemplate(ds.list); break;
     case 'eod': {
-      if (isSupabaseMode()) { toast('Notifications are still local/demo and are deferred in Supabase mode.', 'warn'); break; }
+      if (isSupabaseMode()) { toast('End-of-day email is sent by the scheduled server job after this venue cutoff. Check Alerts for delivery status.', 'info'); R.tab = 'alerts'; render(); loadSupabaseNotifications(); break; }
       if (day.reported) { toast(`${V().name} has already been reported today — see Alerts`, 'warn'); R.tab = 'alerts'; render(); break; }
       runTriggers({ forceEod: true, venueId: V().id }); render(); break;
     }
@@ -5261,6 +5353,9 @@ function handleAct(act, ds) {
     case 'cover-refresh':
       if (isSupabaseMode()) loadSupabaseCoverRequests();
       break;
+    case 'notifications-refresh':
+      if (isSupabaseMode()) loadSupabaseNotifications();
+      break;
     case 'mark-read':
       S.notifications.forEach(n => n.read = true);
       save();
@@ -5347,6 +5442,7 @@ $('#app').addEventListener('click', e => {
     syncSupabaseRealtimeForCurrentView();
     if (isSupabaseMode() && R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
     if (isSupabaseMode() && R.tab === 'history' && isMgr()) loadSupabaseHistory();
+    if (isSupabaseMode() && R.tab === 'alerts' && isMgr()) loadSupabaseNotifications();
     return;
   }
   const seg = e.target.closest('.segmented [data-list]');
@@ -5396,6 +5492,7 @@ $('#btn-alerts').addEventListener('click', () => {
   render();
   scrollTop();
   syncSupabaseRealtimeForCurrentView();
+  if (isSupabaseMode() && isMgr()) loadSupabaseNotifications();
 });
 
 $('#page').addEventListener('change', e => {
@@ -5483,6 +5580,7 @@ async function restoreAuthenticatedApp(session) {
     SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows: [], loading: false, error: null };
     SUPABASE_MY_ROSTER_WEEK = { start: null, end: null, rows: [], loading: false, error: null };
     SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
+    SUPABASE_NOTIFICATIONS = { rows: [], loading: false, error: null };
     S = null;
     showLogin();
     return;
@@ -5517,6 +5615,7 @@ async function restoreAuthenticatedApp(session) {
   syncSupabaseRealtimeForCurrentView();
   if (isMgr()) {
     loadSupabaseCoverRequests();
+    loadSupabaseNotifications();
     if (R.tab === 'history') loadSupabaseHistory();
   }
   else loadSupabaseMyRosterWeek(rosterWeekStartKey(dayKey()), true);
@@ -5611,6 +5710,7 @@ async function startApp() {
         SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows: [], loading: false, error: null };
         SUPABASE_MY_ROSTER_WEEK = { start: null, end: null, rows: [], loading: false, error: null };
         SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
+        SUPABASE_NOTIFICATIONS = { rows: [], loading: false, error: null };
         S = null;
         showLogin();
       } else if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {

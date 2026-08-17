@@ -23,7 +23,7 @@ Supabase currently supplies authentication, organisation/venue identity, team me
 - prior venue operation days, read-only historical shift/task review, Supabase-backed summary metrics, and client-side CSV export from stored daily snapshots.
 - live current-venue/current-date task, shift-submission, and roster updates through Supabase Realtime; the client refetches authorised rows after each relevant change.
 
-The simulated notification inbox remains localStorage-backed. Production defaults to Supabase mode. The original demo can be enabled explicitly with `DEMO_MODE: true`.
+Shift-complete and scheduled end-of-day email delivery now run through Supabase Edge Functions and Resend. The old simulated notification inbox remains localStorage-backed only when `DEMO_MODE: true`; production defaults to Supabase mode.
 
 ## Supabase frontend auth setup
 
@@ -79,7 +79,7 @@ If a manager opens a venue with no remote Opening or Closing template yet, the b
 
 For each accessible real venue, the app loads today's `public.daily_checklists` rows for `list_type = open` and `list_type = close`, representing the Opening and Closing Shifts, then loads their `public.daily_tasks`. When a manager opens a date with missing rows, the existing `ensure_daily_checklists(uuid, date)` SECURITY DEFINER helper creates the missing instances and copies the current Supabase template tasks as snapshots. Repeated page loads are idempotent because of the database unique key `(venue_id, work_date, list_type)`. Employees cannot bootstrap missing rows; RLS remains the boundary and they see an explicit initialisation message.
 
-Task changes use the schema's existing `pending`, `done`, `blocked`, `na`, and `skipped` values. Completion writes `completed_by` and `completed_at`; reopening clears those fields. Notes, reasons, and shift submission metadata are written to Supabase. Managers can add and remove `source = adhoc` one-off tasks, while routine tasks remain non-deletable. Re-apply routine tasks reads the Supabase template, adds only missing routine snapshots, and preserves existing state and one-off tasks. The older simulated notification inbox remains deferred/local.
+Task changes use the schema's existing `pending`, `done`, `blocked`, `na`, and `skipped` values. Completion writes `completed_by` and `completed_at`; reopening clears those fields. Notes, reasons, and shift submission metadata are written to Supabase. Managers can add and remove `source = adhoc` one-off tasks, while routine tasks remain non-deletable. Re-apply routine tasks reads the Supabase template, adds only missing routine snapshots, and preserves existing state and one-off tasks. In Supabase mode, notification delivery is no longer simulated in the browser.
 
 ## Supabase historical operations and CSV
 
@@ -92,6 +92,69 @@ Apply `supabase/migrations/011_enable_daily_operations_realtime.sql` after migra
 If the migration reports that `supabase_realtime` is not present, open **Supabase > Database > Publications**, select `supabase_realtime`, and add these three public tables. Do not enable unrelated tables. If the dashboard uses a **Realtime** table-settings screen instead, enable Realtime for the same three tables. The frontend continues to work through normal Supabase queries if Realtime is unavailable.
 
 The browser subscribes only to the selected venue and today's two operation IDs. An event triggers an authoritative Supabase refetch, and the channel is removed when the venue, tab, session, or access context changes. A small selected-venue/day refetch timer covers deletion events, which cannot be column-filtered by Postgres Changes without broadening the subscription. Realtime is not used for notifications or historical/template screens in this phase.
+
+## Supabase production notifications and scheduled EOD
+
+Apply [`supabase/migrations/012_add_notification_delivery_and_timezone.sql`](supabase/migrations/012_add_notification_delivery_and_timezone.sql) after migrations `001` through `011`. It adds venue IANA `timezone` (existing venues default to `Australia/Sydney`), notification idempotency/audit fields, and service-role-only claim/finalize/fail functions. It does not add browser write access to `notification_events`.
+
+The Edge Functions are [`notify-manager`](supabase/functions/notify-manager/index.ts) for authenticated shift-complete requests and [`end-of-day`](supabase/functions/end-of-day/index.ts) for the scheduled cutoff processor. Both use the shared server-side Resend code. The browser sends only a visible checklist ID; the function derives the venue, manager email, task state, and message from Supabase.
+
+### Deploy functions and set secrets
+
+From the repository root, after installing/authenticating the Supabase CLI:
+
+```sh
+supabase login
+supabase link --project-ref zwebxycbrfwtlmqwxwwe
+supabase functions deploy notify-manager --project-ref zwebxycbrfwtlmqwxwwe
+supabase functions deploy end-of-day --project-ref zwebxycbrfwtlmqwxwwe
+supabase secrets set \
+  RESEND_API_KEY=re_your_key \
+  RESEND_FROM_EMAIL=ops@your-verified-domain.example \
+  RESEND_FROM_NAME=DailyOps \
+  DAILYOPS_CRON_SECRET=replace-with-a-long-random-secret \
+  --project-ref zwebxycbrfwtlmqwxwwe
+```
+
+Use the real values only in the command or Supabase Edge Function Secrets UI. Never commit them, place them in `supabase/config.js`, or put them in `index.html`. The Supabase service-role/secret key is automatically available to Edge Functions and is not required in the repository.
+
+### Configure Resend
+
+Create a Resend account, add and verify the sending domain under **Resend → Domains**, and use an address on that verified domain for `RESEND_FROM_EMAIL`. A test sender such as `onboarding@resend.dev` is suitable only for Resend's permitted test recipients. The function sends text and HTML summaries; CSV attachments are intentionally deferred.
+
+### Create the Cron job
+
+Enable `pg_cron`, `pg_net`, and Vault under **Supabase → Database → Extensions** if they are not already enabled. Store the project URL and the same scheduler secret used above in Vault, then run this once in the Supabase SQL Editor. Replace the placeholder secret before running it; do not put the secret in the repository:
+
+```sql
+select vault.create_secret('https://zwebxycbrfwtlmqwxwwe.supabase.co', 'dailyops_project_url');
+select vault.create_secret('replace-with-the-same-long-random-secret', 'dailyops_cron_secret');
+
+select cron.schedule(
+  'dailyops-end-of-day',
+  '*/15 * * * *',
+  $$
+    select net.http_post(
+      url := (select decrypted_secret from vault.decrypted_secrets where name = 'dailyops_project_url') || '/functions/v1/end-of-day',
+      headers := jsonb_build_object(
+        'Content-Type', 'application/json',
+        'x-dailyops-cron-secret', (select decrypted_secret from vault.decrypted_secrets where name = 'dailyops_cron_secret')
+      ),
+      body := '{}'::jsonb
+    ) as request_id;
+  $$
+);
+```
+
+If the job already exists, run `select cron.unschedule('dailyops-end-of-day');` before recreating it. The processor uses each venue's IANA timezone and cutoff, reads existing daily operation rows, and records a single idempotent EOD event per venue/date. It does not create an empty operation solely to send a report.
+
+### Test safely
+
+1. Apply migration 012, deploy both functions, configure a verified test sender/recipient in `venues.manager_email`, and set `notify_complete = true`, `notify_end_of_day = true`, and `email_enabled = true`.
+2. Complete every task in one shift. Confirm one `list-complete` row becomes `sent` in `notification_events` and exactly one email arrives. Repeat the browser action or use two clients; the idempotency key must prevent a second email.
+3. Set a temporary venue `cutoff_time` a few minutes ahead, wait for the 15-minute schedule, and confirm one `end-of-day` row and email. Re-run the Cron job and confirm it does not send again.
+4. Temporarily set an invalid `RESEND_API_KEY`, run the function, and confirm a `failed` event with `error_message`; restore the key and retry before the five-attempt cap.
+5. Open Alerts in the manager UI to see sent, pending, and failed delivery status. Employees cannot query manager notification events through the existing RLS policy and cannot supply an arbitrary recipient.
 
 To test locally, open the app with VS Code Live Server in two browser contexts, sign in with users who can access the same venue, and follow the two-client test sequence in `docs/PROJECT_STATUS.md`. A refresh remains a valid recovery path if a browser sleeps or loses its connection.
 
@@ -130,7 +193,7 @@ Make sure the exact local origin is included in Supabase **Authentication > URL 
 3. Sign in with the test user and confirm the profile display name appears in the existing user area.
 4. Refresh the page and confirm the session is restored without signing in again.
 5. Select the sign-out action and confirm the app returns to the login screen.
-6. Open Templates, Team, and History. Confirm remote Opening/Closing Shift templates, every member of the selected organisation, or every managed organisation when `All organisations` is selected, venue memberships, cross-venue assignments, the seven-day roster planner, prior operation days, and historical CSV export load; the older notification inbox remains local/demo.
+6. Open Templates, Team, History, and Alerts. Confirm remote Opening/Closing Shift templates, every member of the selected organisation, or every managed organisation when `All organisations` is selected, venue memberships, cross-venue assignments, the seven-day roster planner, prior operation days, historical CSV export, and notification delivery status load.
 
 Production URL:
 
@@ -145,8 +208,9 @@ Use an authenticated browser session or the Supabase client with a test user's s
 ## Intentionally deferred
 
 - role editing, automated Auth-user invitation/creation, and manager-side assignment of a pre-created Auth user to an organisation by email; the future implementation must use a manager-scoped Edge Function or narrowly scoped SECURITY DEFINER RPC;
-- notification delivery and scheduled jobs;
+- SMS, push notifications, and email delivery for shift-cover requests;
 - roster CSV import;
-- Edge Functions, Storage, offline support, and PWA behaviour.
+- automated Auth-user invitation/organisation assignment;
+- Storage, offline support, and PWA behaviour.
 
 The existing localStorage implementation remains available as the compatibility/demo repository while those adapters are developed incrementally.

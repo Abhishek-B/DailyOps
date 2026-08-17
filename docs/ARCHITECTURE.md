@@ -57,10 +57,15 @@ Roster assignment
 Shift cover request
 - records the employee-confirmed cover notification for a venue/date/shift
 - managers can read and mark requests seen only for venues they manage
-- the current implementation is an in-app alert; email/SMS and realtime delivery are deferred
+- the current implementation is an in-app alert; cover email/SMS remains deferred
 
 Notification event
-- reserves an auditable record for future Edge Function delivery
+- records server-side email delivery status, provider ID, failure detail, and an idempotency key for shift-complete and end-of-day messages
+
+Server-side notifications
+- `notify-manager` receives only an authenticated, RLS-visible checklist ID after a successful task write
+- it derives the venue manager recipient and task message from Supabase, then sends through Resend
+- `end-of-day` is invoked by Supabase Cron, applies each venue's IANA timezone/cutoff, and records one idempotent summary event per venue/date
 
 Historical operations and CSV
 - query recent prior daily operation instances for the selected venue
@@ -86,4 +91,5 @@ The current `checklist_type` enum is intentionally retained for the deployed `op
 
 ## Planned backend work
 
-- phase 2: Edge Functions and scheduled end-of-day notifications
+- cover-request email/SMS and push delivery
+- database outbox/webhook coverage for task writes made outside the frontend

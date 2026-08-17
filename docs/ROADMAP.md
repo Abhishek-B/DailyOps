@@ -14,9 +14,10 @@
 - Realtime completion updates (implemented for the selected venue/current date)
 
 ## Notifications
-- Immediate manager alert when a shift is fully complete
-- Scheduled venue end-of-day report
-- Email summary and optional CSV attachment
+- Immediate manager email when a shift is fully complete (implemented through `notify-manager` + Resend)
+- Scheduled venue end-of-day report (implemented through `end-of-day` + Supabase Cron)
+- Manager delivery audit/status in the Alerts page (implemented)
+- Optional CSV attachment, SMS, push, and cover-request email delivery
 
 ## Later
 - CSV roster importer UI
