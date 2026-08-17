@@ -6,7 +6,13 @@ export type NotificationClaim = {
   venueName: string | null;
   workDate: string | null;
   listType: "open" | "close" | null;
-  kind: "list-complete" | "end-of-day" | "test";
+  kind:
+    | "list-complete"
+    | "list-incomplete"
+    | "list-reopened"
+    | "shift-cover"
+    | "end-of-day"
+    | "test";
   recipientProfileId: string | null;
   recipient: string | null;
   subject: string;

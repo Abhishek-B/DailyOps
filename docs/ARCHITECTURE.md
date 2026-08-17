@@ -55,23 +55,26 @@ Roster assignment
 - employees may insert their own explicit current cover assignment after confirming the in-app prompt; they cannot update or delete roster rows
 
 Shift cover request
-- records the employee-confirmed cover notification for a venue/date/shift
+- records the employee-confirmed cover notification for a venue/date/shift, with an optional covered employee
 - managers can read and mark requests seen only for venues they manage
-- the current implementation is an in-app alert; cover email/SMS remains deferred
+- the browser creates the in-app alert and requests a server-validated Telegram delivery; email/SMS remains deferred
 
 Notification event
-- records server-side Telegram delivery status, recipient profile, provider message ID, failure detail, and an idempotency key for shift-complete and end-of-day messages
+- records server-side Telegram delivery status, recipient profile, provider message ID, failure detail, and a per-recipient idempotency key for complete submission, incomplete submission, reopen, cover, end-of-day, and test messages
 
 Venue notification recipient
 - links one active manager or platform-admin profile to one venue and a Telegram Chat ID
-- stores independent enabled, Shift Complete, and End of Day preferences
+- stores independent enabled, Shift Complete, Incomplete Submissions, Shift Reopened, Shift Cover, and End of Day preferences
 - is readable and writable only by authorised venue managers/platform admins through RLS
 - Chat IDs are not copied into notification audit rows
 
 Server-side notifications
-- `notify-manager` receives only an authenticated, RLS-visible checklist ID after a successful task write, or a configured recipient record ID for a fixed manager test
+- `notify-manager` receives only an authenticated, RLS-visible checklist/cover-request ID after a successful submit, reopen, or cover write, or a configured recipient record ID for a fixed manager test
+- after a submitted shift request, it derives whether the stored tasks are complete; complete submissions use the concise Shift Complete preference, while incomplete submissions use the Incomplete Submissions preference and include stored task reasons/notes
 - it derives all recipient Chat IDs and task messages from Supabase, then sends through the single Telegram bot
 - `end-of-day` is invoked by Supabase Cron, applies each venue's IANA timezone/cutoff, and records one idempotent summary event per venue/date/recipient
+- a database-managed `daily_checklists.notification_revision` distinguishes first submission from resubmission after reopen; browser callers cannot choose the revision
+- a database trigger allows only active platform admins to change `venues.cutoff_time` or `venues.timezone`, while preserving other permitted manager venue updates
 
 Historical operations and CSV
 - query recent prior daily operation instances for the selected venue
@@ -87,7 +90,7 @@ Live operational synchronisation
 
 ## Authorization boundary
 
-The browser key is publishable. RLS policies use the signed-in Auth UUID, organisation memberships, venue memberships, active profiles, and the platform-admin helper to decide access. Ordinary managers inherit access to all venues in their organisation; active platform admins inherit management access across organisations; employees require an active venue membership. Managers can administer members, profiles, venue memberships, and rosters only within managed organisations/venues. Migrations 006 and 007 narrow venue-membership reads and require manager-created memberships/rosters to stay within the target organisation; migration 008 records the authenticated helper grant required for manager profile updates; migration 009 makes the active platform-admin capability explicit in RLS; migration 010 scopes cover-request alerts to managed venues; migration 011 only adds the three live operational tables to the standard Realtime publication and does not broaden RLS. Disabling a profile or removing venue access clears future roster assignments but preserves historical rows and attribution. The browser does not create Auth users or yet assign unassociated Auth users to an organisation by email. That workflow is intentionally deferred to a manager-scoped Edge Function or narrowly scoped SECURITY DEFINER RPC. Database triggers prevent employees from changing task definition fields or attributing a completion to another user.
+The browser key is publishable. RLS policies use the signed-in Auth UUID, organisation memberships, venue memberships, active profiles, and the platform-admin helper to decide access. Ordinary managers inherit access to all venues in their organisation; active platform admins inherit management access across organisations; employees require an active venue membership. Managers can administer members, profiles, venue memberships, and rosters only within managed organisations/venues. Migrations 006 and 007 narrow venue-membership reads and require manager-created memberships/rosters to stay within the target organisation; migration 008 records the authenticated helper grant required for manager profile updates; migration 009 makes the active platform-admin capability explicit in RLS; migration 010 scopes cover-request alerts to managed venues; migration 011 only adds the three live operational tables to the standard Realtime publication and does not broaden RLS; migration 015 adds only the service-role reads needed by server-side notification validation and the cutoff trigger. Disabling a profile or removing venue access clears future roster assignments but preserves historical rows and attribution. The browser does not create Auth users or yet assign unassociated Auth users to an organisation by email. That workflow is intentionally deferred to a manager-scoped Edge Function or narrowly scoped SECURITY DEFINER RPC. Database triggers prevent employees from changing task definition fields, attributing a completion to another user, selecting a notification revision, or changing protected venue timing settings.
 
 ## Snapshot invariant
 

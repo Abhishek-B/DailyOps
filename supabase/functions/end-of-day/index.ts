@@ -22,10 +22,26 @@ type Recipient = {
   profile: { display_name: string; email: string; active: boolean };
 };
 
+type RecipientLoadResult =
+  | { recipients: Recipient[]; databaseError: false }
+  | { recipients: null; databaseError: true };
+
+function logDatabaseError(context: string, error: unknown) {
+  const details = error && typeof error === "object"
+    ? error as Record<string, unknown>
+    : {};
+  console.error("[end-of-day] " + context, {
+    code: typeof details.code === "string" ? details.code : undefined,
+    message: typeof details.message === "string"
+      ? details.message
+      : "Database query failed",
+  });
+}
+
 async function loadRecipients(
   db: ReturnType<typeof adminClient>,
   venueId: string,
-) {
+): Promise<RecipientLoadResult> {
   const { data, error } = await db
     .from("venue_notification_recipients")
     .select("id,profile_id,telegram_chat_id,enabled,notify_end_of_day")
@@ -33,22 +49,36 @@ async function loadRecipients(
     .eq("enabled", true)
     .eq("notify_end_of_day", true)
     .order("created_at");
-  if (error) throw error;
+  if (error) {
+    logDatabaseError("Telegram recipient query failed", error);
+    return { recipients: null, databaseError: true };
+  }
 
   const rows = (data || []) as Array<Record<string, any>>;
   const profileIds = [...new Set(rows.map((row) => row.profile_id))];
-  if (!profileIds.length) return [] as Recipient[];
+  if (!profileIds.length) return { recipients: [], databaseError: false };
   const profiles = await db
     .from("profiles")
     .select("id,display_name,email,active")
     .in("id", profileIds);
-  if (profiles.error) throw profiles.error;
+  if (profiles.error) {
+    logDatabaseError("Telegram recipient profile query failed", profiles.error);
+    return { recipients: null, databaseError: true };
+  }
   const profilesById = Object.fromEntries(
     (profiles.data || []).map((profile) => [profile.id, profile]),
   );
-  return rows
+  const missingProfile = rows.find((row) => !profilesById[row.profile_id]);
+  if (missingProfile) {
+    console.error("[end-of-day] Telegram recipient profile row missing", {
+      profileId: missingProfile.profile_id,
+    });
+    return { recipients: null, databaseError: true };
+  }
+  const recipients = rows
     .map((row) => ({ ...row, profile: profilesById[row.profile_id] }))
     .filter((row): row is Recipient => !!row.profile?.active);
+  return { recipients, databaseError: false };
 }
 
 function localTimeParts(timeZone: string, instant = new Date()) {
@@ -251,7 +281,15 @@ async function processVenue(
 ) {
   if (!venue.notify_end_of_day) return { status: "disabled" };
 
-  const recipients = await loadRecipients(db, venue.id);
+  const recipientResult = await loadRecipients(db, venue.id);
+  if (recipientResult.databaseError) {
+    return {
+      status: "failed",
+      error: "Could not load Telegram notification recipients",
+      database_error: true,
+    };
+  }
+  const recipients = recipientResult.recipients;
   if (!recipients.length) return { status: "no-recipients" };
 
   let local;
@@ -305,17 +343,17 @@ async function processVenue(
     if (taskResult.error) throw taskResult.error;
     tasks = taskResult.data || [];
   } catch (error) {
-    const message = error instanceof Error
-      ? error.message
-      : "Could not load operation data";
-    console.error("[end-of-day] operation load failed", {
-      venueId: venue.id,
-      message,
-    });
+    const message = "Could not load operation data";
+    logDatabaseError("operation load failed for venue " + venue.id, error);
     for (const recipient of recipients) {
       await recordFailure(db, venue, local.date, recipient, message);
     }
-    return { status: "failed", workDate: local.date, error: message };
+    return {
+      status: "failed",
+      workDate: local.date,
+      error: message,
+      database_error: true,
+    };
   }
 
   const tasksByChecklist: Record<string, Array<Record<string, any>>> = {};
@@ -335,14 +373,19 @@ async function processVenue(
     : { data: [], error: null };
   if (profileResult.error) {
     const message = "Could not load task attribution";
-    console.error("[end-of-day] profile load failed", {
-      venueId: venue.id,
-      error: profileResult.error,
-    });
+    logDatabaseError(
+      "profile load failed for venue " + venue.id,
+      profileResult.error,
+    );
     for (const recipient of recipients) {
       await recordFailure(db, venue, local.date, recipient, message);
     }
-    return { status: "failed", workDate: local.date, error: message };
+    return {
+      status: "failed",
+      workDate: local.date,
+      error: message,
+      database_error: true,
+    };
   }
   const profiles = Object.fromEntries(
     (profileResult.data || []).map((profile) => [profile.id, profile]),
@@ -391,7 +434,7 @@ Deno.serve(async (req) => {
     .select("id,name,timezone,cutoff_time,notify_end_of_day")
     .order("id");
   if (error) {
-    console.error("[end-of-day] venue load failed", error);
+    logDatabaseError("venue load failed", error);
     return json({ ok: false, error: "Could not load venues" }, 500);
   }
 
@@ -404,13 +447,8 @@ Deno.serve(async (req) => {
         ...(await processVenue(db, venue)),
       });
     } catch (error) {
-      const message = error instanceof Error
-        ? error.message
-        : "End-of-day processing failed";
-      console.error("[end-of-day] venue processing failed", {
-        venueId: venue.id,
-        message,
-      });
+      const message = "End-of-day processing failed";
+      logDatabaseError("venue processing failed for " + venue.id, error);
       results.push({
         venue_id: venue.id,
         venue: venue.name,
@@ -419,5 +457,15 @@ Deno.serve(async (req) => {
       });
     }
   }
-  return json({ ok: true, processed_at: new Date().toISOString(), results });
+  const hasDatabaseFailure = results.some((result) =>
+    result.database_error === true
+  );
+  return json(
+    {
+      ok: !hasDatabaseFailure,
+      processed_at: new Date().toISOString(),
+      results,
+    },
+    hasDatabaseFailure ? 500 : 200,
+  );
 });

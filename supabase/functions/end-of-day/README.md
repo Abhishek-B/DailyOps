@@ -19,3 +19,10 @@ Required function secrets:
 
 This first version processes existing daily operation rows. It does not create
 an operation with no activity merely to send an empty report.
+
+Migration 015 records the service-role SELECT grants required to read venues,
+daily operations, daily tasks, and roster data. It also leaves the existing
+Cron schedule unchanged: future runs read the current `venues.cutoff_time` and
+`venues.timezone`, including values changed by an active platform admin in
+DailyOps Settings. Database query failures are returned as server failures and
+are not reported as an empty/no-recipient result.

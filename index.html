@@ -887,7 +887,7 @@ function tplFrom(rows) {
   return rows.map(([title, detail, critical]) => ({ id: uid('t'), title, detail, critical }));
 }
 function blankList() {
-  return { id: null, tasks: [], submitted: false, submittedBy: null, submittedAt: null, completeNotified: false };
+  return { id: null, tasks: [], submitted: false, submittedBy: null, submittedAt: null, completeNotified: false, notificationRevision: 0, reopenedBy: null, reopenedAt: null };
 }
 function makeDay(key, roster, vid) {
   const v = vid || V().id;
@@ -1671,6 +1671,9 @@ const me = () => authUserForLocalUi() || user(S.session.userId) || S.users[0];
 const isMgr = () => isSupabaseMode()
   ? organisationRoleForVenue(currentVenueContext()) === 'manager'
   : (me() || {}).role === 'manager';
+const isPlatformAdmin = () => isSupabaseMode()
+  && !!AUTH.profile?.active
+  && AUTH.profile.platform_role === 'admin';
 const uname = id => {
   if (isSupabaseMode()) {
     const profile = SUPABASE_HISTORY.profilesById[id] || SUPABASE_TEAM.profilesById[id];
@@ -1702,7 +1705,7 @@ function ensureVenue() {
 }
 
 // Legacy schema adapter: daily_checklists rows are today's shift-operation instances.
-const REMOTE_CHECKLIST_SELECT = 'id,venue_id,work_date,list_type,submitted,submitted_by,submitted_at,complete_notified';
+const REMOTE_CHECKLIST_SELECT = 'id,venue_id,work_date,list_type,submitted,submitted_by,submitted_at,complete_notified,notification_revision,reopened_by,reopened_at';
 const REMOTE_TASK_SELECT = 'id,checklist_id,template_task_id,sort_order,title,detail,critical,source,status,added_by,added_at,completed_by,completed_at,note,reason';
 
 function supabaseVenueContext(venueId) {
@@ -1948,12 +1951,12 @@ async function loadSupabaseCoverRequests() {
       .map(context => context.realId);
     const result = venueIds.length
       ? await DB.from('shift_cover_requests')
-        .select('id,venue_id,user_id,work_date,shift_type,created_at,manager_seen_at,manager_seen_by')
+        .select('id,venue_id,user_id,covered_for_user_id,work_date,shift_type,created_at,manager_seen_at,manager_seen_by')
         .in('venue_id', venueIds)
         .order('created_at', { ascending: false })
       : { data: [], error: null };
     if (result.error) throw result.error;
-    const userIds = [...new Set((result.data || []).map(row => row.user_id))];
+    const userIds = [...new Set((result.data || []).flatMap(row => [row.user_id, row.covered_for_user_id]).filter(Boolean))];
     if (userIds.length) {
       const profileResult = await DB.from('profiles')
         .select('id,display_name,email,phone,active')
@@ -2065,7 +2068,7 @@ async function loadSupabaseNotificationRecipients() {
   render();
   try {
     const result = await DB.from('venue_notification_recipients')
-      .select('id,venue_id,profile_id,telegram_chat_id,enabled,notify_shift_complete,notify_end_of_day,created_by,created_at,updated_at')
+      .select('id,venue_id,profile_id,telegram_chat_id,enabled,notify_shift_complete,notify_incomplete_submission,notify_shift_reopened,notify_shift_cover,notify_end_of_day,created_by,created_at,updated_at')
       .eq('venue_id', venueId)
       .order('created_at');
     if (result.error) throw result.error;
@@ -2120,12 +2123,18 @@ function openTelegramRecipientEditor(id) {
         <span class="hint">Install Telegram, open the DailyOps bot, press Start, then provide this Chat ID to the manager. Never enter a bot token.</span></div>
       <div class="row-b"><div><div style="font-weight:600;font-size:14px">Recipient enabled</div><div class="tiny mut">Disabled recipients receive no Telegram messages</div></div><button class="switch ${existing?.enabled !== false ? 'is-on' : ''}" id="tg-enabled" aria-label="Recipient enabled"></button></div>
       <div class="row-b"><div><div style="font-weight:600;font-size:14px">Shift Complete</div><div class="tiny mut">Send when Opening or Closing Shift is complete</div></div><button class="switch ${existing?.notify_shift_complete !== false ? 'is-on' : ''}" id="tg-shift" aria-label="Shift complete notifications"></button></div>
+      <div class="row-b"><div><div style="font-weight:600;font-size:14px">Incomplete submissions</div><div class="tiny mut">Send task details and reasons when a shift is submitted with incomplete tasks</div></div><button class="switch ${existing?.notify_incomplete_submission !== false ? 'is-on' : ''}" id="tg-incomplete" aria-label="Incomplete submission notifications"></button></div>
+      <div class="row-b"><div><div style="font-weight:600;font-size:14px">Shift Reopened</div><div class="tiny mut">Send when a submitted shift is reopened</div></div><button class="switch ${existing?.notify_shift_reopened !== false ? 'is-on' : ''}" id="tg-reopened" aria-label="Shift reopened notifications"></button></div>
+      <div class="row-b"><div><div style="font-weight:600;font-size:14px">Shift Cover</div><div class="tiny mut">Send when an employee confirms cover</div></div><button class="switch ${existing?.notify_shift_cover === true ? 'is-on' : ''}" id="tg-cover" aria-label="Shift cover notifications"></button></div>
       <div class="row-b"><div><div style="font-weight:600;font-size:14px">End of Day</div><div class="tiny mut">Send after the venue cutoff</div></div><button class="switch ${existing?.notify_end_of_day !== false ? 'is-on' : ''}" id="tg-eod" aria-label="End of day notifications"></button></div>
     </div>
     <div class="modal-foot"><button class="btn" data-x="close">Cancel</button><button class="btn btn-primary" data-x="save">${existing ? 'Save changes' : 'Add recipient'}</button></div>`, {
     after(root) {
       let enabled = existing?.enabled !== false;
       let notifyShiftComplete = existing?.notify_shift_complete !== false;
+      let notifyIncompleteSubmission = existing?.notify_incomplete_submission !== false;
+      let notifyShiftReopened = existing?.notify_shift_reopened !== false;
+      let notifyShiftCover = existing?.notify_shift_cover === true;
       let notifyEndOfDay = existing?.notify_end_of_day !== false;
       root.querySelectorAll('[data-x=close]').forEach(button => button.onclick = closeModal);
       const bindSwitch = (selector, read, write) => {
@@ -2134,6 +2143,9 @@ function openTelegramRecipientEditor(id) {
       };
       bindSwitch('#tg-enabled', () => enabled, value => { enabled = value; });
       bindSwitch('#tg-shift', () => notifyShiftComplete, value => { notifyShiftComplete = value; });
+      bindSwitch('#tg-incomplete', () => notifyIncompleteSubmission, value => { notifyIncompleteSubmission = value; });
+      bindSwitch('#tg-reopened', () => notifyShiftReopened, value => { notifyShiftReopened = value; });
+      bindSwitch('#tg-cover', () => notifyShiftCover, value => { notifyShiftCover = value; });
       bindSwitch('#tg-eod', () => notifyEndOfDay, value => { notifyEndOfDay = value; });
       root.querySelector('#tg-profile').value = selectedProfileId;
       root.querySelector('#tg-chat').focus();
@@ -2151,6 +2163,9 @@ function openTelegramRecipientEditor(id) {
             telegram_chat_id: chatId,
             enabled,
             notify_shift_complete: notifyShiftComplete,
+            notify_incomplete_submission: notifyIncompleteSubmission,
+            notify_shift_reopened: notifyShiftReopened,
+            notify_shift_cover: notifyShiftCover,
             notify_end_of_day: notifyEndOfDay,
             ...(existing ? {} : { created_by: AUTH.profile.id })
           };
@@ -2244,7 +2259,10 @@ function mapRemoteDay(context, date, checklists, tasks, rosterData) {
       submitted: !!row.submitted,
       submittedBy: row.submitted_by,
       submittedAt: row.submitted_at,
-      completeNotified: !!row.complete_notified
+      completeNotified: !!row.complete_notified,
+      notificationRevision: Number(row.notification_revision || 0),
+      reopenedBy: row.reopened_by || null,
+      reopenedAt: row.reopened_at || null
     };
     checklistById[row.id] = list;
   });
@@ -2664,8 +2682,9 @@ async function persistRemoteTask(task) {
   applyRemoteTaskRow(task, data);
 }
 
-// The browser only reports the affected checklist. The Edge Function rechecks
-// access, task completeness, venue settings, recipient, and idempotency.
+// The browser reports only a successfully submitted checklist. The Edge
+// Function rechecks access, submission, stored task outcome, venue settings,
+// recipients, and idempotency, then selects complete vs incomplete delivery.
 async function requestSupabaseListComplete(checklistId) {
   if (!isSupabaseMode() || !checklistId || !DB) return;
   try {
@@ -2681,6 +2700,43 @@ async function requestSupabaseListComplete(checklistId) {
     // Task persistence has already succeeded. Delivery is audited/retried on
     // the server, so an unavailable function must not roll back the task UI.
     console.warn('[supabase] list-complete notification request failed', { checklistId, error });
+    toast('Shift submitted, but the Telegram notification could not be sent. Check Alerts.', 'warn');
+  }
+}
+
+async function requestSupabaseListReopened(checklistId) {
+  if (!isSupabaseMode() || !checklistId || !DB) return;
+  try {
+    const result = await DB.functions.invoke('notify-manager', {
+      body: { kind: 'list-reopened', checklist_id: checklistId }
+    });
+    if (result.error) throw result.error;
+    if (result.data && result.data.failed) {
+      toast(result.data.failed + ' reopen notification' + (result.data.failed === 1 ? '' : 's') + ' failed. Check Alerts.', 'warn');
+    }
+    if (R.tab === 'alerts' && isMgr()) loadSupabaseNotifications();
+  } catch (error) {
+    console.warn('[supabase] list-reopened notification request failed', { checklistId, error });
+    toast('Shift reopened, but the Telegram notification could not be sent. Check Alerts.', 'warn');
+  }
+}
+
+async function requestSupabaseShiftCoverNotification(coverRequestId) {
+  if (!isSupabaseMode() || !coverRequestId || !DB) return null;
+  try {
+    const result = await DB.functions.invoke('notify-manager', {
+      body: { kind: 'shift-cover', cover_request_id: coverRequestId }
+    });
+    if (result.error) throw result.error;
+    if (result.data && result.data.failed) {
+      toast(result.data.failed + ' shift-cover Telegram notification' + (result.data.failed === 1 ? '' : 's') + ' failed. Check Alerts.', 'warn');
+    }
+    if (R.tab === 'alerts' && isMgr()) loadSupabaseNotifications();
+    return result.data;
+  } catch (error) {
+    console.warn('[supabase] shift-cover notification request failed', { coverRequestId, error });
+    toast('Cover saved, but the Telegram notification could not be sent. Check Alerts.', 'warn');
+    return null;
   }
 }
 
@@ -2732,6 +2788,9 @@ async function persistRemoteChecklist(list) {
   list.submittedBy = data.submitted_by;
   list.submittedAt = data.submitted_at;
   list.completeNotified = !!data.complete_notified;
+  list.notificationRevision = Number(data.notification_revision || 0);
+  list.reopenedBy = data.reopened_by || null;
+  list.reopenedAt = data.reopened_at || null;
 }
 
 function today(vid) {
@@ -2872,6 +2931,7 @@ function buildEndOfDay(v, day, auto) {
    production this whole function lives in a scheduled backend job.
    -------------------------------------------------------------------------- */
 function runTriggers(opts) {
+  if (isSupabaseMode()) return 0;
   const o = opts || {};
   let fired = 0;
   const here = V().id;
@@ -3306,6 +3366,9 @@ function pageEmployee() {
   if (locked) {
     banner = `<div class="banner banner-ok">${ic('check', 17)}<div>
       <b>Shift submitted.</b> ${esc(uname(L.submittedBy))} sent this shift to the manager at ${esc(fmtTime(L.submittedAt))}. It's now read-only.</div></div>`;
+  } else if (st.complete) {
+    banner = `<div class="banner banner-info">${ic('check', 17)}<div>
+      <b>All tasks complete — ready to submit.</b> Your manager is notified only when you submit the shift.</div></div>`;
   } else if (!rostered) {
     banner = `<div class="banner banner-warn">${ic('info', 17)}<div class="row-b" style="width:100%">
       <span>You're not rostered on the ${esc(m.full)} today.</span>
@@ -3327,7 +3390,7 @@ function pageEmployee() {
          <div class="ab-text">
            <div class="row-b" style="margin-bottom:6px">
              <span class="tiny" style="font-weight:640">${st.done} of ${st.total} done</span>
-             <span class="tiny mut">${st.pending ? plural(st.pending, 'left') : 'All clear'}</span>
+             <span class="tiny mut">${st.complete ? 'Ready to submit' : st.pending ? plural(st.pending, 'left') : 'All clear'}</span>
            </div>
            <div class="bar ${st.complete ? 'is-done' : ''}"><i style="width:${st.pct}%"></i></div>
          </div>
@@ -4015,12 +4078,13 @@ function pageAlerts() {
   const coverRequests = SUPABASE_COVER_REQUESTS.rows || [];
   const coverItems = coverRequests.length ? coverRequests.map(request => {
     const employee = user(request.user_id) || {};
+    const coveredFor = request.covered_for_user_id ? (user(request.covered_for_user_id) || {}) : null;
     const venueContext = venueCatalog().find(context => context.realId === request.venue_id);
     const unread = !request.manager_seen_at;
     return `<div class="alert-item ${unread ? 'is-unread' : ''}">
       <span class="alert-ic chip-info" style="background:var(--info-soft);color:var(--info)">${ic('users', 17)}</span>
       <span style="flex:1;min-width:0">
-        <span style="display:block;font-weight:${unread ? '680' : '540'};letter-spacing:-.012em">${esc(employee.name || employee.email || 'An employee')} is covering a shift</span>
+        <span style="display:block;font-weight:${unread ? '680' : '540'};letter-spacing:-.012em">${esc(employee.name || employee.email || 'An employee')} is covering ${esc(coveredFor ? (coveredFor.name || coveredFor.email || 'a rostered person') : 'a shift')}</span>
         <span class="tiny mut row wrap" style="margin-top:4px;gap:6px">
           ${venueContext ? `<span class="chip"><span class="venue-dot" style="width:7px;height:7px;background:${venueDotColor(venueContext)}"></span>${esc(venueContext.name)}</span>` : ''}
           <span>${esc(rosterShiftLabel(request.shift_type))} · ${esc(fmtDateShort(request.work_date))}</span>
@@ -4062,19 +4126,22 @@ function pageAlerts() {
           <span class="tiny mut" style="margin-left:auto">${plural(list.length, 'message')} · ${unreadCount()} unread</span></div>
         <div>${list.length ? list.map(n => {
           const isEod = n.kind === 'end-of-day';
+          const isReopened = n.kind === 'list-reopened';
+          const isCover = n.kind === 'shift-cover';
+          const isIncomplete = n.kind === 'list-incomplete';
           const failed = n.deliveryStatus === 'failed';
           const pending = n.deliveryStatus === 'pending';
-          const tone = failed ? 'chip-danger' : isEod ? 'chip-info' : 'chip-ok';
+          const tone = failed ? 'chip-danger' : isIncomplete ? 'chip-warn' : isEod || isReopened || isCover ? 'chip-info' : 'chip-ok';
           const statusLabel = n.deliveryStatus ? (failed ? 'Failed' : pending ? 'Pending' : 'Sent') : 'Preview';
           return `<button class="alert-item ${n.read ? '' : 'is-unread'}" data-act="open-notif" data-id="${n.id}">
-            <span class="alert-ic ${tone}" style="background:var(--${failed ? 'danger' : isEod ? 'info' : 'ok'}-soft);color:var(--${failed ? 'danger' : isEod ? 'info' : 'ok'})">
+            <span class="alert-ic ${tone}" style="background:var(--${failed ? 'danger' : isIncomplete ? 'warn' : isEod || isReopened || isCover ? 'info' : 'ok'}-soft);color:var(--${failed ? 'danger' : isIncomplete ? 'warn' : isEod || isReopened || isCover ? 'info' : 'ok'})">
               ${ic(n.channel === 'telegram' ? 'send' : n.channel === 'sms' ? 'sms' : 'mail', 17)}</span>
             <span style="flex:1;min-width:0">
               <span style="display:block;font-weight:${n.read ? '540' : '680'};letter-spacing:-.012em">${esc(n.subject)}</span>
               <span class="tiny mut row wrap" style="margin-top:4px;gap:6px">
                 ${venueCatalog().length > 1 && n.venueName ? `<span class="chip"><span class="venue-dot" style="width:7px;height:7px;background:${
                   venueDotColor(venue(n.venueId) || { accent: 'graphite' })}"></span>${esc(n.venueName)}</span>` : ''}
-                <span>${n.channel === 'telegram' ? 'Telegram' : n.channel === 'sms' ? 'SMS' : 'Email'} → ${esc(n.to)}</span>
+                <span>${esc(notificationKindLabel(n.kind))} · ${n.channel === 'telegram' ? 'Telegram' : n.channel === 'sms' ? 'SMS' : 'Email'} → ${esc(n.to)}</span>
                 <span class="chip ${failed ? 'chip-danger' : pending ? 'chip-warn' : 'chip-ok'}">${statusLabel}</span>
                 ${failed && n.errorMessage ? `<span class="tiny" style="color:var(--danger)">${esc(n.errorMessage)}</span>` : ''}
               </span>
@@ -4082,7 +4149,7 @@ function pageAlerts() {
             <span class="tiny mut nowrap">${esc(fmtDT(n.at))}</span>
           </button>`;
         }).join('') : SUPABASE_NOTIFICATIONS.loading ? `<div class="empty"><div>Loading delivery status…</div></div>` : `<div class="empty"><div class="empty-icon">${ic('mail', 20)}</div><div>No delivery events yet.</div>
-          <div class="tiny mut" style="margin-top:4px">You'll see shift-complete and end-of-day Telegram status here.</div></div>`}</div>
+          <div class="tiny mut" style="margin-top:4px">You'll see shift-complete, incomplete-submission and end-of-day Telegram status here.</div></div>`}</div>
       </div>
     </div>`;
 }
@@ -4092,6 +4159,7 @@ function pageAlerts() {
    ========================================================================== */
 function pageSettings() {
   const s = V();
+  const canEditCutoff = !isSupabaseMode() || isPlatformAdmin();
   const dataTools = isSupabaseMode()
     ? `<div class="tiny mut">Historical operations, CSV export and Telegram delivery status now read from Supabase. Open History for operations or Alerts for sent/failed Edge Function and scheduled EOD events. The bot token, Cron and venue notification switches are configured in Supabase, not this browser.</div>`
     : `<div class="tiny mut">History, CSV export and notifications remain in this browser's localStorage under <code>${STORE_KEY}</code>.</div>
@@ -4165,17 +4233,17 @@ function pageSettings() {
             <div class="field"><label class="label" for="s-phone">Manager mobile</label>
               <input class="input" id="s-phone" data-set="managerPhone" value="${esc(s.managerPhone)}"></div>`}
             <div class="field"><label class="label" for="s-cut">End-of-day cutoff</label>
-              <input class="input" id="s-cut" type="time" data-set="cutoff" value="${esc(s.cutoff)}" ${isSupabaseMode() ? 'disabled' : ''}>
-              <span class="hint">If ${esc(s.name)} hasn't submitted its Closing Shift by this time, the Telegram summary is sent anyway.</span></div>
+              <input class="input" id="s-cut" type="time" data-set="cutoff" value="${esc(s.cutoff)}" ${canEditCutoff ? '' : 'disabled'}>
+              <span class="hint">If ${esc(s.name)} hasn't submitted its Closing Shift by this time, the Telegram summary is sent anyway. ${isSupabaseMode() ? 'Only active platform admins can change this value.' : ''}</span></div>
           </div>
         </div>
 
         <div class="card">
           <div class="card-head"><div class="h3">Notification rules</div></div>
           <div class="card-body" style="padding-top:4px">
-            ${tog('notifyComplete', 'When a shift is fully ticked off', 'Fires the moment the last task is done, any time of day')}
+            ${tog('notifyComplete', 'When a shift is submitted', 'Sends after all required tasks are complete and the shift is submitted')}
             ${tog('notifyEndOfDay', 'End-of-day summary', 'Done vs left undone, across both shifts')}
-            ${isSupabaseMode() ? `<div class="tiny mut" style="padding-top:10px">These venue-wide switches are read by the server. Each Telegram recipient has separate Shift Complete and End of Day preferences.</div>` : `${tog('channelEmail', 'Send by email', esc(s.managerEmail))}
+            ${isSupabaseMode() ? `<div class="tiny mut" style="padding-top:10px">These venue-wide switches are read by the server. Each Telegram recipient has separate Shift Complete, Incomplete Submissions, Shift Reopened, Shift Cover and End of Day preferences.</div>` : `${tog('channelEmail', 'Send by email', esc(s.managerEmail))}
             ${tog('channelSms', 'Send by SMS', esc(s.managerPhone))}`}
           </div>
         </div>
@@ -4190,7 +4258,13 @@ function pageSettings() {
             ${SUPABASE_NOTIFICATION_RECIPIENTS.venueId !== s.realId || SUPABASE_NOTIFICATION_RECIPIENTS.loading ? `<div class="empty" style="padding:18px">Loading Telegram recipients…</div>` : SUPABASE_NOTIFICATION_RECIPIENTS.rows.length ? SUPABASE_NOTIFICATION_RECIPIENTS.rows.map(row => `<div class="venue-row">
               <span class="venue-dot" style="background:${row.enabled ? 'var(--ok)' : 'var(--muted)'}"></span>
               <div style="flex:1;min-width:0"><div class="row wrap" style="gap:6px"><b>${esc(row.profile?.display_name || 'Profile unavailable')}</b><span class="chip">${esc(maskTelegramChatId(row.telegram_chat_id))}</span>${row.enabled ? '<span class="chip chip-ok">Enabled</span>' : '<span class="chip">Disabled</span>'}</div>
-                <div class="tiny mut">${esc(row.profile?.email || '')} · ${row.notify_shift_complete ? 'Shift Complete' : ''}${row.notify_shift_complete && row.notify_end_of_day ? ' · ' : ''}${row.notify_end_of_day ? 'End of Day' : ''}</div></div>
+                <div class="tiny mut">${esc(row.profile?.email || '')} · ${[
+                  row.notify_shift_complete ? 'Shift Complete' : '',
+                  row.notify_incomplete_submission ? 'Incomplete Submissions' : '',
+                  row.notify_shift_reopened ? 'Shift Reopened' : '',
+                  row.notify_shift_cover ? 'Shift Cover' : '',
+                  row.notify_end_of_day ? 'End of Day' : ''
+                ].filter(Boolean).join(' · ') || 'No event notifications'}</div></div>
               <div class="row" style="gap:4px"><button class="btn btn-sm btn-ghost" data-act="telegram-test" data-id="${row.id}">Test</button><button class="btn btn-sm btn-icon btn-ghost" data-act="telegram-edit" data-id="${row.id}" title="Edit recipient">${ic('pencil', 14)}</button><button class="btn btn-sm btn-icon btn-ghost" data-act="telegram-delete" data-id="${row.id}" title="Remove recipient">${ic('trash', 14)}</button></div>
             </div>`).join('') : `<div class="empty" style="padding:18px"><div class="empty-icon">${ic('send', 20)}</div><div>No Telegram recipients configured for ${esc(s.name)}.</div><div class="tiny mut" style="margin-top:4px">Add an active manager or platform admin after they have started the bot.</div></div>`}
             <button class="btn btn-sm btn-ghost" data-act="telegram-recipients-refresh">Refresh recipients</button>
@@ -4300,7 +4374,6 @@ function openTaskMeta(lk, taskId) {
           else { save(); runTriggers(); }
           closeModal();
           render();
-          if (isSupabaseMode() && task.status === 'done') requestSupabaseListComplete(L.id);
           toast('Task details saved', 'ok');
         } catch (error) {
           Object.assign(task, previous);
@@ -4951,6 +5024,17 @@ function openCopyTemplate() {
 }
 
 /* ---- notification preview ---------------------------------------------- */
+function notificationKindLabel(kind) {
+  return ({
+    'list-complete': 'Shift Complete',
+    'list-incomplete': 'Incomplete Submission',
+    'list-reopened': 'Shift Reopened',
+    'shift-cover': 'Shift Cover',
+    'end-of-day': 'End of Day',
+    test: 'Test'
+  })[kind] || 'Notification';
+}
+
 function openNotif(id) {
   if (isSupabaseMode()) {
     const n = SUPABASE_NOTIFICATIONS.rows.find(x => x.id === id);
@@ -4959,7 +5043,7 @@ function openNotif(id) {
     const status = failed ? 'Delivery failed' : n.deliveryStatus === 'pending' ? 'Delivery pending' : 'Delivered';
     openModal(`
       <div class="modal-head"><div style="flex:1">
-        <div class="modal-title">${esc(n.kind === 'end-of-day' ? 'End-of-day summary' : 'Shift complete')}</div>
+        <div class="modal-title">${esc(notificationKindLabel(n.kind))}</div>
         <div class="modal-sub">${esc(status)} · ${esc(fmtDT(n.at))}</div>
       </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
       <div class="modal-body">
@@ -5082,7 +5166,6 @@ function toggleTask(lk, id) {
     else { t.status = 'done'; t.doneBy = me().id; t.doneAt = new Date().toISOString(); t.reason = ''; }
     persistRemoteTask(t).then(() => {
       render();
-      if (t.status === 'done') requestSupabaseListComplete(L.id);
     }).catch(error => {
       Object.assign(t, previous);
       console.error('[supabase] task status update failed', { taskId: id, error });
@@ -5299,7 +5382,9 @@ async function reopenList(lk) {
     L.submitted = false; L.submittedBy = null; L.submittedAt = null;
     try {
       await persistRemoteChecklist(L);
-      render(); toast(`${LIST_META[lk].full} reopened`);
+      render();
+      requestSupabaseListReopened(L.id);
+      toast(`${LIST_META[lk].full} reopened`);
     } catch (error) {
       Object.assign(L, previous);
       console.error('[supabase] checklist reopen failed', { checklistId: L.id, error });
@@ -5339,46 +5424,97 @@ async function removeRemoteAdhocTask(lk, taskId) {
   }
 }
 
+function openSupabaseCoverModal(lk) {
+  const day = today();
+  const context = V();
+  const candidates = (day.roster[lk] || [])
+    .filter(userId => userId !== me().id)
+    .map(userId => user(userId))
+    .filter(Boolean);
+  const options = candidates.map(person =>
+    `<option value="${esc(person.id)}">${esc(person.name || person.email || 'Rostered team member')}</option>`
+  ).join('');
+  openModal(`
+    <div class="modal-head"><div style="flex:1">
+      <div class="modal-title">Cover the ${esc(LIST_META[lk].label.toLowerCase())} shift?</div>
+      <div class="modal-sub">${esc(context.name)} · ${esc(fmtDateShort(day.date))}</div>
+    </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
+    <div class="modal-body stack" style="gap:13px">
+      <div class="banner banner-info">${ic('info', 17)}<div>Confirming adds you to this shift and sends a Telegram notification to configured managers. No manager approval is required.</div></div>
+      <div class="field"><label class="label" for="cover-for">Who are you covering for?</label>
+        <select class="select" id="cover-for">
+          <option value="">General or additional cover</option>
+          ${options}
+        </select>
+        <span class="hint">Choose a rostered person when you are taking their place. Use general cover when nobody specific is being replaced.</span></div>
+    </div>
+    <div class="modal-foot"><button class="btn" data-x="close">Cancel</button><button class="btn btn-primary" data-x="confirm">I'm covering</button></div>`, {
+    after(root) {
+      root.querySelectorAll('[data-x=close]').forEach(button => button.onclick = closeModal);
+      root.querySelector('[data-x=confirm]').onclick = async () => {
+        const button = root.querySelector('[data-x=confirm]');
+        button.disabled = true;
+        const coveredForUserId = root.querySelector('#cover-for').value || null;
+        closeModal();
+        await saveSupabaseCoverRequest(lk, coveredForUserId);
+      };
+    }
+  });
+}
+
+async function saveSupabaseCoverRequest(lk, coveredForUserId) {
+  const day = today();
+  const context = V();
+  const lockKey = `cover:${context.realId}:${day.date}:${lk}:${me().id}`;
+  if (REMOTE_MUTATIONS.has(lockKey)) return;
+  REMOTE_MUTATIONS.add(lockKey);
+  try {
+    const assignmentResult = await DB.from('roster_assignments').insert({
+      id: crypto.randomUUID(), venue_id: context.realId, user_id: me().id,
+      work_date: day.date, shift_type: lk
+    });
+    if (assignmentResult.error && assignmentResult.error.code !== '23505') throw assignmentResult.error;
+
+    const requestPayload = {
+      id: crypto.randomUUID(), venue_id: context.realId, user_id: me().id,
+      covered_for_user_id: coveredForUserId, work_date: day.date, shift_type: lk
+    };
+    const requestResult = await DB.from('shift_cover_requests')
+      .insert(requestPayload)
+      .select('id')
+      .maybeSingle();
+    let coverRequestId = requestResult.data?.id || null;
+    if (requestResult.error && requestResult.error.code === '23505') {
+      const existing = await DB.from('shift_cover_requests')
+        .select('id')
+        .eq('venue_id', context.realId)
+        .eq('user_id', me().id)
+        .eq('work_date', day.date)
+        .eq('shift_type', lk)
+        .single();
+      if (existing.error) throw existing.error;
+      coverRequestId = existing.data.id;
+    } else if (requestResult.error) {
+      throw requestResult.error;
+    }
+    if (!coverRequestId) throw new Error('Cover request was not returned by Supabase');
+
+    await loadSupabaseToday();
+    await loadSupabaseMyRosterWeek(SUPABASE_MY_ROSTER_WEEK.start || rosterWeekStartKey(dayKey()), true);
+    render();
+    await requestSupabaseShiftCoverNotification(coverRequestId);
+    toast(`You're on the ${LIST_META[lk].label.toLowerCase()} shift — manager notified`, 'ok');
+  } catch (error) {
+    console.error('[supabase] self-cover request failed', { venueId: context.realId, listType: lk, error });
+    toast('Could not save your cover request. Please try again.', 'warn');
+  } finally {
+    REMOTE_MUTATIONS.delete(lockKey);
+  }
+}
+
 async function coverShift(lk) {
   if (isSupabaseMode()) {
-    const day = today();
-    if (day.lists[lk].submitted) { toast('This shift is already submitted.', 'warn'); return; }
-    if (!me().active) { toast('This account is disabled', 'warn'); return; }
-    if (day.roster[lk].includes(me().id)) return;
-    const context = V();
-    confirmModal(
-      `Cover the ${LIST_META[lk].label.toLowerCase()} shift?`,
-      `This will add you to ${context.name} for today and notify the manager. Continue?`,
-      'I’m covering',
-      async () => {
-        const lockKey = `cover:${context.realId}:${day.date}:${lk}:${me().id}`;
-        if (REMOTE_MUTATIONS.has(lockKey)) return;
-        REMOTE_MUTATIONS.add(lockKey);
-        try {
-          const assignmentResult = await DB.from('roster_assignments').insert({
-            id: crypto.randomUUID(), venue_id: context.realId, user_id: me().id,
-            work_date: day.date, shift_type: lk
-          });
-          if (assignmentResult.error && assignmentResult.error.code !== '23505') throw assignmentResult.error;
-
-          const requestResult = await DB.from('shift_cover_requests').insert({
-            id: crypto.randomUUID(), venue_id: context.realId, user_id: me().id,
-            work_date: day.date, shift_type: lk
-          });
-          if (requestResult.error && requestResult.error.code !== '23505') throw requestResult.error;
-
-          await loadSupabaseToday();
-          await loadSupabaseMyRosterWeek(SUPABASE_MY_ROSTER_WEEK.start || rosterWeekStartKey(dayKey()), true);
-          render();
-          toast(`You're on the ${LIST_META[lk].label.toLowerCase()} shift — manager notified`, 'ok');
-        } catch (error) {
-          console.error('[supabase] self-cover request failed', { venueId: context.realId, listType: lk, error });
-          toast('Could not save your cover request. Please try again.', 'warn');
-        } finally {
-          REMOTE_MUTATIONS.delete(lockKey);
-        }
-      }
-    );
+    openSupabaseCoverModal(lk);
     return;
   }
   const day = today(), list = day.roster[lk];
@@ -5396,7 +5532,6 @@ async function tickAll(lk) {
     try {
       await Promise.all(changed.map(t => persistRemoteTask(t)));
       render();
-      requestSupabaseListComplete(L.id);
     } catch (error) {
       previous.forEach(x => Object.assign(x.task, { status: x.status, doneBy: x.doneBy, doneAt: x.doneAt, reason: x.reason }));
       console.error('[supabase] task bulk update failed', { checklistId: L.id, error });
@@ -5650,6 +5785,40 @@ function handleAct(act, ds) {
    ========================================================================== */
 function scrollTop() { const c = $('#content'); if (c) c.scrollTop = 0; }
 
+async function saveSupabaseVenueCutoff(value) {
+  if (!isPlatformAdmin()) {
+    render();
+    toast('Only an active platform admin can change the venue cutoff.', 'warn');
+    return;
+  }
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value)) {
+    render();
+    toast('Enter a valid cutoff time in 24-hour format.', 'warn');
+    return;
+  }
+  const context = V();
+  const lockKey = 'venue-cutoff:' + context.realId;
+  if (REMOTE_MUTATIONS.has(lockKey)) return;
+  REMOTE_MUTATIONS.add(lockKey);
+  try {
+    const result = await DB.from('venues')
+      .update({ cutoff_time: value })
+      .eq('id', context.realId)
+      .select('id,cutoff_time')
+      .single();
+    if (result.error) throw result.error;
+    context.cutoff = String(result.data.cutoff_time || value).slice(0, 5);
+    render();
+    toast('End-of-day cutoff saved', 'ok');
+  } catch (error) {
+    console.error('[supabase] venue cutoff update failed', { venueId: context.realId, error });
+    render();
+    toast('Could not save the end-of-day cutoff.', 'warn');
+  } finally {
+    REMOTE_MUTATIONS.delete(lockKey);
+  }
+}
+
 $('#app').addEventListener('click', e => {
   const a = e.target.closest('[data-act]');
   if (a && $('#app').contains(a) && !e.target.closest('#modal-root')) { e.preventDefault(); handleAct(a.dataset.act, a.dataset); return; }
@@ -5721,6 +5890,10 @@ $('#btn-alerts').addEventListener('click', () => {
 $('#page').addEventListener('change', e => {
   const el = e.target.closest('[data-set]');
   if (!el) return;
+  if (isSupabaseMode() && el.dataset.set === 'cutoff') {
+    saveSupabaseVenueCutoff(el.value);
+    return;
+  }
   V()[el.dataset.set] = el.value;
   save(); render();
   toast('Saved');

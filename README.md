@@ -17,13 +17,13 @@ Supabase currently supplies authentication, organisation/venue identity, team me
 - the venues returned by the deployed RLS policies;
 - organisation members, profiles, active state, and organisation role;
 - organisation-wide employee visibility for managers, employee venue memberships, and Opening/Closing Shift roster assignments across the selected week;
-- active platform-admin access across organisations and venues, employee weekly roster/venue visibility, and in-app shift-cover requests for managers;
+- active platform-admin access across organisations and venues, employee weekly roster/venue visibility, and shift-cover requests with in-app manager Alerts plus optional Telegram delivery;
 - the selected venue's recurring Opening/Closing Shift templates and routine tasks; and
 - today's `public.daily_checklists` Opening/Closing Shift rows and `public.daily_tasks` routine/one-off tasks, status, completion attribution/timestamps, notes, and incomplete reasons;
 - prior venue operation days, read-only historical shift/task review, Supabase-backed summary metrics, and client-side CSV export from stored daily snapshots.
 - live current-venue/current-date task, shift-submission, and roster updates through Supabase Realtime; the client refetches authorised rows after each relevant change.
 
-Shift-complete and scheduled end-of-day Telegram delivery now run through Supabase Edge Functions and Supabase Cron. The old simulated notification inbox remains localStorage-backed only when `DEMO_MODE: true`; production defaults to Supabase mode.
+Submit-gated shift-complete, reopen, shift-cover, and scheduled end-of-day Telegram delivery now run through Supabase Edge Functions and Supabase Cron. The old simulated notification inbox remains localStorage-backed only when `DEMO_MODE: true`; production defaults to Supabase mode.
 
 ## Supabase frontend auth setup
 
@@ -59,7 +59,7 @@ After authentication, the app reads the signed-in user's rows from `public.organ
 
 The app then queries `public.venues`. RLS is the access boundary: ordinary managers receive venues in organisations they manage, active platform admins receive all organisations/venues through the deployed helper functions, and employees receive only venues allowed by the deployed membership policies. Manager-capable users can filter the UI to `All organisations` or one managed organisation; the venue picker and manager group summary include organisation names when more than one organisation is available. The selected organisation and real venue IDs are remembered in user-specific local preferences and restored only if the user still has access.
 
-Team and roster data now load from Supabase. Managers see every member of the selected organisation regardless of venue; managers of multiple organisations and platform admins can select `All organisations` to see the combined staff and venue scope. Shared employees remain visible with each organisation membership and their weekly assignments are shown across all accessible venues. Managers can manage profile active state and `venue_members` access, and plan Opening/Closing Shift assignments across a seven-day window for every eligible venue in their manager scope. Deactivating an employee or removing venue access clears future roster assignments while retaining historical records. Employees load only their permitted venues, can view their weekly roster across those venues, and can confirm a current self-cover action; confirmation adds the assignment and creates an in-app manager alert without an approval step. The older simulated notification inbox remains local/deferred. Real venue rows are still mapped to temporary local operations contexts only for legacy demo screens, so real Supabase IDs do not overwrite or get persisted into the old demo state.
+Team and roster data now load from Supabase. Managers see every member of the selected organisation regardless of venue; managers of multiple organisations and platform admins can select `All organisations` to see the combined staff and venue scope. Shared employees remain visible with each organisation membership and their weekly assignments are shown across all accessible venues. Managers can manage profile active state and `venue_members` access, and plan Opening/Closing Shift assignments across a seven-day window for every eligible venue in their manager scope. Deactivating an employee or removing venue access clears future roster assignments while retaining historical records. Employees load only their permitted venues, can view their weekly roster across those venues, and can confirm a current self-cover action; confirmation adds the assignment and creates an in-app manager alert plus optional server-side Telegram delivery without an approval step. The older simulated notification inbox remains local/deferred. Real venue rows are still mapped to temporary local operations contexts only for legacy demo screens, so real Supabase IDs do not overwrite or get persisted into the old demo state.
 
 ## Supabase team, venue memberships, and roster
 
@@ -95,11 +95,13 @@ The browser subscribes only to the selected venue and today's two operation IDs.
 
 ## Supabase production Telegram notifications and scheduled EOD
 
-Apply [`supabase/migrations/012_add_notification_delivery_and_timezone.sql`](supabase/migrations/012_add_notification_delivery_and_timezone.sql), then [`supabase/migrations/013_add_telegram_notification_recipients.sql`](supabase/migrations/013_add_telegram_notification_recipients.sql), after migrations `001` through `011`.
+Apply [`supabase/migrations/012_add_notification_delivery_and_timezone.sql`](supabase/migrations/012_add_notification_delivery_and_timezone.sql), [`supabase/migrations/013_add_telegram_notification_recipients.sql`](supabase/migrations/013_add_telegram_notification_recipients.sql), [`supabase/migrations/014_fix_notification_service_role_grants.sql`](supabase/migrations/014_fix_notification_service_role_grants.sql), [`supabase/migrations/015_notification_workflow_and_admin_cutoff.sql`](supabase/migrations/015_notification_workflow_and_admin_cutoff.sql), and [`supabase/migrations/016_incomplete_submission_notifications.sql`](supabase/migrations/016_incomplete_submission_notifications.sql), in that order after migrations `001` through `011`.
 
-Migration 012 adds venue IANA `timezone` (existing venues default to `Australia/Sydney`), notification retry/idempotency fields, and service-role-only claim/finalize/fail functions. Migration 013 adds the venue-scoped `venue_notification_recipients` table, recipient RLS, the `telegram` audit channel, and per-recipient claim/idempotency support. Chat IDs are not stored in `notification_events`.
+Migration 012 adds venue IANA `timezone` (existing venues default to `Australia/Sydney`), notification retry/idempotency fields, and service-role-only claim/finalize/fail functions. Migration 013 adds the venue-scoped `venue_notification_recipients` table, recipient RLS, the `telegram` audit channel, and per-recipient claim/idempotency support. Migration 014 records service-role reads for recipients and profiles. Migration 015 records the required service-role reads for venues, daily operations, and shift-cover validation; adds submit/reopen lifecycle revision fields; adds optional covered-person and recipient preference fields; and protects cutoff/timezone edits at the database boundary. Chat IDs are not stored in `notification_events`.
 
-The Edge Functions are [`notify-manager`](supabase/functions/notify-manager/index.ts) for authenticated shift-complete/test requests and [`end-of-day`](supabase/functions/end-of-day/index.ts) for the scheduled cutoff processor. Both resolve recipients from Supabase and use the shared Telegram sender. The browser sends only a visible checklist ID or configured recipient record ID; it never sends a Chat ID, bot token, recipient destination, or notification body.
+The Edge Functions are [`notify-manager`](supabase/functions/notify-manager/index.ts) for authenticated submit-complete/reopen/cover/test requests and [`end-of-day`](supabase/functions/end-of-day/index.ts) for the scheduled cutoff processor. Both resolve recipients from Supabase and use the shared Telegram sender. The browser sends only a visible checklist or cover-request ID, or a configured recipient record ID for the fixed test message; it never sends a Chat ID, bot token, recipient destination, completion totals, or notification body.
+
+The notification lifecycle is submit-gated. Completing the final task shows **Ready to submit** but does not send Telegram. A complete Submit Shift sends one concise `list-complete` event per enabled recipient. An incomplete Submit Shift sends one actionable `list-incomplete` event to recipients with **Incomplete submissions** enabled, including outstanding task statuses, reasons and notes. The detailed report remains the End-of-Day summary. Reopening a submitted shift increments the database-managed `notification_revision` and sends one `list-reopened` event; a later submission uses that revision in its idempotency key and is labelled as a resubmission. Shift-cover delivery uses `shift-cover:<cover_request_id>:<recipient_id>` and can identify the person being covered for.
 
 ### Deploy functions and set secrets
 
@@ -126,7 +128,7 @@ Use the real values only in the command or Supabase Edge Function Secrets UI. Ne
 4. Give authorised recipients the bot username. Each recipient must open the bot and press **Start** before messages can be delivered.
 5. Retrieve each recipient's Telegram Chat ID through a trusted admin workflow, then add it in **Settings → Telegram recipients**. DailyOps does not automatically process `/start` messages or ask for the bot token.
 
-One bot can send to many venue recipients. Each recipient is linked to an existing DailyOps profile and has independent Shift Complete and End of Day switches. A global `TELEGRAM_CHAT_ID` is not used.
+One bot can send to many venue recipients. Each recipient is linked to an existing DailyOps profile and has independent Shift Complete, Incomplete Submissions, Shift Reopened, Shift Cover, and End of Day switches. Existing rows default to Incomplete Submissions enabled by migration 016, Shift Reopened enabled, and Shift Cover disabled; adjust these per recipient in Settings. A global `TELEGRAM_CHAT_ID` is not used.
 
 The recipient table can also be populated by a trusted SQL administrator if necessary:
 
@@ -181,12 +183,15 @@ If the job already exists, run `select cron.unschedule('dailyops-end-of-day');` 
 
 ### Test safely
 
-1. Apply migrations 012 and 013, deploy both functions, add your own Telegram Chat ID under Settings, and set `notify_complete = true` and `notify_end_of_day = true` for the venue.
+1. Apply migrations 012 through 016 in order, deploy `notify-manager` and `end-of-day`, add your own Telegram Chat ID under Settings, and set `notify_complete = true` and `notify_end_of_day = true` for the venue. Enable the recipient preferences you want.
 2. Use the recipient's **Test** button. Confirm the fixed Telegram test message arrives and a `test` row becomes `sent` in `notification_events`.
-3. Complete every task in one shift. Confirm one `list-complete` row per enabled recipient becomes `sent` and exactly one Telegram message arrives per recipient. Repeat the browser action or use two clients; the per-recipient idempotency key must prevent duplicates.
-4. Set a temporary venue `cutoff_time` a few minutes ahead, wait for the 15-minute schedule, and confirm one `end-of-day` row/message per enabled recipient. Re-run Cron and confirm it does not send again.
-5. Temporarily use an invalid Chat ID or disable/start-state for one recipient. Confirm that recipient has a `failed` event while valid recipients still receive their messages. Fix the recipient and retry before the five-attempt cap.
-6. Open Alerts in the manager UI to see Telegram sent, pending, and failed delivery status. Employees cannot query manager notification events or recipient Chat IDs through the existing RLS policies.
+3. Complete the final task in one shift. Confirm no Telegram is sent and the UI says the shift is ready to submit. Submit the shift, then confirm one concise `list-complete` row per enabled recipient becomes `sent` and exactly one Telegram message arrives per recipient.
+4. Reopen the submitted shift. Confirm one `list-reopened` event/message. Submit with at least one incomplete task and a reason/note; confirm one `list-incomplete` event/message per recipient with Incomplete Submissions enabled. Change or complete the task and submit again; confirm one new completion event/message labelled as a resubmission. Repeat browser actions or use two clients; revision/recipient idempotency must prevent duplicates.
+5. Confirm Shift Cover is enabled for a recipient, have an employee cover a shift for a rostered person, and confirm one `shift-cover` event/message identifies both people. Disable the preference and confirm no new Telegram is sent.
+6. As an active platform admin, change a venue cutoff under Settings and refresh. Confirm the database value changes. A manager/employee direct update of `cutoff_time` must be rejected by the database trigger.
+7. Set a temporary venue `cutoff_time` a few minutes ahead, wait for the 15-minute schedule, and confirm one `end-of-day` row/message per enabled recipient. Restore the normal cutoff (Braddon's production value is `23:30`) and re-run Cron; successful events must not send again.
+8. Temporarily use an invalid Chat ID or disabled/unstarted recipient. Confirm that recipient has a `failed` event while valid recipients still receive their messages. Fix the recipient and retry before the five-attempt cap.
+9. Open Alerts in the manager UI to see Telegram sent, pending, and failed delivery status. Employees cannot query manager notification events or recipient Chat IDs through the existing RLS policies.
 
 To test locally, open the app with VS Code Live Server in two browser contexts, sign in with users who can access the same venue, and follow the two-client test sequence in `docs/PROJECT_STATUS.md`. A refresh remains a valid recovery path if a browser sleeps or loses its connection.
 
