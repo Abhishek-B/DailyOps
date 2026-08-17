@@ -25,7 +25,7 @@ The current `checklist_type` enum contains `open` and `close`. The frontend pres
 
 - Production frontend: static `index.html` hosted on GitHub Pages.
 - Browser database client: Supabase JS v2 loaded from a CDN.
-- Authentication: Supabase Auth email/password sessions.
+- Authentication: Supabase Auth email/password sessions behind a username-first frontend adapter.
 - Database: Supabase Postgres.
 - Authorisation: Postgres Row Level Security and deployed helper functions.
 - Live synchronisation: Supabase Realtime for the selected venue and current operation date, with authoritative Supabase refetches after relevant row changes.
@@ -70,7 +70,7 @@ Important deployed enums include `app_role` (`manager`, `employee`), `checklist_
 
 The schema also contains SECURITY DEFINER access helpers, task/checklist update guards, and `ensure_daily_checklists(uuid, date)`. These helpers and guards remain part of the RLS boundary and are not renamed by this cleanup.
 
-Migration history currently consists of `001_initial_schema.sql`, `002_add_platform_role.sql`, `003_grant_helper_function_execute.sql`, `004_grant_can_update_task_execute.sql`, `005_allow_managers_delete_adhoc_daily_tasks.sql`, `006_restrict_venue_member_reads.sql`, `007_scope_team_and_roster_writes.sql`, `008_grant_can_manage_profile_execute.sql`, `009_platform_admin_access.sql`, `010_add_shift_cover_requests.sql`, `011_enable_daily_operations_realtime.sql`, `012_add_notification_delivery_and_timezone.sql`, `013_add_telegram_notification_recipients.sql`, `014_fix_notification_service_role_grants.sql`, `015_notification_workflow_and_admin_cutoff.sql`, and `016_incomplete_submission_notifications.sql`. Already-applied schema migrations remain immutable.
+Migration history currently consists of `001_initial_schema.sql`, `002_add_platform_role.sql`, `003_grant_helper_function_execute.sql`, `004_grant_can_update_task_execute.sql`, `005_allow_managers_delete_adhoc_daily_tasks.sql`, `006_restrict_venue_member_reads.sql`, `007_scope_team_and_roster_writes.sql`, `008_grant_can_manage_profile_execute.sql`, `009_platform_admin_access.sql`, `010_add_shift_cover_requests.sql`, `011_enable_daily_operations_realtime.sql`, `012_add_notification_delivery_and_timezone.sql`, `013_add_telegram_notification_recipients.sql`, `014_fix_notification_service_role_grants.sql`, `015_notification_workflow_and_admin_cutoff.sql`, `016_incomplete_submission_notifications.sql`, and `017_reset_today_operations.sql`. Already-applied schema migrations remain immutable.
 
 Migration `012_add_notification_delivery_and_timezone.sql` adds an IANA `venues.timezone` field (existing venues default to `Australia/Sydney`), notification event idempotency/retry/audit fields, and service-role-only claim/finalize/fail functions. It does not add browser write access to `notification_events` or broaden RLS.
 
@@ -92,11 +92,13 @@ Migration `015_notification_workflow_and_admin_cutoff.sql` records the service-r
 
 Migration `016_incomplete_submission_notifications.sql` adds the per-recipient `notify_incomplete_submission` preference (defaulting existing and new recipients to enabled) and records the `list-incomplete` notification event kind. A submitted shift now produces either a concise complete-submission message or an actionable incomplete-submission message; the detailed report remains the scheduled End-of-Day summary.
 
+Migration `017_reset_today_operations.sql` adds the manager-only `reset_today_operations(uuid)` SECURITY DEFINER RPC. It uses the selected venue's IANA timezone, atomically rebuilds both current-day operation rows from active templates, preserves checklist IDs, advances notification revisions, clears task/submission state, and leaves notification audit history untouched.
+
 ## 6. What is live/real today
 
 **REAL NOW**
 
-- Supabase Auth email/password login, logout, and persisted session restoration.
+- Supabase Auth username/password login, logout, and persisted session restoration. Usernames use `USERNAME_AUTH_DOMAIN = "email.com"`; existing full email login identifiers remain supported.
 - The authenticated `profiles` row, including `id`, `display_name`, `email`, `active`, and `platform_role`.
 - Organisation membership loading from `organisation_members`.
 - Organisation role selection from `organisation_members.role`.
@@ -114,6 +116,7 @@ Migration `016_incomplete_submission_notifications.sql` adds the per-recipient `
 - Template-to-daily-operation snapshot generation through `ensure_daily_checklists(uuid, date)`.
 - Manager re-application of missing routine tasks from the Supabase template, using stable `template_task_id` references without replacing existing state or removing one-off tasks.
 - Manager task controls for individual updates, notes/reasons, bulk completion, one-off tasks, shift submission, and reopening.
+- Manager Reset Today for both Opening and Closing Shifts through the atomic, venue-authorised `reset_today_operations(uuid)` RPC.
 - Today's progress, outstanding, critical-outstanding, per-shift progress, and submitted counts from the in-memory view loaded from Supabase `daily_tasks` and `daily_checklists`.
 - Organisation member loading and the manager Team view from `organisation_members` and `profiles`.
 - Employee active/inactive state updates through `profiles` while retaining historical profile rows.
@@ -201,7 +204,7 @@ The repository does not use a separate generated milestone registry; this list r
 - The one-time template bootstrap still uses local/demo definitions when a venue has no remote template. It does not overwrite existing remote template data.
 - The explicit demo mode still uses localStorage seed data; normal Supabase history/reporting no longer falls back to it.
 - The real-venue-to-demo-context mapping remains only for any legacy screens that are still explicitly local/demo.
-- Auth-user creation and initial organisation membership bootstrap are manual because the static browser must not use Supabase Auth admin APIs or a service-role key.
+- Auth-user creation and initial organisation membership bootstrap are manual because the static browser must not use Supabase Auth admin APIs or a service-role key. New username-based staff accounts use the configured `username@email.com` Auth convention; existing full email identifiers remain compatible at login.
 - The current organisation/venue repair is a one-time SQL cleanup when duplicate organisation rows exist; the production model should retain one organisation row with multiple venue rows.
 - Organisation role changes are intentionally not exposed in the Team UI; they remain an administrator/manual SQL operation until a narrower workflow is designed.
 - Employees may insert their own current roster assignment through the existing RLS policy for the explicit "I'm covering" flow; they cannot update or delete roster rows.
@@ -267,7 +270,7 @@ The exact local origin must be allowed in Supabase Authentication URL Configurat
 
 ### Step 14 notification/EOD setup and test
 
-1. Apply migrations `012_add_notification_delivery_and_timezone.sql`, `013_add_telegram_notification_recipients.sql`, `014_fix_notification_service_role_grants.sql`, `015_notification_workflow_and_admin_cutoff.sql`, and `016_incomplete_submission_notifications.sql` in that order.
+1. Apply migrations `012_add_notification_delivery_and_timezone.sql`, `013_add_telegram_notification_recipients.sql`, `014_fix_notification_service_role_grants.sql`, `015_notification_workflow_and_admin_cutoff.sql`, `016_incomplete_submission_notifications.sql`, and `017_reset_today_operations.sql` in that order.
 2. Create one Telegram bot with BotFather, deploy both Edge Functions, and configure `TELEGRAM_BOT_TOKEN` and a long random `DAILYOPS_CRON_SECRET` as Edge Function secrets. The exact commands and recipient workflow are in the README.
 3. Enable `pg_cron`, `pg_net`, and Vault, and create the single `dailyops-end-of-day` Cron job. The job invokes the function every 15 minutes; the function applies each venue's IANA timezone and cutoff.
 4. Have the first recipient open the bot and press Start, retrieve their Chat ID through a trusted admin workflow, and add it under manager Settings. Confirm the recipient row persists after refresh.
@@ -278,6 +281,14 @@ The exact local origin must be allowed in Supabase Authentication URL Configurat
 9. Set a temporary cutoff shortly ahead, wait for Cron, and confirm one `end-of-day` event/message per enabled recipient. Run Cron again and confirm it does not send again.
 10. Break a test Chat ID or use a recipient who has not started the bot. Confirm `failed` plus `error_message`, while valid recipients continue receiving messages. Fix the recipient and retry before the five-attempt cap.
 11. Confirm an employee cannot invoke the test path, read recipient Chat IDs, or choose an arbitrary destination, and confirm no bot/service key appears in browser source or network requests.
+
+### Reset Today and username login
+
+1. Create a venue with current template tasks A/B/C. Add one-off task D, complete A/B, add notes, and submit if appropriate. As a manager, choose **Reset today**, confirm the destructive warning, and verify both shifts contain only current-template tasks in `pending` state with no one-off tasks, notes, reasons, completion attribution, or submission metadata.
+2. Remove B from the template and add E. Reset again and verify the resulting routine set is exactly A/C/E, with no stale B.
+3. Submit a shift before a reset and confirm its Telegram event remains in `notification_events`. Reset, complete the rebuilt shift, and submit again; confirm the second completion uses a new notification event and the old audit row remains.
+4. Attempt `select * from public.reset_today_operations('<venue uuid>');` as an employee or with an unauthorised authenticated session. The RPC must reject the call.
+5. Create `jsmith@email.com` in Supabase Auth and sign in as `jsmith`. Verify whitespace trimming, lowercase matching, allowed-character validation, generic wrong-password failure, and continued full-email login for existing administrators.
 
 ## 13. Deployment
 

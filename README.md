@@ -10,7 +10,7 @@ DailyOps is a framework-free, multi-venue daily-operations app for opening and c
 
 Supabase currently supplies authentication, organisation/venue identity, team membership, weekly roster planning, today's live shift-operation instances, and historical reporting:
 
-- email/password sign-in and sign-out;
+- username/password sign-in and sign-out through the Supabase email/password adapter;
 - persisted sessions across browser refreshes;
 - the signed-in user's `public.profiles` row;
 - the user's organisation memberships and organisation names;
@@ -53,6 +53,14 @@ In the Supabase dashboard:
 
 The app loads the authenticated user's profile with a query constrained to `profiles.id = auth.users.id`, then loads organisation memberships, organisation names, and RLS-filtered venues. Today's shift-operation/task data is loaded only after that identity step succeeds.
 
+### Username-first login
+
+The login form asks for a username and password. The frontend uses the single constant `USERNAME_AUTH_DOMAIN = "email.com"` in `index.html`: entering `jsmith` signs in through Supabase Auth as `jsmith@email.com`. Usernames are trimmed, lowercased, and may contain only letters, numbers, dots, underscores, and hyphens. Empty or invalid usernames are rejected in the browser.
+
+Existing administrator or test accounts remain compatible: any login identifier containing `@` is passed through as an existing Supabase Auth email address. The generated synthetic email is not shown in normal login errors. This is an Auth naming convention, not a second user system; passwords remain managed only by Supabase Auth.
+
+When manually creating staff in **Supabase → Authentication → Users**, use the same convention. For example, create the ordinary Auth user with email `jsmith@email.com`, then use `jsmith` at the DailyOps login screen. Do not create public signup or put privileged Auth credentials in the browser.
+
 ## Supabase organisation and venue loading
 
 After authentication, the app reads the signed-in user's rows from `public.organisation_members` and loads the related `public.organisations` rows. For ordinary users, the `organisation_members.role` value (`manager` or `employee`) determines the manager or employee UI for the selected venue. An active profile with `platform_role = 'admin'` is a separate platform-level capability that can manage all organisations/venues through RLS; it does not change ordinary organisation roles.
@@ -65,7 +73,7 @@ Team and roster data now load from Supabase. Managers see every member of the se
 
 `auth.users` is the login identity, `profiles` is the app profile, `organisation_members` supplies the `manager`/`employee` organisation role, `venue_members` grants employee venue access, and `roster_assignments` records a user assigned to a venue/date/shift. RLS enforces these boundaries; the UI is not the security boundary.
 
-The browser does not create Auth users or yet assign an unassociated Auth user to an organisation by email. For this MVP, create an employee under **Supabase → Authentication → Users**, then run the organisation-membership insert shown by the Team screen (or use the SQL Editor) with that Auth user's UUID. The Auth trigger creates `profiles`; after the membership exists, the manager can refresh the Team screen, assign or remove venues, enable/disable access, and plan the employee across the weekly roster. Role changes remain an administrator/manual operation, and `platform_role` is never edited by the Team UI. A future manager-scoped Edge Function or SECURITY DEFINER RPC will add the missing email-based organisation-assignment workflow; no service-role key belongs in the browser.
+The browser does not create Auth users or yet assign an unassociated Auth user to an organisation by email. For this MVP, create an employee under **Supabase → Authentication → Users** using the username-domain convention above, then run the organisation-membership insert shown by the Team screen (or use the SQL Editor) with that Auth user's UUID. The Auth trigger creates `profiles`; after the membership exists, the manager can refresh the Team screen, assign or remove venues, enable/disable access, and plan the employee across the weekly roster. Role changes remain an administrator/manual operation, and `platform_role` is never edited by the Team UI. A future manager-scoped Edge Function or SECURITY DEFINER RPC will add the missing email-based organisation-assignment workflow; no service-role key belongs in the browser.
 
 Migrations `supabase/migrations/006_restrict_venue_member_reads.sql`, `007_scope_team_and_roster_writes.sql`, `008_grant_can_manage_profile_execute.sql`, `009_platform_admin_access.sql`, and `010_add_shift_cover_requests.sql` narrow employee membership reads, scope manager-created venue memberships/roster assignments to active employees with access to the target venue, enable manager profile active-state updates, give active platform admins global management access through RLS helpers, and add venue-scoped in-app cover alerts. Apply them after migrations `001` through `005`.
 
@@ -81,6 +89,8 @@ For each accessible real venue, the app loads today's `public.daily_checklists` 
 
 Task changes use the schema's existing `pending`, `done`, `blocked`, `na`, and `skipped` values. Completion writes `completed_by` and `completed_at`; reopening clears those fields. Notes, reasons, and shift submission metadata are written to Supabase. Managers can add and remove `source = adhoc` one-off tasks, while routine tasks remain non-deletable. Re-apply routine tasks reads the Supabase template, adds only missing routine snapshots, and preserves existing state and one-off tasks. In Supabase mode, notification delivery is no longer simulated in the browser.
 
+Managers can use **Reset today** to perform a destructive, atomic reset of both shifts for the selected venue. A database RPC determines the venue-local date, preserves the daily operation IDs, advances their notification revisions, removes all current task snapshots and rebuilds them from the active templates. One-off tasks, progress, notes, reasons and submission state are cleared; notification audit history is retained and the reset itself sends no Telegram notification.
+
 ## Supabase historical operations and CSV
 
 In normal Supabase mode, History queries recent prior `daily_checklists` rows for the selected venue, then loads their `daily_tasks`, roster assignments, and referenced `profiles`. The UI is read-only and uses stored daily task snapshots, so later template edits do not rewrite historical records. Summary metrics and completion attribution are calculated from those Supabase rows. Export CSV downloads the currently loaded venue history with organisation, venue, date, shift, task, critical/source, status, completion and submission attribution, reasons, and notes. A failed query shows an error instead of falling back to local demo history.
@@ -95,9 +105,9 @@ The browser subscribes only to the selected venue and today's two operation IDs.
 
 ## Supabase production Telegram notifications and scheduled EOD
 
-Apply [`supabase/migrations/012_add_notification_delivery_and_timezone.sql`](supabase/migrations/012_add_notification_delivery_and_timezone.sql), [`supabase/migrations/013_add_telegram_notification_recipients.sql`](supabase/migrations/013_add_telegram_notification_recipients.sql), [`supabase/migrations/014_fix_notification_service_role_grants.sql`](supabase/migrations/014_fix_notification_service_role_grants.sql), [`supabase/migrations/015_notification_workflow_and_admin_cutoff.sql`](supabase/migrations/015_notification_workflow_and_admin_cutoff.sql), and [`supabase/migrations/016_incomplete_submission_notifications.sql`](supabase/migrations/016_incomplete_submission_notifications.sql), in that order after migrations `001` through `011`.
+Apply [`supabase/migrations/012_add_notification_delivery_and_timezone.sql`](supabase/migrations/012_add_notification_delivery_and_timezone.sql), [`supabase/migrations/013_add_telegram_notification_recipients.sql`](supabase/migrations/013_add_telegram_notification_recipients.sql), [`supabase/migrations/014_fix_notification_service_role_grants.sql`](supabase/migrations/014_fix_notification_service_role_grants.sql), [`supabase/migrations/015_notification_workflow_and_admin_cutoff.sql`](supabase/migrations/015_notification_workflow_and_admin_cutoff.sql), [`supabase/migrations/016_incomplete_submission_notifications.sql`](supabase/migrations/016_incomplete_submission_notifications.sql), and [`supabase/migrations/017_reset_today_operations.sql`](supabase/migrations/017_reset_today_operations.sql), in that order after migrations `001` through `011`.
 
-Migration 012 adds venue IANA `timezone` (existing venues default to `Australia/Sydney`), notification retry/idempotency fields, and service-role-only claim/finalize/fail functions. Migration 013 adds the venue-scoped `venue_notification_recipients` table, recipient RLS, the `telegram` audit channel, and per-recipient claim/idempotency support. Migration 014 records service-role reads for recipients and profiles. Migration 015 records the required service-role reads for venues, daily operations, and shift-cover validation; adds submit/reopen lifecycle revision fields; adds optional covered-person and recipient preference fields; and protects cutoff/timezone edits at the database boundary. Chat IDs are not stored in `notification_events`.
+Migration 012 adds venue IANA `timezone` (existing venues default to `Australia/Sydney`), notification retry/idempotency fields, and service-role-only claim/finalize/fail functions. Migration 013 adds the venue-scoped `venue_notification_recipients` table, recipient RLS, the `telegram` audit channel, and per-recipient claim/idempotency support. Migration 014 records service-role reads for recipients and profiles. Migration 015 records the required service-role reads for venues, daily operations, and shift-cover validation; adds submit/reopen lifecycle revision fields; adds optional covered-person and recipient preference fields; and protects cutoff/timezone edits at the database boundary. Migration 016 adds incomplete-submission notifications. Migration 017 adds the manager-only atomic Reset Today RPC. Chat IDs are not stored in `notification_events`.
 
 The Edge Functions are [`notify-manager`](supabase/functions/notify-manager/index.ts) for authenticated submit-complete/reopen/cover/test requests and [`end-of-day`](supabase/functions/end-of-day/index.ts) for the scheduled cutoff processor. Both resolve recipients from Supabase and use the shared Telegram sender. The browser sends only a visible checklist or cover-request ID, or a configured recipient record ID for the fixed test message; it never sends a Chat ID, bot token, recipient destination, completion totals, or notification body.
 
@@ -183,7 +193,7 @@ If the job already exists, run `select cron.unschedule('dailyops-end-of-day');` 
 
 ### Test safely
 
-1. Apply migrations 012 through 016 in order, deploy `notify-manager` and `end-of-day`, add your own Telegram Chat ID under Settings, and set `notify_complete = true` and `notify_end_of_day = true` for the venue. Enable the recipient preferences you want.
+1. Apply migrations 012 through 017 in order, deploy `notify-manager` and `end-of-day`, add your own Telegram Chat ID under Settings, and set `notify_complete = true` and `notify_end_of_day = true` for the venue. Enable the recipient preferences you want.
 2. Use the recipient's **Test** button. Confirm the fixed Telegram test message arrives and a `test` row becomes `sent` in `notification_events`.
 3. Complete the final task in one shift. Confirm no Telegram is sent and the UI says the shift is ready to submit. Submit the shift, then confirm one concise `list-complete` row per enabled recipient becomes `sent` and exactly one Telegram message arrives per recipient.
 4. Reopen the submitted shift. Confirm one `list-reopened` event/message. Submit with at least one incomplete task and a reason/note; confirm one `list-incomplete` event/message per recipient with Incomplete Submissions enabled. Change or complete the task and submit again; confirm one new completion event/message labelled as a resubmission. Repeat browser actions or use two clients; revision/recipient idempotency must prevent duplicates.
@@ -192,6 +202,8 @@ If the job already exists, run `select cron.unschedule('dailyops-end-of-day');` 
 7. Set a temporary venue `cutoff_time` a few minutes ahead, wait for the 15-minute schedule, and confirm one `end-of-day` row/message per enabled recipient. Restore the normal cutoff (Braddon's production value is `23:30`) and re-run Cron; successful events must not send again.
 8. Temporarily use an invalid Chat ID or disabled/unstarted recipient. Confirm that recipient has a `failed` event while valid recipients still receive their messages. Fix the recipient and retry before the five-attempt cap.
 9. Open Alerts in the manager UI to see Telegram sent, pending, and failed delivery status. Employees cannot query manager notification events or recipient Chat IDs through the existing RLS policies.
+10. Create a test Auth user such as `jsmith@email.com`, then sign in using `jsmith`. Confirm leading/trailing whitespace and uppercase input normalize correctly, invalid username characters are rejected, wrong passwords fail generically, and an existing administrator can still sign in with their full email address.
+11. For Reset Today, create current template tasks A/B/C, add one-off D, complete A/B and add notes, then reset. Confirm only pending A/B/C remain and submission state is cleared. Change the template to A/C/E, reset again, and confirm the result is exactly A/C/E. Submit before and after a reset and confirm the second legitimate completion notification is new while the old audit row remains.
 
 To test locally, open the app with VS Code Live Server in two browser contexts, sign in with users who can access the same venue, and follow the two-client test sequence in `docs/PROJECT_STATUS.md`. A refresh remains a valid recovery path if a browser sleeps or loses its connection.
 
@@ -199,7 +211,7 @@ Before testing one-off deletion, apply `supabase/migrations/005_allow_managers_d
 
 ### Create the first manager account
 
-Create an email/password user under **Authentication > Users**. The deployed profile trigger should create the matching `public.profiles` row. If the row is missing, repair it using an appropriately protected administrative workflow in the Supabase dashboard; do not put an admin or service-role key in the frontend.
+Create an ordinary Supabase Auth user under **Authentication > Users**. For a username `jsmith`, use `jsmith@email.com`; existing full email addresses remain supported. The deployed profile trigger should create the matching `public.profiles` row. If the row is missing, repair it using an appropriately protected administrative workflow in the Supabase dashboard; do not put an admin or service-role key in the frontend.
 
 Bootstrap the first manager's organisation membership in the SQL Editor with the Auth user's UUID:
 

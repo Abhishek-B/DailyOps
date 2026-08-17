@@ -577,8 +577,9 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
         <div class="auth-loading" id="auth-loading">Checking your DailyOps session…</div>
         <div class="auth-error auth-status" id="auth-status" hidden></div>
         <form id="login-form" class="stack" style="gap:14px" hidden>
-          <div class="field"><label class="label" for="login-email">Email</label>
-            <input class="input" id="login-email" type="email" autocomplete="email" required></div>
+          <div class="field"><label class="label" for="login-username">Username</label>
+            <input class="input" id="login-username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+            <span class="hint">Existing administrators can also use their full email address.</span></div>
           <div class="field"><label class="label" for="login-password">Password</label>
             <input class="input" id="login-password" type="password" autocomplete="current-password" required></div>
           <div class="auth-error" id="auth-error" hidden></div>
@@ -749,6 +750,19 @@ const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 const uid = (p = 'id') => p + '_' + Math.random().toString(36).slice(2, 9);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
+const USERNAME_AUTH_DOMAIN = 'email.com';
+const USERNAME_PATTERN = /^[a-z0-9._-]+$/;
+
+function usernameToAuthEmail(identifier) {
+  const value = String(identifier == null ? '' : identifier).trim();
+  if (!value) throw new Error('Enter your username.');
+  if (value.includes('@')) return value;
+  const username = value.toLowerCase();
+  if (username.length > 64 || !USERNAME_PATTERN.test(username)) {
+    throw new Error('Use only letters, numbers, dots, underscores or hyphens in your username.');
+  }
+  return `${username}@${USERNAME_AUTH_DOMAIN}`;
+}
 
 const dayKey = d => { const x = d || new Date(); return `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,'0')}-${String(x.getDate()).padStart(2,'0')}`; };
 const parseKey = k => { const [y,m,d] = k.split('-').map(Number); return new Date(y, m-1, d); };
@@ -5762,7 +5776,7 @@ function handleAct(act, ds) {
       openCopyTemplate(); break;
     }
     case 'reset-day': {
-      if (isSupabaseMode()) { toast('Resetting live Supabase operations is deferred in this phase.', 'warn'); break; }
+      if (isSupabaseMode()) { openSupabaseResetConfirmation(); break; }
       confirmModal(`Reset today at ${V().name}?`, 'Both lists go back to the template with nothing ticked. Other venues and all history are untouched.', 'Reset today', () => {
         const roster = DAYS()[dayKey()].roster;
         DAYS()[dayKey()] = makeDay(dayKey(), roster, V().id);
@@ -5817,6 +5831,80 @@ async function saveSupabaseVenueCutoff(value) {
   } finally {
     REMOTE_MUTATIONS.delete(lockKey);
   }
+}
+
+async function resetSupabaseTodayOperations() {
+  if (!isSupabaseMode() || !DB || !isMgr()) return false;
+  const context = V();
+  const lockKey = 'reset-today:' + context.realId;
+  if (REMOTE_MUTATIONS.has(lockKey)) return false;
+  REMOTE_MUTATIONS.add(lockKey);
+  let resetCompleted = false;
+  try {
+    const result = await DB.rpc('reset_today_operations', {
+      p_venue_id: context.realId
+    });
+    if (result.error) throw result.error;
+    resetCompleted = true;
+    await loadSupabaseToday();
+    render();
+    syncSupabaseRealtimeForCurrentView();
+    toast(`Today's Opening and Closing Shifts reset for ${context.name}`, 'ok');
+    return true;
+  } catch (error) {
+    console.error('[supabase] reset today operations failed', {
+      venueId: context.realId,
+      error
+    });
+    render();
+    toast(
+      resetCompleted
+        ? 'Today was reset, but the refreshed data could not be loaded. Please refresh.'
+        : 'Could not reset today\'s operations. No changes were applied.',
+      'warn'
+    );
+    return false;
+  } finally {
+    REMOTE_MUTATIONS.delete(lockKey);
+  }
+}
+
+function openSupabaseResetConfirmation() {
+  if (!isSupabaseMode() || !isMgr()) {
+    toast('Only a venue manager can reset today\'s operations.', 'warn');
+    return;
+  }
+  const context = V();
+  openModal(`
+    <div class="modal-head"><div style="flex:1">
+      <div class="modal-title">Reset today at ${esc(context.name)}?</div>
+      <div class="modal-sub">This is a destructive reset for both shifts.</div>
+    </div><button class="iconbtn" data-x="cancel" aria-label="Close">${ic('x', 18)}</button></div>
+    <div class="modal-body">
+      <div class="banner banner-warn">${ic('warn', 17)}<div>
+        <b>All current-day progress will be discarded.</b> Opening and Closing Shift tasks will be rebuilt from the current active templates. One-off tasks, notes, reasons, completion details, submitted state and reopen details will be removed. Historical Telegram audit records will be kept. This cannot be undone.
+      </div></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-x="cancel">Cancel</button>
+      <button class="btn btn-danger" data-x="reset">Reset both shifts</button>
+    </div>`, {
+    after(root) {
+      root.querySelectorAll('[data-x=cancel]').forEach(button => button.onclick = closeModal);
+      root.querySelector('[data-x=reset]').onclick = async () => {
+        const resetButton = root.querySelector('[data-x=reset]');
+        const cancelButtons = root.querySelectorAll('[data-x=cancel]');
+        resetButton.disabled = true;
+        resetButton.textContent = 'Resetting…';
+        cancelButtons.forEach(button => { button.disabled = true; });
+        try {
+          await resetSupabaseTodayOperations();
+        } finally {
+          closeModal();
+        }
+      };
+    }
+  });
 }
 
 $('#app').addEventListener('click', e => {
@@ -6028,19 +6116,27 @@ async function signIn(event) {
   const button = $('#login-submit');
   button.disabled = true;
   showAuthError('');
-  const email = $('#login-email').value.trim();
+  const identifier = $('#login-username').value;
   const password = $('#login-password').value;
+  let email;
+  try {
+    email = usernameToAuthEmail(identifier);
+  } catch (validationError) {
+    button.disabled = false;
+    showAuthError(validationError.message);
+    return;
+  }
   let data, error;
   try {
     ({ data, error } = await DB.auth.signInWithPassword({ email, password }));
   } catch (authError) {
     button.disabled = false;
-    showAuthError(dbError(authError));
+    showAuthError('Could not sign in. Check your username, password and connection, then try again.');
     return;
   }
   if (error) {
     button.disabled = false;
-    showAuthError(error.message);
+    showAuthError('Invalid username or password.');
     return;
   }
   if (!data.session) {

@@ -21,6 +21,8 @@ Browser on GitHub Pages
 
 `index.html` keeps the rendering and interaction model while using Supabase for identity, organisation membership, venue access, organisation-wide manager team visibility, weekly cross-venue roster planning, recurring templates, today's operational instances, historical review, reporting metrics, CSV export, and scoped current-day Realtime synchronisation. The configured public URL/key selects this path; placeholders select demo mode.
 
+Authentication remains Supabase email/password internally. The frontend presents a username-first form and maps a username such as `jsmith` to `jsmith@email.com` through one `USERNAME_AUTH_DOMAIN` constant. Identifiers containing `@` remain compatible with existing administrator/test email accounts.
+
 ## Core relational model
 
 Organisation
@@ -75,6 +77,7 @@ Server-side notifications
 - `end-of-day` is invoked by Supabase Cron, applies each venue's IANA timezone/cutoff, and records one idempotent summary event per venue/date/recipient
 - a database-managed `daily_checklists.notification_revision` distinguishes first submission from resubmission after reopen; browser callers cannot choose the revision
 - a database trigger allows only active platform admins to change `venues.cutoff_time` or `venues.timezone`, while preserving other permitted manager venue updates
+- `reset_today_operations(uuid)` is a SECURITY DEFINER RPC that checks `can_manage_venue`, calculates the venue-local date, rebuilds both current-day operation snapshots from active templates in one transaction, and advances notification revisions without sending notifications
 
 Historical operations and CSV
 - query recent prior daily operation instances for the selected venue
@@ -90,11 +93,13 @@ Live operational synchronisation
 
 ## Authorization boundary
 
-The browser key is publishable. RLS policies use the signed-in Auth UUID, organisation memberships, venue memberships, active profiles, and the platform-admin helper to decide access. Ordinary managers inherit access to all venues in their organisation; active platform admins inherit management access across organisations; employees require an active venue membership. Managers can administer members, profiles, venue memberships, and rosters only within managed organisations/venues. Migrations 006 and 007 narrow venue-membership reads and require manager-created memberships/rosters to stay within the target organisation; migration 008 records the authenticated helper grant required for manager profile updates; migration 009 makes the active platform-admin capability explicit in RLS; migration 010 scopes cover-request alerts to managed venues; migration 011 only adds the three live operational tables to the standard Realtime publication and does not broaden RLS; migration 015 adds only the service-role reads needed by server-side notification validation and the cutoff trigger. Disabling a profile or removing venue access clears future roster assignments but preserves historical rows and attribution. The browser does not create Auth users or yet assign unassociated Auth users to an organisation by email. That workflow is intentionally deferred to a manager-scoped Edge Function or narrowly scoped SECURITY DEFINER RPC. Database triggers prevent employees from changing task definition fields, attributing a completion to another user, selecting a notification revision, or changing protected venue timing settings.
+The browser key is publishable. RLS policies use the signed-in Auth UUID, organisation memberships, venue memberships, active profiles, and the platform-admin helper to decide access. Ordinary managers inherit access to all venues in their organisation; active platform admins inherit management access across organisations; employees require an active venue membership. Managers can administer members, profiles, venue memberships, and rosters only within managed organisations/venues. Migrations 006 and 007 narrow venue-membership reads and require manager-created memberships/rosters to stay within the target organisation; migration 008 records the authenticated helper grant required for manager profile updates; migration 009 makes the active platform-admin capability explicit in RLS; migration 010 scopes cover-request alerts to managed venues; migration 011 only adds the three live operational tables to the standard Realtime publication and does not broaden RLS; migration 015 adds only the service-role reads needed by server-side notification validation and the cutoff trigger; migration 017 exposes only the authenticated, venue-manager-authorised Reset Today RPC. Disabling a profile or removing venue access clears future roster assignments but preserves historical rows and attribution. The browser does not create Auth users or yet assign unassociated Auth users to an organisation by email. That workflow is intentionally deferred to a manager-scoped Edge Function or narrowly scoped SECURITY DEFINER RPC. Database triggers prevent employees from changing task definition fields, attributing a completion to another user, selecting a notification revision, or changing protected venue timing settings.
 
 ## Snapshot invariant
 
 `ensure_daily_checklists(venue_id, work_date)` is a legacy-named database helper. It creates an open and/or close daily operation instance only when an active Supabase template exists and copies template tasks, including their stable IDs, only when the instance is first created. Later template edits do not change existing daily tasks. The frontend's explicit re-apply action only adds missing routine snapshots and never resets existing state or one-off tasks.
+
+Reset Today is intentionally different from re-apply: the manager-only reset RPC discards the current task snapshots and rebuilds both shifts from the current active templates. It preserves each daily operation ID, advances `notification_revision`, and retains `notification_events` so a later submission has a new idempotency identity.
 
 The current `checklist_type` enum is intentionally retained for the deployed `open`/`close` data model. A future operation-section migration should be additive and backward compatible when sections such as Mid Shift, Kitchen Opening, Bar Opening, FOH Opening, Cleaning, or Maintenance become product requirements; this cleanup does not introduce that migration.
 
