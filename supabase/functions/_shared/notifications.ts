@@ -6,20 +6,22 @@ export type NotificationClaim = {
   venueName: string | null;
   workDate: string | null;
   listType: "open" | "close" | null;
-  kind: "list-complete" | "end-of-day";
+  kind: "list-complete" | "end-of-day" | "test";
+  recipientProfileId: string | null;
   recipient: string | null;
   subject: string;
   bodyText: string;
 };
 
 export async function claimNotification(db: AdminDb, input: NotificationClaim) {
-  const { data, error } = await db.rpc("claim_notification_event", {
+  const { data, error } = await db.rpc("claim_telegram_notification_event", {
     p_idempotency_key: input.idempotencyKey,
     p_venue_id: input.venueId,
     p_venue_name: input.venueName,
     p_work_date: input.workDate,
     p_list_type: input.listType,
     p_kind: input.kind,
+    p_recipient_profile_id: input.recipientProfileId,
     p_recipient: input.recipient,
     p_subject: input.subject,
     p_body_text: input.bodyText,
@@ -63,41 +65,43 @@ export async function failNotification(
   if (error) throw error;
 }
 
-export async function sendEmail(input: {
-  to: string;
-  subject: string;
+export async function sendTelegramMessage(input: {
+  chatId: string;
   text: string;
-  html: string;
-  idempotencyKey: string;
 }) {
-  const apiKey = Deno.env.get("RESEND_API_KEY");
-  const fromEmail = Deno.env.get("RESEND_FROM_EMAIL");
-  if (!apiKey || !fromEmail) throw new Error("Resend is not configured");
-  const fromName = Deno.env.get("RESEND_FROM_NAME");
-  const from = fromName ? `${fromName} <${fromEmail}>` : fromEmail;
-  const response = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "Idempotency-Key": input.idempotencyKey,
+  const botToken = Deno.env.get("TELEGRAM_BOT_TOKEN");
+  if (!botToken) throw new Error("Telegram is not configured");
+  const text = input.text.length > 3900
+    ? `${input.text.slice(0, 3880)}\n… message truncated`
+    : input.text;
+  const response = await fetch(
+    `https://api.telegram.org/bot${botToken}/sendMessage`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        chat_id: input.chatId,
+        text,
+        disable_web_page_preview: true,
+      }),
     },
-    body: JSON.stringify({
-      from,
-      to: [input.to],
-      subject: input.subject,
-      text: input.text,
-      html: input.html,
-    }),
-  });
+  );
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const detail = typeof payload?.message === "string"
+  if (!response.ok || payload?.ok !== true) {
+    const detail = typeof payload?.description === "string"
+      ? payload.description
+      : typeof payload?.message === "string"
       ? payload.message
-      : `provider returned HTTP ${response.status}`;
-    throw new Error(`Resend delivery failed: ${detail}`);
+      : `Telegram returned HTTP ${response.status}`;
+    const safeDetail = String(detail).replaceAll(botToken, "[redacted]");
+    throw new Error(`Telegram delivery failed: ${safeDetail}`);
   }
-  return typeof payload?.id === "string" ? payload.id : null;
+  const messageId = payload?.result?.message_id;
+  return messageId === undefined || messageId === null
+    ? null
+    : String(messageId);
 }
 
 export function escapeHtml(value: unknown) {

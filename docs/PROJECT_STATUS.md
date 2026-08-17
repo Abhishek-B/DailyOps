@@ -29,7 +29,7 @@ The current `checklist_type` enum contains `open` and `close`. The frontend pres
 - Database: Supabase Postgres.
 - Authorisation: Postgres Row Level Security and deployed helper functions.
 - Live synchronisation: Supabase Realtime for the selected venue and current operation date, with authoritative Supabase refetches after relevant row changes.
-- Supabase Edge Functions and Supabase Cron now provide server-side email notifications and end-of-day processing.
+- Supabase Edge Functions and Supabase Cron now provide server-side Telegram notifications and end-of-day processing.
 
 Production URL:
 
@@ -63,13 +63,14 @@ The deployed initial schema currently contains these important public tables:
 - `daily_tasks`: snapshot task instances belonging to a dated operation; stores definition, status, completion attribution/time, notes, and incomplete reasons.
 - `roster_assignments`: dated venue and shift assignments using the legacy `shift_type` field.
 - `shift_cover_requests`: employee-confirmed current-shift cover notifications for managers; delivery is currently in-app only.
-- `notification_events`: server-side email delivery audit rows for shift-complete and end-of-day events, including idempotency, retry state, provider ID, and failure detail.
+- `notification_events`: server-side Telegram delivery audit rows for shift-complete and end-of-day events, including recipient profile, idempotency, retry state, provider ID, and failure detail. Telegram Chat IDs are not copied into audit rows.
+- `venue_notification_recipients`: venue-scoped Telegram Chat IDs linked to active manager/platform-admin profiles, with independent enabled, Shift Complete, and End of Day preferences.
 
 Important deployed enums include `app_role` (`manager`, `employee`), `checklist_type` (`open`, `close`), `task_status` (`pending`, `done`, `blocked`, `na`, `skipped`), `task_source` (`template`, `adhoc`), and `platform_role` (`user`, `admin`).
 
 The schema also contains SECURITY DEFINER access helpers, task/checklist update guards, and `ensure_daily_checklists(uuid, date)`. These helpers and guards remain part of the RLS boundary and are not renamed by this cleanup.
 
-Migration history currently consists of `001_initial_schema.sql`, `002_add_platform_role.sql`, `003_grant_helper_function_execute.sql`, `004_grant_can_update_task_execute.sql`, `005_allow_managers_delete_adhoc_daily_tasks.sql`, `006_restrict_venue_member_reads.sql`, `007_scope_team_and_roster_writes.sql`, `008_grant_can_manage_profile_execute.sql`, `009_platform_admin_access.sql`, `010_add_shift_cover_requests.sql`, `011_enable_daily_operations_realtime.sql`, and `012_add_notification_delivery_and_timezone.sql`. Already-applied schema migrations remain immutable.
+Migration history currently consists of `001_initial_schema.sql`, `002_add_platform_role.sql`, `003_grant_helper_function_execute.sql`, `004_grant_can_update_task_execute.sql`, `005_allow_managers_delete_adhoc_daily_tasks.sql`, `006_restrict_venue_member_reads.sql`, `007_scope_team_and_roster_writes.sql`, `008_grant_can_manage_profile_execute.sql`, `009_platform_admin_access.sql`, `010_add_shift_cover_requests.sql`, `011_enable_daily_operations_realtime.sql`, `012_add_notification_delivery_and_timezone.sql`, and `013_add_telegram_notification_recipients.sql`. Already-applied schema migrations remain immutable.
 
 Migration `012_add_notification_delivery_and_timezone.sql` adds an IANA `venues.timezone` field (existing venues default to `Australia/Sydney`), notification event idempotency/retry/audit fields, and service-role-only claim/finalize/fail functions. It does not add browser write access to `notification_events` or broaden RLS.
 
@@ -82,6 +83,8 @@ Migration `008_grant_can_manage_profile_execute.sql` grants authenticated EXECUT
 Migration `009_platform_admin_access.sql` keeps `platform_role` separate from the organisation operating role while allowing an active platform admin to administer all organisations and venues through the existing helper functions and RLS policies. Ordinary users still require an active `organisation_members` manager membership for management access.
 
 Migration `010_add_shift_cover_requests.sql` stores an employee's confirmed current-shift cover request and gives managers a venue-scoped in-app alert. It does not send email/SMS and does not add a manager approval step.
+
+Migration `013_add_telegram_notification_recipients.sql` adds venue-scoped Telegram recipient configuration, manager/platform-admin-only RLS, the `telegram` notification channel, and a service-role-only per-recipient claim function. It preserves legacy email/SMS columns and audit rows without using them for active production delivery.
 
 ## 6. What is live/real today
 
@@ -129,10 +132,11 @@ Migration `010_add_shift_cover_requests.sql` stores an employee's confirmed curr
 - Realtime Opening/Closing Shift submission and reopening state from `daily_checklists`.
 - Realtime current-day roster updates from `roster_assignments`, including manager counts and employee roster context where the current view uses them.
 - Realtime channel cleanup on venue/tab/session changes, with normal query loading retained as the fallback when a channel disconnects. A small selected-venue/day refetch timer also catches deletes, because Postgres Changes cannot column-filter delete events without broadening the subscription scope.
-- Server-side shift-complete email delivery through `notify-manager`, with venue-derived manager recipients and authenticated checklist visibility checks.
-- Idempotent notification event claiming/finalization/failure recording in `notification_events`, with a bounded retry path and provider message IDs.
-- Supabase Cron-compatible `end-of-day` Edge Function that evaluates each venue in its configured IANA timezone after its cutoff and sends a stored-operation summary.
-- Manager Alerts delivery status for server-sent, pending, and failed email events. The browser no longer treats the local notification stub as production data.
+- Server-side shift-complete Telegram delivery through `notify-manager`, with authenticated checklist visibility checks and venue-derived recipient Chat IDs.
+- Venue-scoped Telegram recipient management for active managers/platform admins, with independent Shift Complete and End of Day preferences.
+- Idempotent notification event claiming/finalization/failure recording per recipient in `notification_events`, with a bounded retry path and Telegram message IDs.
+- Supabase Cron-compatible `end-of-day` Edge Function that evaluates each venue in its configured IANA timezone after its cutoff and sends a stored-operation Telegram summary to each enabled recipient.
+- Manager Alerts delivery status for server-sent, pending, and failed Telegram events. The browser no longer treats the local notification stub as production data.
 
 ## 7. What is still local/demo/deferred
 
@@ -146,7 +150,7 @@ Migration `010_add_shift_cover_requests.sql` stores an employee's confirmed curr
 
 **DEFERRED**
 
-- SMS, push notifications, and cover-request email delivery.
+- SMS, push notifications, email fallback, and cover-request email delivery.
 - Automated Auth-user invitation/creation, email-based assignment of an existing Auth user to an organisation, and organisation-role editing. MVP onboarding creates Auth users manually in the Supabase dashboard and then bootstraps `organisation_members` with the Team screen instructions. The missing email-based assignment flow is intentionally deferred to a manager-scoped Edge Function or narrowly scoped SECURITY DEFINER RPC; it must never use a service-role key in the browser.
 - Realtime cover alerts and manager push notifications. The current cover flow is an in-app database-backed alert only.
 - Offline/PWA support and evidence/photo attachments.
@@ -171,7 +175,7 @@ Steps 1–14 are complete, with the organisation-wide team, weekly roster, histo
 14. Combined multi-organisation Team visibility and cross-organisation roster planning for managers with multiple manager memberships and platform admins.
 15. Supabase-backed historical Daily Operations, read-only historical shift/task review, profile attribution, manager reporting metrics, and manual CSV export.
 16. Supabase Realtime for selected-venue/current-day tasks, shift submission state, and roster changes, using scoped channels and authoritative refetches.
-17. Supabase Edge Functions/Resend shift-complete email delivery, idempotent notification audit state, timezone-aware scheduled end-of-day summaries, and manager delivery-status Alerts.
+17. Supabase Edge Functions/Telegram shift-complete delivery, venue-scoped recipient configuration, idempotent notification audit state, timezone-aware scheduled end-of-day summaries, and manager delivery-status Alerts.
 
 The repository does not use a separate generated milestone registry; this list reflects the current project history and implementation state.
 
@@ -192,9 +196,9 @@ The repository does not use a separate generated milestone registry; this list r
 - Migration `007_scope_team_and_roster_writes.sql` prevents cross-organisation venue membership/roster writes through raw browser requests.
 - Migration `008_grant_can_manage_profile_execute.sql` records the required authenticated EXECUTE grant for manager profile updates.
 - Realtime is scoped to the selected venue and current operation date. Notification delivery is server-side and not part of the Realtime channel; the browser retains normal query loading if a realtime channel disconnects.
-- Edge Functions and Cron must be deployed/configured separately from GitHub Pages. The repository cannot prove provider/domain secrets or Cron health until the manual Supabase setup is completed.
+- Edge Functions and Cron must be deployed/configured separately from GitHub Pages. The repository cannot prove Telegram bot secrets or Cron health until the manual Supabase setup is completed.
 - Shift-complete requests are initiated by the successful frontend task write and then revalidated server-side. A direct external database write that bypasses the frontend will not create a notification event until a database webhook/outbox integration is added.
-- The first EOD processor reports existing daily operation rows. It does not create an empty operation solely to send an email when nobody has opened that venue/date yet.
+- The first EOD processor reports existing daily operation rows. It does not create an empty operation solely to send a Telegram report when nobody has opened that venue/date yet.
 - Automated notifications are capped at five attempts per event. A permanently failed event requires operator review/repair before another retry path is introduced.
 - Shift-cover requests currently use two client writes: the employee roster assignment and the notification row. If the first write succeeds and the second fails, the UI reports the failure and the manager should verify the assignment before retrying.
 - RLS helper EXECUTE grants were initially missing in the live project and were corrected in migrations `003_grant_helper_function_execute.sql` and `004_grant_can_update_task_execute.sql`. The one-off delete capability is isolated in `005_allow_managers_delete_adhoc_daily_tasks.sql`. Keep these grants/policies and verify them when provisioning another Supabase project.
@@ -248,13 +252,14 @@ The exact local origin must be allowed in Supabase Authentication URL Configurat
 
 ### Step 14 notification/EOD setup and test
 
-1. Apply migration `012_add_notification_delivery_and_timezone.sql` after `011`.
-2. Deploy `notify-manager` and `end-of-day` from `supabase/functions/`, then configure `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, optional `RESEND_FROM_NAME`, and a long random `DAILYOPS_CRON_SECRET` as Edge Function secrets. The exact CLI commands and Resend/domain setup are in the README.
-3. Verify the Resend sender domain, enable `pg_cron`, `pg_net`, and Vault, and create the single `dailyops-end-of-day` Cron job. The job invokes the function every 15 minutes; the function applies each venue's IANA timezone and cutoff.
-4. Complete all tasks in a test shift. Confirm one `list-complete` email, one `sent` audit row, and `daily_checklists.complete_notified = true`. Repeat from two browser clients and confirm no duplicate event/email.
-5. Set a temporary cutoff shortly ahead, wait for Cron, and confirm one `end-of-day` event/email. Run Cron again and confirm no resend.
-6. Break the Resend secret temporarily, confirm `failed` plus `error_message`, restore it, and confirm a safe retry before the five-attempt cap.
-7. Confirm an employee cannot invoke the function with another inaccessible checklist or choose a recipient, and confirm no provider/service key appears in browser source or network requests.
+1. Apply migrations `012_add_notification_delivery_and_timezone.sql` and `013_add_telegram_notification_recipients.sql` in that order.
+2. Create one Telegram bot with BotFather, deploy both Edge Functions, and configure `TELEGRAM_BOT_TOKEN` and a long random `DAILYOPS_CRON_SECRET` as Edge Function secrets. The exact commands and recipient workflow are in the README.
+3. Enable `pg_cron`, `pg_net`, and Vault, and create the single `dailyops-end-of-day` Cron job. The job invokes the function every 15 minutes; the function applies each venue's IANA timezone and cutoff.
+4. Have the first recipient open the bot and press Start, retrieve their Chat ID through a trusted admin workflow, and add it under manager Settings. Confirm the recipient row persists after refresh.
+5. Use the recipient Test button. Confirm one `test` event/message. Complete all tasks in a test shift and confirm one `list-complete` event/message per enabled recipient. Repeat from two browser clients and confirm no duplicate event/message.
+6. Set a temporary cutoff shortly ahead, wait for Cron, and confirm one `end-of-day` event/message per enabled recipient. Run Cron again and confirm it does not send again.
+7. Break a test Chat ID or use a recipient who has not started the bot. Confirm `failed` plus `error_message`, while valid recipients continue receiving messages. Fix the recipient and retry before the five-attempt cap.
+8. Confirm an employee cannot invoke the test path, read recipient Chat IDs, or choose an arbitrary destination, and confirm no bot/service key appears in browser source or network requests.
 
 ## 13. Deployment
 

@@ -14,10 +14,10 @@
 - Realtime completion updates (implemented for the selected venue/current date)
 
 ## Notifications
-- Immediate manager email when a shift is fully complete (implemented through `notify-manager` + Resend)
-- Scheduled venue end-of-day report (implemented through `end-of-day` + Supabase Cron)
-- Manager delivery audit/status in the Alerts page (implemented)
-- Optional CSV attachment, SMS, push, and cover-request email delivery
+- Immediate Telegram messages when a shift is fully complete, with per-venue recipients (implemented through `notify-manager`)
+- Scheduled venue end-of-day Telegram report (implemented through `end-of-day` + Supabase Cron)
+- Manager Telegram recipient configuration and delivery audit/status in the Alerts page (implemented)
+- SMS, push, email fallback, optional CSV attachment, and cover-request email delivery
 
 ## Later
 - CSV roster importer UI

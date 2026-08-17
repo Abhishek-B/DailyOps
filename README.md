@@ -23,7 +23,7 @@ Supabase currently supplies authentication, organisation/venue identity, team me
 - prior venue operation days, read-only historical shift/task review, Supabase-backed summary metrics, and client-side CSV export from stored daily snapshots.
 - live current-venue/current-date task, shift-submission, and roster updates through Supabase Realtime; the client refetches authorised rows after each relevant change.
 
-Shift-complete and scheduled end-of-day email delivery now run through Supabase Edge Functions and Resend. The old simulated notification inbox remains localStorage-backed only when `DEMO_MODE: true`; production defaults to Supabase mode.
+Shift-complete and scheduled end-of-day Telegram delivery now run through Supabase Edge Functions and Supabase Cron. The old simulated notification inbox remains localStorage-backed only when `DEMO_MODE: true`; production defaults to Supabase mode.
 
 ## Supabase frontend auth setup
 
@@ -93,11 +93,13 @@ If the migration reports that `supabase_realtime` is not present, open **Supabas
 
 The browser subscribes only to the selected venue and today's two operation IDs. An event triggers an authoritative Supabase refetch, and the channel is removed when the venue, tab, session, or access context changes. A small selected-venue/day refetch timer covers deletion events, which cannot be column-filtered by Postgres Changes without broadening the subscription. Realtime is not used for notifications or historical/template screens in this phase.
 
-## Supabase production notifications and scheduled EOD
+## Supabase production Telegram notifications and scheduled EOD
 
-Apply [`supabase/migrations/012_add_notification_delivery_and_timezone.sql`](supabase/migrations/012_add_notification_delivery_and_timezone.sql) after migrations `001` through `011`. It adds venue IANA `timezone` (existing venues default to `Australia/Sydney`), notification idempotency/audit fields, and service-role-only claim/finalize/fail functions. It does not add browser write access to `notification_events`.
+Apply [`supabase/migrations/012_add_notification_delivery_and_timezone.sql`](supabase/migrations/012_add_notification_delivery_and_timezone.sql), then [`supabase/migrations/013_add_telegram_notification_recipients.sql`](supabase/migrations/013_add_telegram_notification_recipients.sql), after migrations `001` through `011`.
 
-The Edge Functions are [`notify-manager`](supabase/functions/notify-manager/index.ts) for authenticated shift-complete requests and [`end-of-day`](supabase/functions/end-of-day/index.ts) for the scheduled cutoff processor. Both use the shared server-side Resend code. The browser sends only a visible checklist ID; the function derives the venue, manager email, task state, and message from Supabase.
+Migration 012 adds venue IANA `timezone` (existing venues default to `Australia/Sydney`), notification retry/idempotency fields, and service-role-only claim/finalize/fail functions. Migration 013 adds the venue-scoped `venue_notification_recipients` table, recipient RLS, the `telegram` audit channel, and per-recipient claim/idempotency support. Chat IDs are not stored in `notification_events`.
+
+The Edge Functions are [`notify-manager`](supabase/functions/notify-manager/index.ts) for authenticated shift-complete/test requests and [`end-of-day`](supabase/functions/end-of-day/index.ts) for the scheduled cutoff processor. Both resolve recipients from Supabase and use the shared Telegram sender. The browser sends only a visible checklist ID or configured recipient record ID; it never sends a Chat ID, bot token, recipient destination, or notification body.
 
 ### Deploy functions and set secrets
 
@@ -109,18 +111,47 @@ supabase link --project-ref zwebxycbrfwtlmqwxwwe
 supabase functions deploy notify-manager --project-ref zwebxycbrfwtlmqwxwwe
 supabase functions deploy end-of-day --project-ref zwebxycbrfwtlmqwxwwe
 supabase secrets set \
-  RESEND_API_KEY=re_your_key \
-  RESEND_FROM_EMAIL=ops@your-verified-domain.example \
-  RESEND_FROM_NAME=DailyOps \
+  TELEGRAM_BOT_TOKEN=replace-with-the-token-from-BotFather \
   DAILYOPS_CRON_SECRET=replace-with-a-long-random-secret \
   --project-ref zwebxycbrfwtlmqwxwwe
 ```
 
 Use the real values only in the command or Supabase Edge Function Secrets UI. Never commit them, place them in `supabase/config.js`, or put them in `index.html`. The Supabase service-role/secret key is automatically available to Edge Functions and is not required in the repository.
 
-### Configure Resend
+### Configure Telegram
 
-Create a Resend account, add and verify the sending domain under **Resend → Domains**, and use an address on that verified domain for `RESEND_FROM_EMAIL`. A test sender such as `onboarding@resend.dev` is suitable only for Resend's permitted test recipients. The function sends text and HTML summaries; CSV attachments are intentionally deferred.
+1. Open Telegram and message **@BotFather**.
+2. Create one bot for DailyOps and copy the token once.
+3. Store that token only as the `TELEGRAM_BOT_TOKEN` Supabase Edge Function secret.
+4. Give authorised recipients the bot username. Each recipient must open the bot and press **Start** before messages can be delivered.
+5. Retrieve each recipient's Telegram Chat ID through a trusted admin workflow, then add it in **Settings → Telegram recipients**. DailyOps does not automatically process `/start` messages or ask for the bot token.
+
+One bot can send to many venue recipients. Each recipient is linked to an existing DailyOps profile and has independent Shift Complete and End of Day switches. A global `TELEGRAM_CHAT_ID` is not used.
+
+The recipient table can also be populated by a trusted SQL administrator if necessary:
+
+```sql
+insert into public.venue_notification_recipients (
+  venue_id,
+  profile_id,
+  telegram_chat_id,
+  enabled,
+  notify_shift_complete,
+  notify_end_of_day,
+  created_by
+)
+values (
+  'YOUR_VENUE_UUID',
+  'YOUR_MANAGER_PROFILE_UUID',
+  'YOUR_TELEGRAM_CHAT_ID',
+  true,
+  true,
+  true,
+  'YOUR_ADMIN_PROFILE_UUID'
+);
+```
+
+Chat IDs belong in this protected table only. Do not put them in frontend configuration, localStorage, Git, or `notification_events`.
 
 ### Create the Cron job
 
@@ -150,11 +181,12 @@ If the job already exists, run `select cron.unschedule('dailyops-end-of-day');` 
 
 ### Test safely
 
-1. Apply migration 012, deploy both functions, configure a verified test sender/recipient in `venues.manager_email`, and set `notify_complete = true`, `notify_end_of_day = true`, and `email_enabled = true`.
-2. Complete every task in one shift. Confirm one `list-complete` row becomes `sent` in `notification_events` and exactly one email arrives. Repeat the browser action or use two clients; the idempotency key must prevent a second email.
-3. Set a temporary venue `cutoff_time` a few minutes ahead, wait for the 15-minute schedule, and confirm one `end-of-day` row and email. Re-run the Cron job and confirm it does not send again.
-4. Temporarily set an invalid `RESEND_API_KEY`, run the function, and confirm a `failed` event with `error_message`; restore the key and retry before the five-attempt cap.
-5. Open Alerts in the manager UI to see sent, pending, and failed delivery status. Employees cannot query manager notification events through the existing RLS policy and cannot supply an arbitrary recipient.
+1. Apply migrations 012 and 013, deploy both functions, add your own Telegram Chat ID under Settings, and set `notify_complete = true` and `notify_end_of_day = true` for the venue.
+2. Use the recipient's **Test** button. Confirm the fixed Telegram test message arrives and a `test` row becomes `sent` in `notification_events`.
+3. Complete every task in one shift. Confirm one `list-complete` row per enabled recipient becomes `sent` and exactly one Telegram message arrives per recipient. Repeat the browser action or use two clients; the per-recipient idempotency key must prevent duplicates.
+4. Set a temporary venue `cutoff_time` a few minutes ahead, wait for the 15-minute schedule, and confirm one `end-of-day` row/message per enabled recipient. Re-run Cron and confirm it does not send again.
+5. Temporarily use an invalid Chat ID or disable/start-state for one recipient. Confirm that recipient has a `failed` event while valid recipients still receive their messages. Fix the recipient and retry before the five-attempt cap.
+6. Open Alerts in the manager UI to see Telegram sent, pending, and failed delivery status. Employees cannot query manager notification events or recipient Chat IDs through the existing RLS policies.
 
 To test locally, open the app with VS Code Live Server in two browser contexts, sign in with users who can access the same venue, and follow the two-client test sequence in `docs/PROJECT_STATUS.md`. A refresh remains a valid recovery path if a browser sleeps or loses its connection.
 

@@ -652,7 +652,7 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
    REAL NOW: auth, profile, organisation role, platform-admin access, venues, team membership,
    venue access, weekly roster planning, employee weekly roster, cover requests, recurring shift templates,
    today's and historical shift operations, today's and historical task status, reporting, CSV export,
-   and production email notification audit rows are loaded from Supabase.
+   Telegram notification recipients and production Telegram delivery audit rows are loaded from Supabase.
    DEMO/LOCAL STILL: the simulated notification inbox/delivery remains local only in explicit demo mode.
    Sections: icons · utils · store/seed · notifier · render · actions · init
    ========================================================================== */
@@ -682,6 +682,7 @@ let SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows:
 let SUPABASE_MY_ROSTER_WEEK = { start: null, end: null, rows: [], loading: false, error: null };
 let SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
 let SUPABASE_NOTIFICATIONS = { rows: [], loading: false, error: null };
+let SUPABASE_NOTIFICATION_RECIPIENTS = { venueId: null, rows: [], eligibleProfiles: [], loading: false, error: null };
 let SUPABASE_HISTORY = { venueId: null, days: [], profilesById: {}, loading: false, error: null, selectedDate: null };
 let SUPABASE_REALTIME = {
   channel: null,
@@ -778,7 +779,7 @@ const REASONS = {
    today's and historical daily-operation/shift-task instances, reporting, and CSV export.
    Team membership, venue membership, weekly roster planning, employee weekly roster,
    today's roster, and shift-cover requests are also real Supabase data.
-   Production email delivery and audit status are server-side Edge Function/Cron data;
+   Production Telegram delivery and audit status are server-side Edge Function/Cron data;
    the simulated notification inbox/delivery remains explicitly local/demo data.
    ========================================================================== */
 
@@ -1615,6 +1616,7 @@ async function selectOrganisation(id) {
     if (R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart, true);
     if (R.tab === 'history' && isMgr()) loadSupabaseHistory(true);
     if (isMgr()) loadSupabaseCoverRequests();
+    if (isMgr()) loadSupabaseNotificationRecipients();
     toast(`Viewing ${nextOrganisationId ? organisationName(nextOrganisationId) : 'all organisations'}`, 'ok');
   } catch (error) {
     AUTH.selectedOrganisationId = previousOrganisationId;
@@ -1976,7 +1978,7 @@ async function loadSupabaseNotifications() {
   render();
   try {
     const result = await DB.from('notification_events')
-      .select('id,venue_id,venue_name,work_date,list_type,kind,channel,recipient,subject,body_text,delivery_status,provider_message_id,error_message,created_at,sent_at,updated_at')
+      .select('id,venue_id,venue_name,work_date,list_type,kind,channel,recipient,recipient_profile_id,subject,body_text,delivery_status,provider_message_id,error_message,created_at,sent_at,updated_at')
       .order('created_at', { ascending: false })
       .limit(50);
     if (result.error) throw result.error;
@@ -1990,6 +1992,7 @@ async function loadSupabaseNotifications() {
         kind: row.kind,
         channel: row.channel,
         to: row.recipient || '',
+        recipientProfileId: row.recipient_profile_id,
         subject: row.subject || 'DailyOps notification',
         text: row.body_text || '',
         html: '',
@@ -2009,10 +2012,197 @@ async function loadSupabaseNotifications() {
     console.error('[supabase] notification event load failed', { error });
     SUPABASE_NOTIFICATIONS = {
       rows: [], loading: false,
-      error: 'We could not load notification delivery status. Apply migration 012 and check the manager access policy.'
+      error: 'We could not load notification delivery status. Apply migrations 012 and 013 and check the manager access policy.'
     };
   }
   render();
+}
+
+function notificationRecipientProfiles(venueId) {
+  const context = venueCatalog().find(item => item.realId === venueId);
+  if (!context) return [];
+  const profiles = new Map();
+  (SUPABASE_NOTIFICATION_RECIPIENTS.eligibleProfiles || [])
+    .filter(profile => profile.active && profile.platform_role === 'admin')
+    .forEach(profile => profiles.set(profile.id, {
+      id: profile.id,
+      displayName: profile.display_name || profile.email || 'DailyOps admin',
+      email: profile.email || '',
+      active: profile.active
+    }));
+  SUPABASE_TEAM.members
+    .filter(member => member.organisationId === context.organisationId && member.role === 'manager' && member.active)
+    .forEach(member => profiles.set(member.id, {
+      id: member.id,
+      displayName: member.displayName,
+      email: member.email,
+      active: member.active
+    }));
+  const currentMembership = AUTH.organisationMemberships.find(membership =>
+    membership.organisation_id === context.organisationId && membership.role === 'manager'
+  );
+  if (AUTH.profile && AUTH.profile.active && (AUTH.profile.platform_role === 'admin' || currentMembership)) {
+    profiles.set(AUTH.profile.id, {
+      id: AUTH.profile.id,
+      displayName: AUTH.profile.display_name,
+      email: AUTH.profile.email,
+      active: AUTH.profile.active
+    });
+  }
+  return [...profiles.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
+}
+
+function maskTelegramChatId(value) {
+  const text = String(value || '');
+  if (text.length <= 4) return '••••';
+  return `${text.slice(0, 2)}…${text.slice(-3)}`;
+}
+
+async function loadSupabaseNotificationRecipients() {
+  if (!isSupabaseMode() || !isMgr() || !V()?.realId) return;
+  const venueId = V().realId;
+  SUPABASE_NOTIFICATION_RECIPIENTS = { venueId, rows: [], eligibleProfiles: [], loading: true, error: null };
+  render();
+  try {
+    const result = await DB.from('venue_notification_recipients')
+      .select('id,venue_id,profile_id,telegram_chat_id,enabled,notify_shift_complete,notify_end_of_day,created_by,created_at,updated_at')
+      .eq('venue_id', venueId)
+      .order('created_at');
+    if (result.error) throw result.error;
+    const profileIds = [...new Set((result.data || []).map(row => row.profile_id).filter(Boolean))];
+    const profileResult = profileIds.length
+      ? await DB.from('profiles').select('id,display_name,email,active,platform_role').in('id', profileIds)
+      : { data: [], error: null };
+    if (profileResult.error) throw profileResult.error;
+    const eligibleResult = await DB.from('profiles').select('id,display_name,email,active,platform_role').eq('active', true);
+    if (eligibleResult.error) console.warn('[supabase] eligible Telegram recipient profile load failed', eligibleResult.error);
+    const profilesById = Object.fromEntries((profileResult.data || []).map(profile => [profile.id, profile]));
+    SUPABASE_NOTIFICATION_RECIPIENTS = {
+      venueId,
+      rows: (result.data || []).map(row => ({ ...row, profile: profilesById[row.profile_id] || null })),
+      eligibleProfiles: eligibleResult.data || [],
+      loading: false,
+      error: null
+    };
+  } catch (error) {
+    console.error('[supabase] Telegram notification recipient load failed', { venueId, error });
+    SUPABASE_NOTIFICATION_RECIPIENTS = {
+      venueId, rows: [], eligibleProfiles: [], loading: false,
+      error: 'We could not load Telegram recipients. Apply migration 013 and check manager access.'
+    };
+  }
+  render();
+}
+
+function openTelegramRecipientEditor(id) {
+  if (!isSupabaseMode() || !isMgr()) return;
+  const venueId = V().realId;
+  const existing = SUPABASE_NOTIFICATION_RECIPIENTS.rows.find(row => row.id === id) || null;
+  const eligible = notificationRecipientProfiles(venueId);
+  if (existing?.profile && !eligible.some(profile => profile.id === existing.profile_id)) eligible.push({
+    id: existing.profile.id,
+    displayName: existing.profile.display_name || existing.profile.email || 'Inactive profile',
+    email: existing.profile.email || '',
+    active: existing.profile.active
+  });
+  const selectedProfileId = existing?.profile_id || AUTH.profile.id;
+  openModal(`
+    <div class="modal-head"><div style="flex:1">
+      <div class="modal-title">${existing ? 'Edit' : 'Add'} Telegram recipient</div>
+      <div class="modal-sub">${esc(V().name)} · the bot sends only to this configured DailyOps profile</div>
+    </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
+    <div class="modal-body stack" style="gap:13px">
+      <div class="field"><label class="label" for="tg-profile">DailyOps profile</label>
+        <select class="input" id="tg-profile">${eligible.map(profile => `<option value="${esc(profile.id)}" ${profile.id === selectedProfileId ? 'selected' : ''}>${esc(profile.displayName)}${profile.email ? ` · ${esc(profile.email)}` : ''}${!profile.active ? ' · inactive' : ''}</option>`).join('')}</select>
+        <span class="hint">Only active managers or platform admins can be notification recipients.</span></div>
+      <div class="field"><label class="label" for="tg-chat">Telegram Chat ID</label>
+        <input class="input" id="tg-chat" value="${esc(existing?.telegram_chat_id || '')}" placeholder="e.g. 123456789 or -1001234567890" inputmode="text">
+        <span class="hint">Install Telegram, open the DailyOps bot, press Start, then provide this Chat ID to the manager. Never enter a bot token.</span></div>
+      <div class="row-b"><div><div style="font-weight:600;font-size:14px">Recipient enabled</div><div class="tiny mut">Disabled recipients receive no Telegram messages</div></div><button class="switch ${existing?.enabled !== false ? 'is-on' : ''}" id="tg-enabled" aria-label="Recipient enabled"></button></div>
+      <div class="row-b"><div><div style="font-weight:600;font-size:14px">Shift Complete</div><div class="tiny mut">Send when Opening or Closing Shift is complete</div></div><button class="switch ${existing?.notify_shift_complete !== false ? 'is-on' : ''}" id="tg-shift" aria-label="Shift complete notifications"></button></div>
+      <div class="row-b"><div><div style="font-weight:600;font-size:14px">End of Day</div><div class="tiny mut">Send after the venue cutoff</div></div><button class="switch ${existing?.notify_end_of_day !== false ? 'is-on' : ''}" id="tg-eod" aria-label="End of day notifications"></button></div>
+    </div>
+    <div class="modal-foot"><button class="btn" data-x="close">Cancel</button><button class="btn btn-primary" data-x="save">${existing ? 'Save changes' : 'Add recipient'}</button></div>`, {
+    after(root) {
+      let enabled = existing?.enabled !== false;
+      let notifyShiftComplete = existing?.notify_shift_complete !== false;
+      let notifyEndOfDay = existing?.notify_end_of_day !== false;
+      root.querySelectorAll('[data-x=close]').forEach(button => button.onclick = closeModal);
+      const bindSwitch = (selector, read, write) => {
+        const button = root.querySelector(selector);
+        button.onclick = () => { write(!read()); button.classList.toggle('is-on', read()); };
+      };
+      bindSwitch('#tg-enabled', () => enabled, value => { enabled = value; });
+      bindSwitch('#tg-shift', () => notifyShiftComplete, value => { notifyShiftComplete = value; });
+      bindSwitch('#tg-eod', () => notifyEndOfDay, value => { notifyEndOfDay = value; });
+      root.querySelector('#tg-profile').value = selectedProfileId;
+      root.querySelector('#tg-chat').focus();
+      root.querySelector('[data-x=save]').onclick = async () => {
+        const saveButton = root.querySelector('[data-x=save]');
+        const profileId = root.querySelector('#tg-profile').value;
+        const chatId = root.querySelector('#tg-chat').value.trim();
+        if (!profileId) { toast('Choose a DailyOps profile', 'warn'); return; }
+        if (!chatId) { toast('Enter the Telegram Chat ID', 'warn'); return; }
+        saveButton.disabled = true;
+        try {
+          const payload = {
+            venue_id: venueId,
+            profile_id: profileId,
+            telegram_chat_id: chatId,
+            enabled,
+            notify_shift_complete: notifyShiftComplete,
+            notify_end_of_day: notifyEndOfDay,
+            ...(existing ? {} : { created_by: AUTH.profile.id })
+          };
+          const result = existing
+            ? await DB.from('venue_notification_recipients').update(payload).eq('id', existing.id)
+            : await DB.from('venue_notification_recipients').insert(payload);
+          if (result.error) throw result.error;
+          closeModal();
+          await loadSupabaseNotificationRecipients();
+          toast(existing ? 'Telegram recipient updated' : 'Telegram recipient added', 'ok');
+        } catch (error) {
+          console.error('[supabase] Telegram recipient save failed', { venueId, recipientId: id, error });
+          toast(error?.code === '23505' ? 'That profile or Chat ID is already configured for this venue.' : 'Could not save the Telegram recipient.', 'warn');
+          saveButton.disabled = false;
+        }
+      };
+    }
+  });
+}
+
+async function removeSupabaseNotificationRecipient(id) {
+  try {
+    const result = await DB.from('venue_notification_recipients').delete().eq('id', id);
+    if (result.error) throw result.error;
+    await loadSupabaseNotificationRecipients();
+    toast('Telegram recipient removed', 'ok');
+  } catch (error) {
+    console.error('[supabase] Telegram recipient delete failed', { recipientId: id, error });
+    toast('Could not remove the Telegram recipient.', 'warn');
+  }
+}
+
+async function testSupabaseTelegramRecipient(id) {
+  if (!isSupabaseMode() || !isMgr()) return;
+  try {
+    const result = await DB.functions.invoke('notify-manager', {
+      body: {
+        kind: 'test',
+        venue_id: V().realId,
+        recipient_id: id,
+        request_id: crypto.randomUUID()
+      }
+    });
+    if (result.error) throw result.error;
+    if (!result.data?.sent) throw new Error('The Telegram test was not sent. Check Alerts for the recorded failure.');
+    await loadSupabaseNotifications();
+    toast('Telegram test notification sent', 'ok');
+  } catch (error) {
+    console.error('[supabase] Telegram test notification failed', { venueId: V().realId, recipientId: id, error });
+    await loadSupabaseNotifications();
+    toast('Telegram test failed. Check Alerts for the recorded delivery error.', 'warn');
+  }
 }
 
 async function markSupabaseCoverRequests(ids) {
@@ -2483,6 +2673,9 @@ async function requestSupabaseListComplete(checklistId) {
       body: { kind: 'list-complete', checklist_id: checklistId }
     });
     if (result.error) throw result.error;
+    if (result.data && result.data.failed) {
+      toast(`${result.data.failed} Telegram notification${result.data.failed === 1 ? '' : 's'} failed. Check Alerts.`, 'warn');
+    }
     if (R.tab === 'alerts' && isMgr()) loadSupabaseNotifications();
   } catch (error) {
     // Task persistence has already succeeded. Delivery is audited/retried on
@@ -3853,7 +4046,7 @@ function pageAlerts() {
     </div>
     <div class="stack">
       ${isSupabaseMode() ? `<div class="banner ${SUPABASE_NOTIFICATIONS.error ? 'banner-warn' : 'banner-info'}">${ic(SUPABASE_NOTIFICATIONS.error ? 'warn' : 'info', 17)}<div>
-        ${SUPABASE_NOTIFICATIONS.error ? `<b>Delivery status is unavailable.</b> ${esc(SUPABASE_NOTIFICATIONS.error)}` : `<b>Email delivery is server-side.</b> Shift-complete messages are sent by the Edge Function, and end-of-day summaries are sent by Supabase Cron even when no browser is open.`}</div></div>` : `<div class="banner banner-info">${ic('info', 17)}<div>
+        ${SUPABASE_NOTIFICATIONS.error ? `<b>Delivery status is unavailable.</b> ${esc(SUPABASE_NOTIFICATIONS.error)}` : `<b>Telegram delivery is server-side.</b> Shift-complete messages are sent by the Edge Function, and end-of-day summaries are sent by Supabase Cron even when no browser is open.`}</div></div>` : `<div class="banner banner-info">${ic('info', 17)}<div>
         <b>Delivery is stubbed in this demo.</b> Messages are composed and logged exactly as they'd be sent, but nothing leaves the browser —
         open the console to see each one. Production Supabase mode uses Edge Functions instead.</div></div>`}
       ${isSupabaseMode() ? `<div class="card">
@@ -3875,13 +4068,13 @@ function pageAlerts() {
           const statusLabel = n.deliveryStatus ? (failed ? 'Failed' : pending ? 'Pending' : 'Sent') : 'Preview';
           return `<button class="alert-item ${n.read ? '' : 'is-unread'}" data-act="open-notif" data-id="${n.id}">
             <span class="alert-ic ${tone}" style="background:var(--${failed ? 'danger' : isEod ? 'info' : 'ok'}-soft);color:var(--${failed ? 'danger' : isEod ? 'info' : 'ok'})">
-              ${ic(n.channel === 'sms' ? 'sms' : 'mail', 17)}</span>
+              ${ic(n.channel === 'telegram' ? 'send' : n.channel === 'sms' ? 'sms' : 'mail', 17)}</span>
             <span style="flex:1;min-width:0">
               <span style="display:block;font-weight:${n.read ? '540' : '680'};letter-spacing:-.012em">${esc(n.subject)}</span>
               <span class="tiny mut row wrap" style="margin-top:4px;gap:6px">
                 ${venueCatalog().length > 1 && n.venueName ? `<span class="chip"><span class="venue-dot" style="width:7px;height:7px;background:${
                   venueDotColor(venue(n.venueId) || { accent: 'graphite' })}"></span>${esc(n.venueName)}</span>` : ''}
-                <span>${n.channel === 'sms' ? 'SMS' : 'Email'} → ${esc(n.to)}</span>
+                <span>${n.channel === 'telegram' ? 'Telegram' : n.channel === 'sms' ? 'SMS' : 'Email'} → ${esc(n.to)}</span>
                 <span class="chip ${failed ? 'chip-danger' : pending ? 'chip-warn' : 'chip-ok'}">${statusLabel}</span>
                 ${failed && n.errorMessage ? `<span class="tiny" style="color:var(--danger)">${esc(n.errorMessage)}</span>` : ''}
               </span>
@@ -3889,7 +4082,7 @@ function pageAlerts() {
             <span class="tiny mut nowrap">${esc(fmtDT(n.at))}</span>
           </button>`;
         }).join('') : SUPABASE_NOTIFICATIONS.loading ? `<div class="empty"><div>Loading delivery status…</div></div>` : `<div class="empty"><div class="empty-icon">${ic('mail', 20)}</div><div>No delivery events yet.</div>
-          <div class="tiny mut" style="margin-top:4px">You'll see shift-complete and end-of-day email status here.</div></div>`}</div>
+          <div class="tiny mut" style="margin-top:4px">You'll see shift-complete and end-of-day Telegram status here.</div></div>`}</div>
       </div>
     </div>`;
 }
@@ -3900,7 +4093,7 @@ function pageAlerts() {
 function pageSettings() {
   const s = V();
   const dataTools = isSupabaseMode()
-    ? `<div class="tiny mut">Historical operations, CSV export and notification delivery status now read from Supabase. Open History for operations or Alerts for sent/failed Edge Function and scheduled EOD events. Provider secrets, Cron and the current venue notification switches are configured in Supabase, not this browser.</div>`
+    ? `<div class="tiny mut">Historical operations, CSV export and Telegram delivery status now read from Supabase. Open History for operations or Alerts for sent/failed Edge Function and scheduled EOD events. The bot token, Cron and venue notification switches are configured in Supabase, not this browser.</div>`
     : `<div class="tiny mut">History, CSV export and notifications remain in this browser's localStorage under <code>${STORE_KEY}</code>.</div>
        <div class="row wrap" style="gap:8px">
          <button class="btn btn-sm" data-act="csv-all">${ic('dl', 15)} Export ${esc(s.name)}</button>
@@ -3965,15 +4158,15 @@ function pageSettings() {
         </div>
 
         <div class="card">
-          <div class="card-head"><div class="h3">Where reports go</div></div>
+          <div class="card-head"><div class="h3">Report timing</div></div>
           <div class="card-body stack" style="gap:13px">
-            <div class="field"><label class="label" for="s-mail">Manager email</label>
-              <input class="input" id="s-mail" type="email" data-set="managerEmail" value="${esc(s.managerEmail)}" ${isSupabaseMode() ? 'disabled' : ''}></div>
+            ${isSupabaseMode() ? `<div class="tiny mut">Telegram recipients are configured in the card below. Legacy manager email and mobile fields remain in the database for compatibility but do not control Telegram delivery.</div>` : `<div class="field"><label class="label" for="s-mail">Manager email</label>
+              <input class="input" id="s-mail" type="email" data-set="managerEmail" value="${esc(s.managerEmail)}"></div>
             <div class="field"><label class="label" for="s-phone">Manager mobile</label>
-              <input class="input" id="s-phone" data-set="managerPhone" value="${esc(s.managerPhone)}" ${isSupabaseMode() ? 'disabled' : ''}></div>
+              <input class="input" id="s-phone" data-set="managerPhone" value="${esc(s.managerPhone)}"></div>`}
             <div class="field"><label class="label" for="s-cut">End-of-day cutoff</label>
               <input class="input" id="s-cut" type="time" data-set="cutoff" value="${esc(s.cutoff)}" ${isSupabaseMode() ? 'disabled' : ''}>
-              <span class="hint">If ${esc(s.name)} hasn't submitted its Closing Shift by this time, the summary is sent anyway.</span></div>
+              <span class="hint">If ${esc(s.name)} hasn't submitted its Closing Shift by this time, the Telegram summary is sent anyway.</span></div>
           </div>
         </div>
 
@@ -3982,10 +4175,27 @@ function pageSettings() {
           <div class="card-body" style="padding-top:4px">
             ${tog('notifyComplete', 'When a shift is fully ticked off', 'Fires the moment the last task is done, any time of day')}
             ${tog('notifyEndOfDay', 'End-of-day summary', 'Done vs left undone, across both shifts')}
-            ${tog('channelEmail', 'Send by email', esc(s.managerEmail))}
-            ${tog('channelSms', 'Send by SMS', esc(s.managerPhone))}
+            ${isSupabaseMode() ? `<div class="tiny mut" style="padding-top:10px">These venue-wide switches are read by the server. Each Telegram recipient has separate Shift Complete and End of Day preferences.</div>` : `${tog('channelEmail', 'Send by email', esc(s.managerEmail))}
+            ${tog('channelSms', 'Send by SMS', esc(s.managerPhone))}`}
           </div>
         </div>
+
+        ${isSupabaseMode() ? `<div class="card">
+          <div class="card-head"><div style="flex:1"><div class="h3">Telegram recipients</div>
+            <div class="tiny mut">One DailyOps bot can send to multiple authorised managers or platform admins for this venue.</div></div>
+            <button class="btn btn-sm btn-primary" data-act="telegram-add">${ic('plus', 15)} Add recipient</button></div>
+          <div class="card-body stack" style="gap:10px">
+            <div class="banner banner-info">${ic('info', 17)}<div>Each recipient must install Telegram, open the DailyOps bot, press <b>Start</b>, and provide their Chat ID to an authorised manager. DailyOps never asks for or stores the bot token in the browser.</div></div>
+            ${SUPABASE_NOTIFICATION_RECIPIENTS.error ? `<div class="banner banner-warn">${ic('warn', 17)}<div>${esc(SUPABASE_NOTIFICATION_RECIPIENTS.error)}</div></div>` : ''}
+            ${SUPABASE_NOTIFICATION_RECIPIENTS.venueId !== s.realId || SUPABASE_NOTIFICATION_RECIPIENTS.loading ? `<div class="empty" style="padding:18px">Loading Telegram recipients…</div>` : SUPABASE_NOTIFICATION_RECIPIENTS.rows.length ? SUPABASE_NOTIFICATION_RECIPIENTS.rows.map(row => `<div class="venue-row">
+              <span class="venue-dot" style="background:${row.enabled ? 'var(--ok)' : 'var(--muted)'}"></span>
+              <div style="flex:1;min-width:0"><div class="row wrap" style="gap:6px"><b>${esc(row.profile?.display_name || 'Profile unavailable')}</b><span class="chip">${esc(maskTelegramChatId(row.telegram_chat_id))}</span>${row.enabled ? '<span class="chip chip-ok">Enabled</span>' : '<span class="chip">Disabled</span>'}</div>
+                <div class="tiny mut">${esc(row.profile?.email || '')} · ${row.notify_shift_complete ? 'Shift Complete' : ''}${row.notify_shift_complete && row.notify_end_of_day ? ' · ' : ''}${row.notify_end_of_day ? 'End of Day' : ''}</div></div>
+              <div class="row" style="gap:4px"><button class="btn btn-sm btn-ghost" data-act="telegram-test" data-id="${row.id}">Test</button><button class="btn btn-sm btn-icon btn-ghost" data-act="telegram-edit" data-id="${row.id}" title="Edit recipient">${ic('pencil', 14)}</button><button class="btn btn-sm btn-icon btn-ghost" data-act="telegram-delete" data-id="${row.id}" title="Remove recipient">${ic('trash', 14)}</button></div>
+            </div>`).join('') : `<div class="empty" style="padding:18px"><div class="empty-icon">${ic('send', 20)}</div><div>No Telegram recipients configured for ${esc(s.name)}.</div><div class="tiny mut" style="margin-top:4px">Add an active manager or platform admin after they have started the bot.</div></div>`}
+            <button class="btn btn-sm btn-ghost" data-act="telegram-recipients-refresh">Refresh recipients</button>
+          </div>
+        </div>` : ''}
 
         <div class="card">
           <div class="card-head"><div class="h3">Demo &amp; data</div></div>
@@ -4754,8 +4964,9 @@ function openNotif(id) {
       </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
       <div class="modal-body">
         <div class="kvline"><span>Venue</span><span>${esc(n.venueName || '—')}</span></div>
+        <div class="kvline"><span>Channel</span><span>${esc(n.channel === 'telegram' ? 'Telegram' : n.channel || '—')}</span></div>
         <div class="kvline"><span>Recipient</span><span>${esc(n.to || 'Not configured')}</span></div>
-        <div class="kvline"><span>Subject</span><span><b>${esc(n.subject)}</b></span></div>
+        <div class="kvline"><span>Message</span><span><b>${esc(n.subject)}</b></span></div>
         <div class="kvline"><span>Status</span><span class="chip ${failed ? 'chip-danger' : n.deliveryStatus === 'pending' ? 'chip-warn' : 'chip-ok'}">${esc(status)}</span></div>
         ${failed && n.errorMessage ? `<div class="banner banner-warn" style="margin-top:13px">${ic('warn', 17)}<div>${esc(n.errorMessage)}</div></div>` : ''}
         <pre style="white-space:pre-wrap;font:inherit;line-height:1.55;margin:16px 0 0;color:var(--ink-2)">${esc(n.text)}</pre>
@@ -5218,7 +5429,7 @@ function handleAct(act, ds) {
     case 'tick-all': tickAll(ds.list); break;
     case 'sync-tpl':  syncTemplate(ds.list); break;
     case 'eod': {
-      if (isSupabaseMode()) { toast('End-of-day email is sent by the scheduled server job after this venue cutoff. Check Alerts for delivery status.', 'info'); R.tab = 'alerts'; render(); loadSupabaseNotifications(); break; }
+      if (isSupabaseMode()) { toast('End-of-day Telegram summary is sent by the scheduled server job after this venue cutoff. Check Alerts for delivery status.', 'info'); R.tab = 'alerts'; render(); loadSupabaseNotifications(); break; }
       if (day.reported) { toast(`${V().name} has already been reported today — see Alerts`, 'warn'); R.tab = 'alerts'; render(); break; }
       runTriggers({ forceEod: true, venueId: V().id }); render(); break;
     }
@@ -5347,6 +5558,16 @@ function handleAct(act, ds) {
       exportAllVenues();
       break;
     case 'open-notif': openNotif(ds.id); break;
+    case 'telegram-add': openTelegramRecipientEditor(null); break;
+    case 'telegram-edit': openTelegramRecipientEditor(ds.id); break;
+    case 'telegram-test': testSupabaseTelegramRecipient(ds.id); break;
+    case 'telegram-recipients-refresh': loadSupabaseNotificationRecipients(); break;
+    case 'telegram-delete': {
+      const recipient = SUPABASE_NOTIFICATION_RECIPIENTS.rows.find(row => row.id === ds.id);
+      if (!recipient) break;
+      confirmModal(`Remove ${recipient.profile?.display_name || 'this recipient'}?`, `They will no longer receive Telegram notifications for ${V().name}.`, 'Remove', () => removeSupabaseNotificationRecipient(ds.id), true);
+      break;
+    }
     case 'cover-read':
       if (isSupabaseMode()) markSupabaseCoverRequests([ds.id]);
       break;
@@ -5443,6 +5664,7 @@ $('#app').addEventListener('click', e => {
     if (isSupabaseMode() && R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
     if (isSupabaseMode() && R.tab === 'history' && isMgr()) loadSupabaseHistory();
     if (isSupabaseMode() && R.tab === 'alerts' && isMgr()) loadSupabaseNotifications();
+    if (isSupabaseMode() && R.tab === 'settings' && isMgr()) loadSupabaseNotificationRecipients();
     return;
   }
   const seg = e.target.closest('.segmented [data-list]');
@@ -5467,6 +5689,7 @@ $('#venue-switch').addEventListener('change', e => {
   syncSupabaseRealtimeForCurrentView();
   if (isSupabaseMode() && R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
   if (isSupabaseMode() && R.tab === 'history' && isMgr()) loadSupabaseHistory(true);
+  if (isSupabaseMode() && isMgr()) loadSupabaseNotificationRecipients();
   toast(`Switched to ${V().name}`);
 });
 
@@ -5581,6 +5804,7 @@ async function restoreAuthenticatedApp(session) {
     SUPABASE_MY_ROSTER_WEEK = { start: null, end: null, rows: [], loading: false, error: null };
     SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
     SUPABASE_NOTIFICATIONS = { rows: [], loading: false, error: null };
+    SUPABASE_NOTIFICATION_RECIPIENTS = { venueId: null, rows: [], eligibleProfiles: [], loading: false, error: null };
     S = null;
     showLogin();
     return;
@@ -5616,6 +5840,7 @@ async function restoreAuthenticatedApp(session) {
   if (isMgr()) {
     loadSupabaseCoverRequests();
     loadSupabaseNotifications();
+    loadSupabaseNotificationRecipients();
     if (R.tab === 'history') loadSupabaseHistory();
   }
   else loadSupabaseMyRosterWeek(rosterWeekStartKey(dayKey()), true);
@@ -5711,6 +5936,7 @@ async function startApp() {
         SUPABASE_MY_ROSTER_WEEK = { start: null, end: null, rows: [], loading: false, error: null };
         SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
         SUPABASE_NOTIFICATIONS = { rows: [], loading: false, error: null };
+        SUPABASE_NOTIFICATION_RECIPIENTS = { venueId: null, rows: [], eligibleProfiles: [], loading: false, error: null };
         S = null;
         showLogin();
       } else if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {

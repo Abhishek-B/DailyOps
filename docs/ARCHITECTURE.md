@@ -60,12 +60,18 @@ Shift cover request
 - the current implementation is an in-app alert; cover email/SMS remains deferred
 
 Notification event
-- records server-side email delivery status, provider ID, failure detail, and an idempotency key for shift-complete and end-of-day messages
+- records server-side Telegram delivery status, recipient profile, provider message ID, failure detail, and an idempotency key for shift-complete and end-of-day messages
+
+Venue notification recipient
+- links one active manager or platform-admin profile to one venue and a Telegram Chat ID
+- stores independent enabled, Shift Complete, and End of Day preferences
+- is readable and writable only by authorised venue managers/platform admins through RLS
+- Chat IDs are not copied into notification audit rows
 
 Server-side notifications
-- `notify-manager` receives only an authenticated, RLS-visible checklist ID after a successful task write
-- it derives the venue manager recipient and task message from Supabase, then sends through Resend
-- `end-of-day` is invoked by Supabase Cron, applies each venue's IANA timezone/cutoff, and records one idempotent summary event per venue/date
+- `notify-manager` receives only an authenticated, RLS-visible checklist ID after a successful task write, or a configured recipient record ID for a fixed manager test
+- it derives all recipient Chat IDs and task messages from Supabase, then sends through the single Telegram bot
+- `end-of-day` is invoked by Supabase Cron, applies each venue's IANA timezone/cutoff, and records one idempotent summary event per venue/date/recipient
 
 Historical operations and CSV
 - query recent prior daily operation instances for the selected venue
