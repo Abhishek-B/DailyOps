@@ -395,6 +395,8 @@ html[data-theme="dark"] .segmented button.is-active .seg-count { background: var
 .task-note { margin-top: 7px; padding: 8px 10px; border-radius: 9px; background: var(--surface-2); border: 1px solid var(--line); font-size: 12.5px; color: var(--ink-2); }
 .task-note b { font-weight: 640; }
 .task-side { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.task-meta-action { cursor: pointer; }
+.task-meta-action:hover { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
 .task-critical-mark { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--accent); opacity: .8; }
 
 /* ---------- sticky action bar ---------- */
@@ -681,9 +683,21 @@ let SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows:
 let SUPABASE_MY_ROSTER_WEEK = { start: null, end: null, rows: [], loading: false, error: null };
 let SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
 let SUPABASE_HISTORY = { venueId: null, days: [], profilesById: {}, loading: false, error: null, selectedDate: null };
+let SUPABASE_REALTIME = {
+  channel: null,
+  venueId: null,
+  date: null,
+  checklistIds: [],
+  status: 'CLOSED',
+  refreshTimer: null,
+  pollTimer: null,
+  refreshing: false,
+  refreshPending: false
+};
 const REMOTE_MUTATIONS = new Set();
 let AUTH_RESTORE_ID = 0;
 let SUPABASE_HISTORY_LOAD_ID = 0;
+let SUPABASE_REALTIME_REQUEST_ID = 0;
 
 /* ------------------------------------------------------------------ icons */
 const P = {
@@ -1595,6 +1609,7 @@ async function selectOrganisation(id) {
     SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows: [], loading: false, error: null };
     SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
     render();
+    syncSupabaseRealtimeForCurrentView();
     if (R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart, true);
     if (R.tab === 'history' && isMgr()) loadSupabaseHistory(true);
     if (isMgr()) loadSupabaseCoverRequests();
@@ -2011,7 +2026,8 @@ function mapRemoteDay(context, date, checklists, tasks, rosterData) {
   };
 }
 
-async function loadSupabaseTodayForVenue(context, date) {
+async function loadSupabaseTodayForVenue(context, date, options = {}) {
+  const allowBootstrap = options.allowBootstrap !== false;
   const { data: initialChecklists, error: checklistError } = await DB.from('daily_checklists')
     .select(REMOTE_CHECKLIST_SELECT)
     .eq('venue_id', context.realId)
@@ -2026,6 +2042,9 @@ async function loadSupabaseTodayForVenue(context, date) {
   const canBootstrap = context.organisationRole === 'manager';
   if (missingTypes.length && !canBootstrap) {
     throw accessError('today-not-initialized', `Today's operations for ${context.name} have not been initialised by a venue manager yet.`);
+  }
+  if (missingTypes.length && !allowBootstrap) {
+    throw accessError('today-load', `Today's operations for ${context.name} changed while this screen was synchronising.`);
   }
   if (missingTypes.length) {
     // The deployed SECURITY DEFINER helper creates missing instances and copies
@@ -2089,6 +2108,171 @@ async function loadSupabaseToday() {
     date,
     byVenue: Object.fromEntries(venueCatalog().map((context, index) => [context.realId, loaded[index]]))
   };
+}
+
+function blankSupabaseRealtimeState() {
+  return {
+    channel: null,
+    venueId: null,
+    date: null,
+    checklistIds: [],
+    status: 'CLOSED',
+    refreshTimer: null,
+    pollTimer: null,
+    refreshing: false,
+    refreshPending: false
+  };
+}
+
+function realtimePayloadMatchesDate(payload, date) {
+  return [payload && payload.new, payload && payload.old]
+    .some(row => row && row.work_date === date);
+}
+
+async function detachSupabaseRealtime() {
+  const previous = SUPABASE_REALTIME;
+  if (previous.refreshTimer !== null) clearTimeout(previous.refreshTimer);
+  if (previous.pollTimer !== null) clearInterval(previous.pollTimer);
+  SUPABASE_REALTIME = blankSupabaseRealtimeState();
+  if (previous.channel && DB) {
+    try { await DB.removeChannel(previous.channel); }
+    catch (error) { console.warn('[supabase] realtime channel cleanup failed', error); }
+  }
+}
+
+async function unsubscribeSupabaseRealtime() {
+  SUPABASE_REALTIME_REQUEST_ID++;
+  await detachSupabaseRealtime();
+}
+
+async function refreshSupabaseTodayFromRealtime(requestId, venueId, date) {
+  const current = () => requestId === SUPABASE_REALTIME_REQUEST_ID
+    && SUPABASE_REALTIME.venueId === venueId
+    && SUPABASE_REALTIME.date === date
+    && !!SUPABASE_REALTIME.channel;
+  if (!current()) return;
+  if (SUPABASE_REALTIME.refreshing) {
+    SUPABASE_REALTIME.refreshPending = true;
+    return;
+  }
+
+  SUPABASE_REALTIME.refreshing = true;
+  try {
+    const context = supabaseVenueContext(venueId);
+    if (!context) return;
+    // A realtime refetch must never create or re-bootstrap an operation.
+    const remoteDay = await loadSupabaseTodayForVenue(context, date, { allowBootstrap: false });
+    if (!current()) return;
+    SUPABASE_TODAY.byVenue[venueId] = remoteDay;
+    render();
+  } catch (error) {
+    if (current()) console.error('[supabase] realtime today refetch failed', { venueId, date, error });
+  } finally {
+    if (current()) {
+      SUPABASE_REALTIME.refreshing = false;
+      if (SUPABASE_REALTIME.refreshPending) {
+        SUPABASE_REALTIME.refreshPending = false;
+        queueSupabaseRealtimeRefresh(venueId, date);
+      }
+    }
+  }
+}
+
+function queueSupabaseRealtimeRefresh(venueId, date) {
+  const requestId = SUPABASE_REALTIME_REQUEST_ID;
+  if (SUPABASE_REALTIME.venueId !== venueId
+    || SUPABASE_REALTIME.date !== date
+    || !SUPABASE_REALTIME.channel) return;
+  if (SUPABASE_REALTIME.refreshing) {
+    SUPABASE_REALTIME.refreshPending = true;
+    return;
+  }
+  if (SUPABASE_REALTIME.refreshTimer !== null) return;
+  SUPABASE_REALTIME.refreshTimer = setTimeout(() => {
+    SUPABASE_REALTIME.refreshTimer = null;
+    refreshSupabaseTodayFromRealtime(requestId, venueId, date);
+  }, 150);
+}
+
+async function subscribeSupabaseRealtime() {
+  if (!isSupabaseMode() || !DB || !AUTH.session || R.tab !== 'today') {
+    await unsubscribeSupabaseRealtime();
+    return;
+  }
+  const context = V();
+  const date = dayKey();
+  const venueId = context && context.realId;
+  const remoteDay = venueId && SUPABASE_TODAY.date === date
+    ? SUPABASE_TODAY.byVenue[venueId]
+    : null;
+  const checklistIds = remoteDay
+    ? ['open', 'close'].map(listType => remoteDay.lists[listType].id).filter(Boolean)
+    : [];
+  if (!venueId || !checklistIds.length) {
+    await unsubscribeSupabaseRealtime();
+    return;
+  }
+
+  const sameSubscription = SUPABASE_REALTIME.channel
+    && SUPABASE_REALTIME.venueId === venueId
+    && SUPABASE_REALTIME.date === date
+    && SUPABASE_REALTIME.checklistIds.join(',') === checklistIds.join(',');
+  if (sameSubscription) return;
+
+  const requestId = ++SUPABASE_REALTIME_REQUEST_ID;
+  await detachSupabaseRealtime();
+  if (requestId !== SUPABASE_REALTIME_REQUEST_ID) return;
+
+  const channel = DB.channel(`dailyops-today-${venueId}-${date}`)
+    .on('postgres_changes', {
+      event: '*', schema: 'public', table: 'daily_checklists',
+      filter: `venue_id=eq.${venueId},work_date=eq.${date}`
+    }, payload => {
+      if (realtimePayloadMatchesDate(payload, date)) queueSupabaseRealtimeRefresh(venueId, date);
+    })
+    .on('postgres_changes', {
+      event: '*', schema: 'public', table: 'daily_tasks',
+      filter: `checklist_id=in.(${checklistIds.join(',')})`
+    }, () => queueSupabaseRealtimeRefresh(venueId, date))
+    .on('postgres_changes', {
+      event: '*', schema: 'public', table: 'roster_assignments',
+      filter: `venue_id=eq.${venueId},work_date=eq.${date}`
+    }, payload => {
+      if (realtimePayloadMatchesDate(payload, date)) queueSupabaseRealtimeRefresh(venueId, date);
+    });
+
+  SUPABASE_REALTIME = {
+    ...blankSupabaseRealtimeState(),
+    channel,
+    venueId,
+    date,
+    checklistIds,
+    status: 'CONNECTING'
+  };
+  // DELETE changes cannot be column-filtered by Postgres Changes. Keep the
+  // live channel scoped for inserts/updates and use this small refetch timer
+  // to catch an eligible one-off deletion without subscribing globally.
+  SUPABASE_REALTIME.pollTimer = setInterval(() => {
+    if (requestId === SUPABASE_REALTIME_REQUEST_ID && SUPABASE_REALTIME.channel === channel) {
+      queueSupabaseRealtimeRefresh(venueId, date);
+    }
+  }, 15000);
+  channel.subscribe(status => {
+    if (requestId !== SUPABASE_REALTIME_REQUEST_ID || SUPABASE_REALTIME.channel !== channel) return;
+    const previousStatus = SUPABASE_REALTIME.status;
+    SUPABASE_REALTIME.status = status;
+    if (status === 'SUBSCRIBED') {
+      console.info('[supabase] realtime subscribed', { venueId, date });
+      if (previousStatus !== 'CONNECTING') queueSupabaseRealtimeRefresh(venueId, date);
+    } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+      console.warn('[supabase] realtime unavailable; query-based loading remains active', { venueId, date, status });
+    }
+  });
+}
+
+function syncSupabaseRealtimeForCurrentView() {
+  if (isSupabaseMode() && AUTH.session && R.tab === 'today') subscribeSupabaseRealtime();
+  else if (isSupabaseMode()) unsubscribeSupabaseRealtime();
 }
 
 const SUPABASE_HISTORY_CHECKLIST_LIMIT = 120;
@@ -2658,6 +2842,13 @@ function taskRowHtml(t, o) {
   if (t.source === 'adhoc') meta.push(`<span class="chip">${opt.historical ? 'One-off' : 'Added today'}${t.addedBy ? ' · ' + esc(uname(t.addedBy).split(' ')[0]) : ''}</span>`);
   else if (opt.historical) meta.push('<span class="chip">Routine</span>');
 
+  const canEditMeta = !opt.locked && me().active;
+  const hasMeta = !!(t.note || t.reason);
+  const metaAction = canEditMeta
+    ? `<span class="btn btn-sm btn-ghost task-meta-action" data-act="task-meta" data-list="${opt.listKey}" data-id="${t.id}" role="button" tabindex="0" title="${hasMeta ? 'Edit note or reason' : 'Add note or reason'}" aria-label="${hasMeta ? 'Edit note or reason' : 'Add note or reason'}">${ic('note', 14)}<span>${hasMeta ? 'Edit note' : 'Note'}</span></span>`
+    : '';
+  const side = [metaAction, opt.side || ''].filter(Boolean).join('');
+
   return `<${tag} class="${cls}" ${opt.locked ? '' : `data-task="${t.id}" data-list="${opt.listKey}" type="button"`}>
     ${t.critical ? '<span class="task-critical-mark"></span>' : ''}
     <span class="tick">${ic(flag ? 'minus' : 'check', 15, 3)}</span>
@@ -2668,7 +2859,7 @@ function taskRowHtml(t, o) {
       ${t.reason ? `<span class="task-note" style="display:block"><b>Reason:</b> ${esc(t.reason)}</span>` : ''}
       ${t.note ? `<span class="task-note" style="display:block"><b>Note:</b> ${esc(t.note)}</span>` : ''}
     </span>
-    ${opt.side || ''}
+    ${side}
   </${tag}>`;
 }
 
@@ -2782,6 +2973,8 @@ function renderChrome() {
 }
 
 function render() {
+  const content = $('#content');
+  const previousScrollTop = content ? content.scrollTop : null;
   renderChrome();
   const page = $('#page');
   let html = '';
@@ -2793,6 +2986,12 @@ function render() {
   else if (R.tab === 'alerts')      html = pageAlerts();
   else if (R.tab === 'settings')    html = pageSettings();
   page.innerHTML = html;
+  if (content && previousScrollTop !== null) {
+    const previousBehavior = content.style.scrollBehavior;
+    content.style.scrollBehavior = 'auto';
+    content.scrollTop = previousScrollTop;
+    content.style.scrollBehavior = previousBehavior;
+  }
 }
 
 /* ==========================================================================
@@ -2903,7 +3102,7 @@ function pageEmployee() {
         </div>
         <div class="tasklist">${rows}</div>
       </div>
-      <div class="tiny mut" style="text-align:center">Tap a task to tick it off. Notes and reasons are collected when you submit.</div>
+      <div class="tiny mut" style="text-align:center">Tap a task to tick it off. Use Note on any task to add a comment or incomplete reason as you work.</div>
     </div>
     ${weeklyRoster}
     ${bar}`;
@@ -3738,7 +3937,108 @@ function pageSettings() {
    MODALS
    ========================================================================== */
 
-/* ---- end-of-shift review: this is where notes and reasons are collected --- */
+/* ---- task metadata can be saved during the shift; review remains available */
+function openTaskMeta(lk, taskId) {
+  const day = today(), L = day.lists[lk], task = L.tasks.find(item => item.id === taskId);
+  if (!task) return;
+  if (L.submitted) { toast('This shift is submitted — reopen it to make changes', 'warn'); return; }
+  if (!me().active) { toast('This account is disabled', 'warn'); return; }
+
+  const m = LIST_META[lk];
+  let draftStatus = task.status === 'done' ? 'done' : (REASONS[task.status] ? task.status : '');
+  const currentStatus = task.status === 'done'
+    ? 'Completed'
+    : task.status === 'pending'
+      ? 'Pending'
+      : (REASONS[task.status] || REASONS.blocked).label;
+  const reasonButtons = [
+    `<button type="button" data-task-status="" class="${!draftStatus ? 'is-sel' : ''}">Leave pending</button>`,
+    ...Object.entries(REASONS).map(([key, reason]) =>
+      `<button type="button" data-task-status="${key}" class="${draftStatus === key ? 'is-sel' : ''}">${reason.label}</button>`)
+  ].join('');
+  const outcomeHtml = task.status === 'done'
+    ? `<div class="banner banner-ok" style="margin-bottom:14px">${ic('check', 17)}<div><b>Completed.</b> Reopen the task first if it needs an incomplete reason.</div></div>`
+    : `<div class="field">
+        <label class="label">Incomplete outcome</label>
+        <div class="reason-opts">${reasonButtons}</div>
+        <textarea class="textarea" data-task-reason rows="2" style="margin-top:8px;min-height:52px;display:${draftStatus ? 'block' : 'none'}" placeholder="${draftStatus === 'blocked' ? 'What blocked it? (required)' : 'Add detail (optional)…'}">${esc(task.reason || '')}</textarea>
+      </div>`;
+
+  openModal(`
+    <div class="modal-head"><div style="flex:1">
+      <div class="modal-title">Add a note or reason</div>
+      <div class="modal-sub">${esc(m.full)} · ${esc(currentStatus)} · ${esc(task.title)}</div>
+    </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
+    <div class="modal-body stack" style="gap:16px">
+      <div class="field">
+        <label class="label" for="task-note-editor">Comment or note</label>
+        <textarea class="textarea" id="task-note-editor" data-task-note rows="3" placeholder="Add a note as you work…">${esc(task.note || '')}</textarea>
+      </div>
+      ${outcomeHtml}
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-x="close">Cancel</button>
+      <button class="btn btn-primary" data-x="save">Save details</button>
+    </div>`, {
+    wide: true,
+    after(root) {
+      root.querySelectorAll('[data-x="close"]').forEach(button => button.onclick = closeModal);
+      const reasonInput = root.querySelector('[data-task-reason]');
+      const syncReasonControls = () => {
+        root.querySelectorAll('[data-task-status]').forEach(button => {
+          button.classList.toggle('is-sel', button.dataset.taskStatus === draftStatus);
+        });
+        if (!reasonInput) return;
+        reasonInput.style.display = draftStatus ? 'block' : 'none';
+        reasonInput.placeholder = draftStatus === 'blocked' ? 'What blocked it? (required)' : 'Add detail (optional)…';
+      };
+      root.querySelectorAll('[data-task-status]').forEach(button => button.onclick = () => {
+        draftStatus = button.dataset.taskStatus;
+        if (!draftStatus && reasonInput) reasonInput.value = '';
+        syncReasonControls();
+      });
+      root.querySelector('[data-x="save"]').onclick = async () => {
+        const note = (root.querySelector('[data-task-note]') || {}).value || '';
+        const reason = reasonInput ? reasonInput.value : '';
+        if (draftStatus === 'blocked' && !reason.trim()) {
+          toast('A blocked task needs a short explanation', 'warn');
+          reasonInput.focus();
+          return;
+        }
+
+        const previous = {
+          status: task.status, doneBy: task.doneBy, doneAt: task.doneAt,
+          note: task.note, reason: task.reason
+        };
+        task.note = note.trim();
+        if (task.status === 'done') {
+          task.status = 'done';
+          task.reason = '';
+        } else {
+          task.status = draftStatus || 'pending';
+          task.reason = draftStatus ? reason.trim() : '';
+          task.doneBy = null;
+          task.doneAt = null;
+        }
+
+        try {
+          if (isSupabaseMode()) await persistRemoteTask(task);
+          else { save(); runTriggers(); }
+          closeModal();
+          render();
+          toast('Task details saved', 'ok');
+        } catch (error) {
+          Object.assign(task, previous);
+          console.error('[supabase] task note/reason update failed', { taskId: task.id, error });
+          render();
+          toast('Could not save the task details. Please try again.', 'warn');
+        }
+      };
+    }
+  });
+}
+
+/* ---- end-of-shift review: this remains a bulk submit/review option -------- */
 function openReview(lk) {
   const day = today(), L = day.lists[lk], m = LIST_META[lk];
   const st = listStats(L);
@@ -4811,6 +5111,7 @@ function handleAct(act, ds) {
   const day = today();
   switch (act) {
     case 'review':    openReview(ds.list); break;
+    case 'task-meta': openTaskMeta(ds.list, ds.id); break;
     case 'add-task':  openAddTask(ds.list || R.list); break;
     case 'del-task': {
       if (isSupabaseMode()) { removeRemoteAdhocTask(ds.list, ds.id); break; }
@@ -4981,6 +5282,7 @@ function handleAct(act, ds) {
       R.list = 'open';
       if (!isSupabaseMode()) save();
       render(); scrollTop();
+      syncSupabaseRealtimeForCurrentView();
       if (isSupabaseMode() && R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
       if (isSupabaseMode() && R.tab === 'history' && isMgr()) loadSupabaseHistory(true);
       toast(`Switched to ${V().name}`); break;
@@ -5042,6 +5344,7 @@ $('#app').addEventListener('click', e => {
     R.tab = tab.dataset.tab;
     render();
     scrollTop();
+    syncSupabaseRealtimeForCurrentView();
     if (isSupabaseMode() && R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
     if (isSupabaseMode() && R.tab === 'history' && isMgr()) loadSupabaseHistory();
     return;
@@ -5065,6 +5368,7 @@ $('#venue-switch').addEventListener('change', e => {
   R.list = 'open';
   if (!isSupabaseMode()) save();
   render(); scrollTop();
+  syncSupabaseRealtimeForCurrentView();
   if (isSupabaseMode() && R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
   if (isSupabaseMode() && R.tab === 'history' && isMgr()) loadSupabaseHistory(true);
   toast(`Switched to ${V().name}`);
@@ -5087,7 +5391,12 @@ $('#btn-mobile').addEventListener('click', () => {
   renderChrome();
 });
 
-$('#btn-alerts').addEventListener('click', () => { R.tab = 'alerts'; render(); scrollTop(); });
+$('#btn-alerts').addEventListener('click', () => {
+  R.tab = 'alerts';
+  render();
+  scrollTop();
+  syncSupabaseRealtimeForCurrentView();
+});
 
 $('#page').addEventListener('change', e => {
   const el = e.target.closest('[data-set]');
@@ -5159,6 +5468,7 @@ async function restoreAuthenticatedApp(session) {
   const restoreId = ++AUTH_RESTORE_ID;
   AUTH.session = session;
   if (!session) {
+    unsubscribeSupabaseRealtime();
     AUTH.profile = null;
     AUTH.organisationMemberships = [];
     AUTH.organisations = [];
@@ -5204,6 +5514,7 @@ async function restoreAuthenticatedApp(session) {
   if (restoreId !== AUTH_RESTORE_ID) return;
   showApp();
   render();
+  syncSupabaseRealtimeForCurrentView();
   if (isMgr()) {
     loadSupabaseCoverRequests();
     if (R.tab === 'history') loadSupabaseHistory();
@@ -5284,6 +5595,7 @@ async function startApp() {
     DB.auth.onAuthStateChange((event, session) => {
       AUTH.session = session;
       if (event === 'SIGNED_OUT' || !session) {
+        unsubscribeSupabaseRealtime();
         AUTH_RESTORE_ID++;
         AUTH.profile = null;
         AUTH.organisationMemberships = [];

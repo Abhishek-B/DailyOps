@@ -11,7 +11,7 @@
 - Organisation / venue membership
 - Persistent recurring shift-task templates, rosters, daily operations and task history
 - RLS policies
-- Realtime completion updates
+- Realtime completion updates (implemented for the selected venue/current date)
 
 ## Notifications
 - Immediate manager alert when a shift is fully complete

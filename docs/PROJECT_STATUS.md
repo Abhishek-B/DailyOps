@@ -28,6 +28,7 @@ The current `checklist_type` enum contains `open` and `close`. The frontend pres
 - Authentication: Supabase Auth email/password sessions.
 - Database: Supabase Postgres.
 - Authorisation: Postgres Row Level Security and deployed helper functions.
+- Live synchronisation: Supabase Realtime for the selected venue and current operation date, with authoritative Supabase refetches after relevant row changes.
 - Future backend: Supabase Edge Functions and scheduled jobs for server-side notifications and end-of-day processing.
 
 Production URL:
@@ -68,7 +69,7 @@ Important deployed enums include `app_role` (`manager`, `employee`), `checklist_
 
 The schema also contains SECURITY DEFINER access helpers, task/checklist update guards, and `ensure_daily_checklists(uuid, date)`. These helpers and guards remain part of the RLS boundary and are not renamed by this cleanup.
 
-Migration history currently consists of `001_initial_schema.sql`, `002_add_platform_role.sql`, `003_grant_helper_function_execute.sql`, `004_grant_can_update_task_execute.sql`, `005_allow_managers_delete_adhoc_daily_tasks.sql`, `006_restrict_venue_member_reads.sql`, `007_scope_team_and_roster_writes.sql`, `008_grant_can_manage_profile_execute.sql`, `009_platform_admin_access.sql`, and `010_add_shift_cover_requests.sql`. Already-applied schema migrations remain immutable.
+Migration history currently consists of `001_initial_schema.sql`, `002_add_platform_role.sql`, `003_grant_helper_function_execute.sql`, `004_grant_can_update_task_execute.sql`, `005_allow_managers_delete_adhoc_daily_tasks.sql`, `006_restrict_venue_member_reads.sql`, `007_scope_team_and_roster_writes.sql`, `008_grant_can_manage_profile_execute.sql`, `009_platform_admin_access.sql`, `010_add_shift_cover_requests.sql`, and `011_enable_daily_operations_realtime.sql`. Already-applied schema migrations remain immutable.
 
 Migration `006_restrict_venue_member_reads.sql` replaces the initial broad `venue_members` select policy with a manager-or-own-membership policy. It does not change venue-membership write policies or roster access.
 
@@ -122,6 +123,10 @@ Migration `010_add_shift_cover_requests.sql` stores an employee's confirmed curr
 - Read-only historical Opening/Closing Shift review, including task snapshot titles, statuses, critical flags, sources, notes, reasons, submission metadata, roster context, and profile attribution.
 - Historical completion, outstanding, critical-missed, submission, and per-profile summary metrics from Supabase rows.
 - Manual CSV export for the selected venue's loaded historical operations, including organisation, venue, shift, task, status, attribution, submission metadata, reasons, and notes.
+- Realtime task synchronisation for the selected venue and current operation date. `daily_tasks` changes trigger an authorised refetch, so status, notes, reasons, one-off additions, and eligible deletions appear without a manual refresh.
+- Realtime Opening/Closing Shift submission and reopening state from `daily_checklists`.
+- Realtime current-day roster updates from `roster_assignments`, including manager counts and employee roster context where the current view uses them.
+- Realtime channel cleanup on venue/tab/session changes, with normal query loading retained as the fallback when a channel disconnects. A small selected-venue/day refetch timer also catches deletes, because Postgres Changes cannot column-filter delete events without broadening the subscription scope.
 
 ## 7. What is still local/demo/deferred
 
@@ -135,7 +140,6 @@ Migration `010_add_shift_cover_requests.sql` stores an employee's confirmed curr
 
 **DEFERRED**
 
-- Realtime subscriptions.
 - Production email/SMS notification delivery.
 - Edge Functions.
 - Scheduled end-of-day processing.
@@ -145,7 +149,7 @@ Migration `010_add_shift_cover_requests.sql` stores an employee's confirmed curr
 
 ## 8. Completed milestones
 
-Steps 1–12 are complete, with the organisation-wide team, weekly roster, and historical reporting follow-ups now implemented in the frontend:
+Steps 1–13 are complete, with the organisation-wide team, weekly roster, historical reporting, and current-day realtime follow-ups now implemented in the frontend:
 
 1. Initial multi-organisation Postgres schema, indexes, constraints, triggers, and RLS model.
 2. Additive `platform_role` schema migration for platform-level `user`/`admin` status.
@@ -162,6 +166,7 @@ Steps 1–12 are complete, with the organisation-wide team, weekly roster, and h
 13. Platform-admin access across organisations, employee weekly roster/venue visibility, and employee-confirmed in-app shift-cover notifications.
 14. Combined multi-organisation Team visibility and cross-organisation roster planning for managers with multiple manager memberships and platform admins.
 15. Supabase-backed historical Daily Operations, read-only historical shift/task review, profile attribution, manager reporting metrics, and manual CSV export.
+16. Supabase Realtime for selected-venue/current-day tasks, shift submission state, and roster changes, using scoped channels and authoritative refetches.
 
 The repository does not use a separate generated milestone registry; this list reflects the current project history and implementation state.
 
@@ -181,7 +186,7 @@ The repository does not use a separate generated milestone registry; this list r
 - Migration `006_restrict_venue_member_reads.sql` narrows employee reads of venue membership data while preserving manager administration.
 - Migration `007_scope_team_and_roster_writes.sql` prevents cross-organisation venue membership/roster writes through raw browser requests.
 - Migration `008_grant_can_manage_profile_execute.sql` records the required authenticated EXECUTE grant for manager profile updates.
-- Realtime is not implemented, so another browser's task changes are not pushed into an already-open screen.
+- Realtime is scoped to the selected venue and current operation date. Templates, historical screens, and notification delivery remain query/manual or deferred; the browser retains normal query loading if a realtime channel disconnects.
 - There is no production notification backend or scheduled end-of-day job.
 - Shift-cover requests currently use two client writes: the employee roster assignment and the notification row. If the first write succeeds and the second fails, the UI reports the failure and the manager should verify the assignment before retrying.
 - RLS helper EXECUTE grants were initially missing in the live project and were corrected in migrations `003_grant_helper_function_execute.sql` and `004_grant_can_update_task_execute.sql`. The one-off delete capability is isolated in `005_allow_managers_delete_adhoc_daily_tasks.sql`. Keep these grants/policies and verify them when provisioning another Supabase project.
@@ -192,11 +197,10 @@ The repository does not use a separate generated milestone registry; this list r
 Use this order for the next phases:
 
 1. Secure existing-user organisation assignment through a manager-scoped Edge Function or narrowly scoped SECURITY DEFINER RPC.
-2. Realtime, including live cover alerts.
-3. Notifications and cover-request delivery.
-4. Scheduled end-of-day processing and automated reporting.
-5. Final security testing.
-6. Custom domain and polish.
+2. Notifications and cover-request delivery.
+3. Scheduled end-of-day processing and automated reporting.
+4. Final security testing.
+5. Custom domain and polish.
 
 ## 11. Git workflow
 
@@ -223,6 +227,17 @@ Use the VS Code Live Server extension. Right-click `index.html`, choose **Open w
 `http://127.0.0.1:5500/`
 
 The exact local origin must be allowed in Supabase Authentication URL Configuration. Do not open the app with `file://`. Keep `DEMO_MODE: false` for Supabase testing; use `DEMO_MODE: true` only for the explicit localStorage demo.
+
+### Step 13 two-client Realtime test
+
+1. Apply migration `011_enable_daily_operations_realtime.sql`, or enable the same three tables in the `supabase_realtime` publication from the Supabase dashboard.
+2. Open the Live Server URL in a normal window as a manager and a second browser/private window as an employee. Sign both users into the same organisation and venue, and leave both on Today's Operations.
+3. In the employee window, complete or reopen a task and add a note/reason. Confirm the manager window updates without a manual refresh and that progress, status, note, and reason match.
+4. In the manager window, add a one-off task, then delete it. Confirm the employee window reflects both changes. The delete may arrive through the selected-venue/day refetch fallback rather than an immediate change event.
+5. Submit Opening Shift in one window and confirm the other window shows the submitted/read-only state. Reopen it as manager and confirm the other window unlocks without resetting task state. Repeat for Closing Shift if needed.
+6. Change today's roster assignment in Team from one client and confirm on-shift/roster context updates in the other client where that view is visible.
+7. Switch one client to another venue or a non-Today tab. Change a task in the original venue from the other client and confirm the switched-away client does not visibly update until it returns to that venue/day.
+8. Log out and back in, switch venues several times, and confirm there is one current channel, no repeated reloads, and no browser console 403/500 errors.
 
 ## 13. Deployment
 

@@ -21,6 +21,7 @@ Supabase currently supplies authentication, organisation/venue identity, team me
 - the selected venue's recurring Opening/Closing Shift templates and routine tasks; and
 - today's `public.daily_checklists` Opening/Closing Shift rows and `public.daily_tasks` routine/one-off tasks, status, completion attribution/timestamps, notes, and incomplete reasons;
 - prior venue operation days, read-only historical shift/task review, Supabase-backed summary metrics, and client-side CSV export from stored daily snapshots.
+- live current-venue/current-date task, shift-submission, and roster updates through Supabase Realtime; the client refetches authorised rows after each relevant change.
 
 The simulated notification inbox remains localStorage-backed. Production defaults to Supabase mode. The original demo can be enabled explicitly with `DEMO_MODE: true`.
 
@@ -84,6 +85,16 @@ Task changes use the schema's existing `pending`, `done`, `blocked`, `na`, and `
 
 In normal Supabase mode, History queries recent prior `daily_checklists` rows for the selected venue, then loads their `daily_tasks`, roster assignments, and referenced `profiles`. The UI is read-only and uses stored daily task snapshots, so later template edits do not rewrite historical records. Summary metrics and completion attribution are calculated from those Supabase rows. Export CSV downloads the currently loaded venue history with organisation, venue, date, shift, task, critical/source, status, completion and submission attribution, reasons, and notes. A failed query shows an error instead of falling back to local demo history.
 
+## Supabase Realtime
+
+Apply `supabase/migrations/011_enable_daily_operations_realtime.sql` after migrations `001` through `010`. It adds only `daily_checklists`, `daily_tasks`, and `roster_assignments` to the standard `supabase_realtime` publication; it does not change RLS or grant table access.
+
+If the migration reports that `supabase_realtime` is not present, open **Supabase > Database > Publications**, select `supabase_realtime`, and add these three public tables. Do not enable unrelated tables. If the dashboard uses a **Realtime** table-settings screen instead, enable Realtime for the same three tables. The frontend continues to work through normal Supabase queries if Realtime is unavailable.
+
+The browser subscribes only to the selected venue and today's two operation IDs. An event triggers an authoritative Supabase refetch, and the channel is removed when the venue, tab, session, or access context changes. A small selected-venue/day refetch timer covers deletion events, which cannot be column-filtered by Postgres Changes without broadening the subscription. Realtime is not used for notifications or historical/template screens in this phase.
+
+To test locally, open the app with VS Code Live Server in two browser contexts, sign in with users who can access the same venue, and follow the two-client test sequence in `docs/PROJECT_STATUS.md`. A refresh remains a valid recovery path if a browser sleeps or loses its connection.
+
 Before testing one-off deletion, apply `supabase/migrations/005_allow_managers_delete_adhoc_daily_tasks.sql` in the Supabase SQL Editor. It adds only a manager-scoped delete policy for `source = 'adhoc'` daily tasks.
 
 ### Create the first manager account
@@ -134,7 +145,6 @@ Use an authenticated browser session or the Supabase client with a test user's s
 ## Intentionally deferred
 
 - role editing, automated Auth-user invitation/creation, and manager-side assignment of a pre-created Auth user to an organisation by email; the future implementation must use a manager-scoped Edge Function or narrowly scoped SECURITY DEFINER RPC;
-- realtime subscriptions;
 - notification delivery and scheduled jobs;
 - roster CSV import;
 - Edge Functions, Storage, offline support, and PWA behaviour.

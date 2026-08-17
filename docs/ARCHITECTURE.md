@@ -19,7 +19,7 @@ Browser on GitHub Pages
   -> Postgres tables protected by RLS
 ```
 
-`index.html` keeps the rendering and interaction model while using Supabase for identity, organisation membership, venue access, organisation-wide manager team visibility, weekly cross-venue roster planning, recurring templates, today's operational instances, historical review, reporting metrics, and CSV export. The configured public URL/key selects this path; placeholders select demo mode.
+`index.html` keeps the rendering and interaction model while using Supabase for identity, organisation membership, venue access, organisation-wide manager team visibility, weekly cross-venue roster planning, recurring templates, today's operational instances, historical review, reporting metrics, CSV export, and scoped current-day Realtime synchronisation. The configured public URL/key selects this path; placeholders select demo mode.
 
 ## Core relational model
 
@@ -68,9 +68,15 @@ Historical operations and CSV
 - calculate manager summaries in the browser from the authorised Supabase rows
 - export the selected venue's loaded history client-side without privileged credentials
 
+Live operational synchronisation
+- subscribes only to `daily_checklists`, `daily_tasks`, and `roster_assignments` for the selected venue/current date
+- treats Postgres changes as a refetch signal rather than a second state store
+- removes the channel on venue, tab, session, or access changes
+- keeps ordinary query loading and manual recovery available if Realtime is disconnected
+
 ## Authorization boundary
 
-The browser key is publishable. RLS policies use the signed-in Auth UUID, organisation memberships, venue memberships, active profiles, and the platform-admin helper to decide access. Ordinary managers inherit access to all venues in their organisation; active platform admins inherit management access across organisations; employees require an active venue membership. Managers can administer members, profiles, venue memberships, and rosters only within managed organisations/venues. Migrations 006 and 007 narrow venue-membership reads and require manager-created memberships/rosters to stay within the target organisation; migration 008 records the authenticated helper grant required for manager profile updates; migration 009 makes the active platform-admin capability explicit in RLS; migration 010 scopes cover-request alerts to managed venues. Disabling a profile or removing venue access clears future roster assignments but preserves historical rows and attribution. The browser does not create Auth users or yet assign unassociated Auth users to an organisation by email. That workflow is intentionally deferred to a manager-scoped Edge Function or narrowly scoped SECURITY DEFINER RPC. Database triggers prevent employees from changing task definition fields or attributing a completion to another user.
+The browser key is publishable. RLS policies use the signed-in Auth UUID, organisation memberships, venue memberships, active profiles, and the platform-admin helper to decide access. Ordinary managers inherit access to all venues in their organisation; active platform admins inherit management access across organisations; employees require an active venue membership. Managers can administer members, profiles, venue memberships, and rosters only within managed organisations/venues. Migrations 006 and 007 narrow venue-membership reads and require manager-created memberships/rosters to stay within the target organisation; migration 008 records the authenticated helper grant required for manager profile updates; migration 009 makes the active platform-admin capability explicit in RLS; migration 010 scopes cover-request alerts to managed venues; migration 011 only adds the three live operational tables to the standard Realtime publication and does not broaden RLS. Disabling a profile or removing venue access clears future roster assignments but preserves historical rows and attribution. The browser does not create Auth users or yet assign unassociated Auth users to an organisation by email. That workflow is intentionally deferred to a manager-scoped Edge Function or narrowly scoped SECURITY DEFINER RPC. Database triggers prevent employees from changing task definition fields or attributing a completion to another user.
 
 ## Snapshot invariant
 
@@ -80,5 +86,4 @@ The current `checklist_type` enum is intentionally retained for the deployed `op
 
 ## Planned backend work
 
-- phase 2: Realtime task subscriptions
-- phase 3: Edge Functions and scheduled end-of-day notifications
+- phase 2: Edge Functions and scheduled end-of-day notifications
