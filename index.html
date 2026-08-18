@@ -419,6 +419,10 @@ table.tbl th {
 table.tbl td { padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 table.tbl tr:last-child td { border-bottom: 0; }
 table.tbl tbody tr:hover { background: var(--surface-2); }
+.team-roster-planner th:first-child,
+.team-roster-planner td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface); }
+.team-roster-planner th:first-child { z-index: 2; }
+.team-roster-planner tbody tr:hover td:first-child { background: var(--surface-2); }
 .num { font-variant-numeric: tabular-nums; }
 
 /* ---------- stat tiles ---------- */
@@ -1983,7 +1987,7 @@ async function selectOrganisation(id) {
     SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
     render();
     syncSupabaseRealtimeForCurrentView();
-    if (R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart, true);
+    if (R.tab === 'team' && R.teamView === 'roster' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart, true);
     if (R.tab === 'history' && isMgr()) loadSupabaseHistory(true);
     if (isMgr()) loadSupabaseCoverRequests();
     if (isMgr()) loadSupabaseNotificationRecipients();
@@ -3391,6 +3395,7 @@ function toast(msg, tone) {
 
 /* ---------------------------------------------------------------- modals */
 let modalOnClose = null;
+let modalOnRequestClose = null;
 function openModal(html, opts) {
   const o = opts || {};
   const root = $('#modal-root');
@@ -3398,7 +3403,8 @@ function openModal(html, opts) {
     <div class="modal ${o.wide ? 'wide' : ''}" role="document">${html}</div>`;
   root.classList.add('is-open');
   modalOnClose = o.onClose || null;
-  root.querySelector('.scrim').addEventListener('click', () => { if (!o.locked) closeModal(); });
+  modalOnRequestClose = o.onRequestClose || null;
+  root.querySelector('.scrim').addEventListener('click', () => { if (!o.locked) requestModalClose(); });
   if (o.after) o.after(root);
 }
 function closeModal() {
@@ -3406,17 +3412,23 @@ function closeModal() {
   root.classList.remove('is-open');
   root.innerHTML = '';
   const cb = modalOnClose; modalOnClose = null;
+  modalOnRequestClose = null;
   if (cb) cb();
 }
-function confirmModal(title, body, confirmLabel, onYes, danger) {
+function requestModalClose() {
+  if (modalOnRequestClose) { modalOnRequestClose(); return; }
+  closeModal();
+}
+function confirmModal(title, body, confirmLabel, onYes, danger, onCancel, onRequestClose, cancelLabel = 'Cancel') {
   openModal(`
     <div class="modal-head"><div><div class="modal-title">${esc(title)}</div><div class="modal-sub">${esc(body)}</div></div></div>
     <div class="modal-foot">
-      <button class="btn" data-x="cancel">Cancel</button>
+      <button class="btn" data-x="cancel">${esc(cancelLabel)}</button>
       <button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-x="yes">${esc(confirmLabel)}</button>
     </div>`, {
+    onRequestClose,
     after(root) {
-      root.querySelector('[data-x=cancel]').onclick = closeModal;
+      root.querySelector('[data-x=cancel]').onclick = () => { closeModal(); if (onCancel) onCancel(); };
       root.querySelector('[data-x=yes]').onclick = () => { closeModal(); onYes(); };
     }
   });
@@ -3496,7 +3508,7 @@ function exportSupabaseHistory(days, filename) {
 /* ==========================================================================
    RENDER
    ========================================================================== */
-let R = { tab: 'today', list: 'open', historyKey: null, rosterWeekStart: rosterWeekStartKey(dayKey()) };
+let R = { tab: 'today', list: 'open', historyKey: null, rosterWeekStart: rosterWeekStartKey(dayKey()), teamView: 'people' };
 
 const NAV_MGR = [
   { id:'today',     label:'Today',      icon:'home'  },
@@ -4065,76 +4077,34 @@ function pageSupabaseTeam() {
           aria-label="${esc(member.displayName)} on ${k} shift" style="margin:0 auto"></button></td>`).join('')}
     </tr>`).join('') : `<tr><td colspan="3" class="mut" style="text-align:center;padding:22px">Nobody is available to roster at ${esc(v.name)} yet.</td></tr>`;
 
-  const venueChips = member => member.protected && member.id !== AUTH.profile.id
-    ? '<span class="chip chip-info">Protected account</span>'
-    : member.role === 'manager'
-    ? `<span class="chip chip-info">All venues (manager)</span>`
-    : venueCatalog()
-      .filter(context => context.organisationId === member.organisationId)
-      .map(context => {
-        const assigned = member.explicitVenueIds.includes(context.realId);
-        return `<button class="chip ${assigned ? 'chip-accent' : ''}"
-          data-act="toggle-user-venue" data-id="${member.id}" data-venue="${context.realId}" style="cursor:pointer"
-          title="${assigned ? 'Remove from' : 'Assign to'} ${esc(context.name)}">
-          <span class="venue-dot" style="width:7px;height:7px;background:${assigned ? venueDotColor(context) : 'currentColor'};opacity:${assigned ? 1 : .4}"></span>${esc(context.name)}</button>`;
-      }).join('') || '<span class="tiny mut">No venue access</span>';
-
-  const assignmentSummary = member => {
-    const assignments = weekRows.filter(row => row.user_id === member.id)
-      .slice()
-      .sort((a, b) => `${a.work_date}:${a.shift_type}:${a.venue_id}`.localeCompare(`${b.work_date}:${b.shift_type}:${b.venue_id}`));
-    if (!assignments.length) return '<span class="tiny mut">Not rostered this week</span>';
-    const visible = assignments.slice(0, 3).map(row =>
-      `<span class="chip">${esc(fmtDateShort(row.work_date))} · ${esc(rosterVenueName(row.venue_id))} · ${esc(rosterShiftLabel(row.shift_type))}</span>`
-    ).join('');
-    const more = assignments.length > 3 ? `<span class="tiny mut">+${assignments.length - 3} more</span>` : '';
-    return `<div class="row wrap" style="gap:4px">${visible}${more}</div>`;
-  };
-
-  const staffRows = globalAdminDirectory ? directoryMembers.map(member => `
-    <tr>
+  const peopleRows = directoryMembers.map(member => {
+    const accessSummary = member.memberships.length
+      ? member.memberships.map(orgMember => {
+        const orgName = organisationName(orgMember.organisationId);
+        if (orgMember.role === 'manager') return `<div><b>${esc(orgName)}</b> · Manager</div>`;
+        const contexts = AUTH.venueContexts.filter(context => context.organisationId === orgMember.organisationId);
+        const assigned = contexts.filter(context => orgMember.explicitVenueIds.includes(context.realId));
+        const visible = assigned.slice(0, 2).map(context => venueDisplayLabel(context)).join(', ');
+        const more = assigned.length > 2 ? ` +${assigned.length - 2} more` : '';
+        return `<div><b>${esc(orgName)}</b> · Employee${assigned.length ? ` · ${esc(visible)}${esc(more)}` : ' · No venue access'}</div>`;
+      }).join('')
+      : '<span class="tiny mut">No organisation access</span>';
+    const protectedLabel = member.protected
+      ? '<div class="tiny" style="color:var(--warn)">Master administrator · Protected account</div>'
+      : '';
+    const manageLabel = member.protected && member.id !== AUTH.profile.id ? 'View' : 'Manage';
+    return `<tr>
       <td><div class="row" style="gap:10px">${avatarHtml(member.id)}<div>
         <div style="font-weight:600">${esc(member.displayName)}</div>
         <div class="tiny mut">${esc(profileLoginLabel(member.email) || 'No login identifier')}</div>
-        <div class="tiny mut">${member.platformRole === 'admin' ? 'Platform admin' : 'Platform user'}</div>
-        ${member.protected ? '<div class="tiny" style="color:var(--warn)">Master administrator · Protected account</div>' : ''}
+        ${protectedLabel}
       </div></div></td>
-      <td><div class="stack" style="gap:7px">${member.memberships.length ? member.memberships.map(orgMember => {
-        const orgName = organisationName(orgMember.organisationId);
-        const orgVenues = AUTH.venueContexts.filter(context => context.organisationId === orgMember.organisationId);
-        const venueText = orgMember.role === 'manager'
-          ? '<span class="chip chip-info">All venues through manager role</span>'
-          : orgVenues.filter(context => orgMember.explicitVenueIds.includes(context.realId)).map(context =>
-            `<span class="chip"><span class="venue-dot" style="width:7px;height:7px;background:${venueDotColor(context)}"></span>${esc(venueDisplayLabel(context))}</span>`
-          ).join('') || '<span class="tiny mut">No venue access</span>';
-        return `<div><div class="tiny mut">${esc(orgName)} · <b>${orgMember.role === 'manager' ? 'Manager' : 'Employee'}</b></div><div class="row wrap" style="gap:4px;margin-top:3px">${venueText}</div></div>`;
-      }).join('') : '<span class="tiny mut">No organisation access</span>'}</div></td>
-      <td>${assignmentSummary(member)}</td>
-      <td><div class="stack" style="gap:4px"><span class="chip ${member.platformRole === 'admin' ? 'chip-info' : ''}">${member.platformRole === 'admin' ? 'Platform admin' : 'User'}</span>
-        <span class="chip ${member.active ? 'chip-ok' : ''} chip-dot">${member.active ? 'Active' : 'Disabled'}</span></div></td>
-      <td style="text-align:right"><div class="row" style="gap:4px;justify-content:flex-end">
-        <button class="switch ${member.active ? 'is-on' : ''}" data-act="toggle-user" data-id="${member.id}" data-global="1"
-          aria-label="Toggle access for ${esc(member.displayName)}" ${member.id === AUTH.profile.id || member.protected ? 'disabled title="Protected by DailyOps security policy"' : ''}></button>
-        <button class="btn btn-sm btn-icon btn-ghost" data-act="edit-user" data-id="${member.id}" data-global="1" title="Manage organisation access">${ic('pencil', 14)}</button>
-      </div></td>
-    </tr>`).join('') : all.map(member => `
-    <tr>
-      <td><div class="row" style="gap:10px">${avatarHtml(member.id)}<div>
-        <div style="font-weight:600">${esc(member.displayName)}</div>
-        <div class="tiny mut">${esc(member.email)}</div>
-        ${scopeIsAll ? '<div class="tiny mut">' + esc(organisationName(member.organisationId)) + '</div>' : ''}
-        ${member.protected ? '<div class="tiny" style="color:var(--warn)">Master administrator · Protected account</div>' : ''}
-        </div></div></td>
-      <td><div class="row wrap" style="gap:5px">${venueChips(member)}</div></td>
-      <td>${assignmentSummary(member)}</td>
-      <td><div class="stack" style="gap:4px"><span class="chip ${member.role === 'manager' ? 'chip-info' : ''}">${member.role === 'manager' ? 'Manager' : 'Employee'}</span>
-        <span class="chip ${member.active ? 'chip-ok' : ''} chip-dot">${member.active ? 'Active' : 'Disabled'}</span></div></td>
-      <td style="text-align:right"><div class="row" style="gap:4px;justify-content:flex-end">
-        <button class="switch ${member.active ? 'is-on' : ''}" data-act="toggle-user" data-id="${member.id}" data-organisation="${member.organisationId}"
-          aria-label="Toggle access for ${esc(member.displayName)}" ${member.id === AUTH.profile.id || member.protected ? 'disabled title="Protected by DailyOps security policy"' : ''}></button>
-        <button class="btn btn-sm btn-icon btn-ghost" data-act="edit-user" data-id="${member.id}" data-organisation="${member.organisationId}" title="Edit profile and access">${ic('pencil', 14)}</button>
-      </div></td>
-    </tr>`).join('');
+      <td><div class="stack" style="gap:5px">${accessSummary}</div></td>
+      <td><div class="stack" style="gap:5px"><span class="chip ${member.platformRole === 'admin' ? 'chip-info' : ''}">${member.platformRole === 'admin' ? 'Platform admin' : 'User'}</span>
+        <span class="chip ${member.active ? 'chip-ok' : ''} chip-dot">${member.active ? 'Active' : 'Inactive'}</span></div></td>
+      <td style="text-align:right"><button class="btn btn-sm ${member.protected && member.id !== AUTH.profile.id ? '' : 'btn-primary'}" data-act="edit-user" data-id="${member.id}" data-global="1">${manageLabel}</button></td>
+    </tr>`;
+  }).join('');
 
   const planningVenues = managerVenueCatalog();
   const plannerRows = employees.filter(member => member.active).map(member => {
@@ -4167,25 +4137,57 @@ function pageSupabaseTeam() {
     ? `<div class="empty" style="padding:24px">Loading the organisation roster for this week…</div>`
     : weekState.error
       ? `<div class="banner banner-warn" style="margin:14px">${ic('warn', 17)}<div>${esc(weekState.error)}<br><button class="btn btn-sm" data-act="roster-week-reload" style="margin-top:9px">Try again</button></div></div>`
-      : `<div class="tablewrap"><table class="tbl" style="min-width:1320px">
+      : `<div class="tablewrap"><table class="tbl team-roster-planner" style="min-width:1320px">
           <thead><tr><th>Employee</th>${weekDates.map(date => `<th>${esc(fmtDateShort(date))}</th>`).join('')}</tr></thead>
           <tbody>${plannerRows || `<tr><td colspan="8" class="mut" style="text-align:center;padding:22px">No active employees are available for roster planning.</td></tr>`}</tbody>
         </table></div>`;
 
-  const managers = groupedMembers.filter(member =>
-    member.memberships.some(row => row.role === 'manager')
-  );
   const scopeLabel = globalAdminDirectory
     ? 'all organisations and profiles'
     : scopeIsAll ? 'all managed organisations' : organisationName(v.organisationId);
+  const teamView = R.teamView === 'roster' ? 'roster' : 'people';
   const teamActions = isPlatformAdmin()
     ? `<div class="row wrap" style="gap:8px"><button class="btn btn-sm btn-primary" data-act="create-user">${ic('plus', 15)} Create user</button></div>`
     : '';
+  const peopleCard = `<div class="card">
+    <div class="card-head"><div style="flex:1"><div class="h3">People</div>
+      <div class="tiny mut">Manage organisation access, venue access, and account status from each person's details.</div></div>
+      <span class="tiny mut nowrap hide-sm">${directoryMembers.length} people · ${directoryMembers.filter(member => member.active).length} active</span></div>
+    <div class="tablewrap"><table class="tbl">
+      <thead><tr><th>Person</th><th>Access</th><th>Status</th><th></th></tr></thead>
+      <tbody>${peopleRows || `<tr><td colspan="4" class="mut" style="text-align:center;padding:22px">No people found.</td></tr>`}</tbody>
+    </table></div>
+    <div class="card-foot tiny mut">Platform role and organisation role are separate. Detailed venue access and organisation changes are saved together from Manage.</div>
+  </div>`;
+  const rosterCards = `<div class="card">
+    <div class="card-head"><div style="flex:1">
+      <div class="row" style="gap:8px"><span class="venue-dot" style="background:${venueDotColor(v)}"></span>
+        <div class="h3">Today · ${esc(venueDisplayLabel(v))} · ${esc(fmtDateShort(day.date))}</div></div>
+      <div class="tiny mut">Only active employees with access to this venue can be assigned by a manager. Employees can use the existing "I'm covering" action.</div>
+    </div></div>
+    <div class="tablewrap"><table class="tbl">
+      <thead><tr><th>Employee</th><th style="text-align:center">Opening</th><th style="text-align:center">Closing</th></tr></thead>
+      <tbody>${rosterRows}</tbody>
+    </table></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><div style="flex:1">
+      <div class="h3">Weekly roster planner</div>
+      <div class="tiny mut">Assignments shown across every accessible venue in ${esc(scopeLabel)}. Each employee's controls are shown for every eligible venue.</div>
+    </div><div class="row" style="gap:5px">
+      <button class="btn btn-sm btn-icon" data-act="roster-week-prev" title="Previous week">${ic('left', 14)}</button>
+      <button class="btn btn-sm" data-act="roster-week-today">This week</button>
+      <button class="btn btn-sm btn-icon" data-act="roster-week-next" title="Next week">${ic('right', 14)}</button>
+    </div></div>
+    <div class="card-foot tiny mut" style="border-top:0;padding-top:0">${esc(fmtDateShort(weekDates[0]))} – ${esc(fmtDateShort(weekDates[6]))} · Opening and Closing Shift assignments</div>
+    ${plannerContent}
+  </div>`;
   return `
     <div class="page-head row-b wrap">
       <div>
         <div class="page-title">Team</div>
-        <div class="page-sub">Staff, venue access, and roster planning across ${esc(scopeLabel)}.</div>
+        <div class="page-sub">People and roster planning across ${esc(scopeLabel)}.</div>
       </div>
       ${teamActions}
     </div>
@@ -4194,41 +4196,11 @@ function pageSupabaseTeam() {
         ${isPlatformAdmin()
           ? 'This directory includes every profile, including users with no organisation membership. Create users here, then use Organisation access to manage their memberships and venue access.'
           : 'This screen manages existing organisation members, venue access, active state, and roster planning. Ask a platform administrator to create new Auth users.'}</div></div>
-      <div class="card">
-        <div class="card-head"><div style="flex:1">
-          <div class="row" style="gap:8px"><span class="venue-dot" style="background:${venueDotColor(v)}"></span>
-            <div class="h3">Roster · ${esc(venueDisplayLabel(v))} · ${esc(fmtDateShort(day.date))}</div></div>
-          <div class="tiny mut">Only active employees with access to this venue can be assigned by a manager. Employees can use the existing "I'm covering" action.</div>
-        </div></div>
-        <div class="tablewrap"><table class="tbl">
-          <thead><tr><th>Employee</th><th style="text-align:center">Opening</th><th style="text-align:center">Closing</th></tr></thead>
-          <tbody>${rosterRows}</tbody>
-        </table></div>
+      <div class="segmented" style="align-self:flex-start" role="tablist" aria-label="Team view">
+        <button data-team-view="people" class="${teamView === 'people' ? 'is-active' : ''}" role="tab" aria-selected="${teamView === 'people'}">People</button>
+        <button data-team-view="roster" class="${teamView === 'roster' ? 'is-active' : ''}" role="tab" aria-selected="${teamView === 'roster'}">Roster</button>
       </div>
-
-      <div class="card">
-        <div class="card-head"><div style="flex:1">
-          <div class="h3">Weekly roster planner</div>
-          <div class="tiny mut">Assignments shown across every accessible venue in ${esc(scopeLabel)}. Each employee's controls are shown for every eligible venue.</div>
-        </div><div class="row" style="gap:5px">
-          <button class="btn btn-sm btn-icon" data-act="roster-week-prev" title="Previous week">${ic('left', 14)}</button>
-          <button class="btn btn-sm" data-act="roster-week-today">This week</button>
-          <button class="btn btn-sm btn-icon" data-act="roster-week-next" title="Next week">${ic('right', 14)}</button>
-        </div></div>
-        <div class="card-foot tiny mut" style="border-top:0;padding-top:0">${esc(fmtDateShort(weekDates[0]))} – ${esc(fmtDateShort(weekDates[6]))} · Opening and Closing Shift assignments</div>
-        ${plannerContent}
-      </div>
-
-      <div class="card">
-        <div class="card-head"><div style="flex:1"><div class="h3">Organisation members</div>
-          <div class="tiny mut">${scopeIsAll ? 'All members across your managed organisations are shown here. Shared employees appear once per organisation membership so their organisation-specific venue access remains clear.' : 'Every member of this organisation is shown here, including employees who are not assigned to the selected venue.'} Removing the last venue is allowed and removes operational access without deleting history.</div></div>
-          <span class="tiny mut nowrap hide-sm">${employees.filter(member => member.active).length} active employees · ${directoryMembers.length} people</span></div>
-        <div class="tablewrap"><table class="tbl">
-          <thead><tr><th>${globalAdminDirectory ? 'Profile' : 'Member'}</th><th>${globalAdminDirectory ? 'Organisation / venue access' : 'Venue access'}</th><th>Roster this week</th><th>${globalAdminDirectory ? 'Platform / status' : 'Role / access'}</th><th></th></tr></thead>
-          <tbody>${staffRows || `<tr><td colspan="5" class="mut" style="text-align:center;padding:22px">No organisation members yet.</td></tr>`}</tbody>
-        </table></div>
-        <div class="card-foot tiny mut">Managers: ${managers.map(member => esc(member.displayName)).join(', ') || 'None'} — organisation role and platform role are separate.${globalAdminDirectory ? ' Platform admins can manage organisation access from each profile.' : ''}</div>
-      </div>
+      ${teamView === 'roster' ? rosterCards : peopleCard}
     </div>`;
 }
 
@@ -5190,144 +5162,263 @@ function openSupabaseAdminUserAccessEditor(userId) {
   const memberships = SUPABASE_TEAM.members
     .filter(member => member.id === userId)
     .sort((a, b) => organisationName(a.organisationId).localeCompare(organisationName(b.organisationId)));
-  const memberOrganisationIds = new Set(memberships.map(member => member.organisationId));
-  const availableOrganisations = AUTH.organisations
-    .filter(organisation => !memberOrganisationIds.has(organisation.id))
-    .sort((a, b) => a.name.localeCompare(b.name));
-  const membershipHtml = memberships.length ? memberships.map(member => {
-    const contexts = AUTH.venueContexts.filter(context => context.organisationId === member.organisationId);
-    const venueHtml = protectedLocked
-      ? '<span class="chip chip-info">Protected account</span>'
-      : member.role === 'manager'
-      ? '<span class="chip chip-info">All venues through manager role</span>'
-      : contexts.map(context => `<button class="chip ${member.explicitVenueIds.includes(context.realId) ? 'chip-accent' : ''}"
-          data-admin-venue="${context.realId}" data-admin-org="${member.organisationId}" style="cursor:pointer;height:28px;padding:0 11px">
-          <span class="venue-dot" style="width:7px;height:7px;background:${venueDotColor(context)}"></span>${esc(venueDisplayLabel(context))}</button>`).join('')
-        || '<span class="tiny mut">No venues available in this organisation</span>';
-    return `<div class="card" style="padding:13px" data-admin-membership="${member.organisationId}">
-      <div class="row-b" style="gap:9px"><div><div style="font-weight:650">${esc(organisationName(member.organisationId))}</div>
-        <div class="tiny mut">${member.role === 'manager' ? 'Organisation-wide manager access' : 'Employee with explicit venue access'}</div></div>
-        <div class="row" style="gap:6px"><select class="input" data-admin-role style="width:auto;padding:6px 28px 6px 8px" ${protectedLocked ? 'disabled' : ''}>
-          <option value="employee" ${member.role === 'employee' ? 'selected' : ''}>Employee</option>
-          <option value="manager" ${member.role === 'manager' ? 'selected' : ''}>Manager</option>
-        </select><button class="btn btn-sm btn-danger" data-admin-remove ${protectedLocked ? 'disabled' : ''}>Remove</button></div></div>
-      <div class="tiny mut" style="margin-top:10px">Venue access</div>
-      <div class="row wrap" style="gap:5px;margin-top:5px">${venueHtml}</div>
-    </div>`;
-  }).join('') : '<div class="empty" style="padding:18px">No organisation memberships. This profile can still be assigned below.</div>';
-  const organisationOptions = availableOrganisations.length
-    ? availableOrganisations.map(organisation => `<option value="${esc(organisation.id)}">${esc(organisation.name)}</option>`).join('')
-    : '<option value="">All organisations already assigned</option>';
+  const draft = {
+    active: !!profile.active,
+    platformRole: profile.platform_role || 'user',
+    memberships: memberships.map(member => ({
+      organisationId: member.organisationId,
+      role: member.role,
+      venueIds: new Set(member.explicitVenueIds || []),
+      existing: true,
+      removed: false
+    }))
+  };
+  const original = () => JSON.stringify({
+    active: draft.active,
+    platformRole: draft.platformRole,
+    memberships: draft.memberships.filter(member => !member.removed)
+      .map(member => ({
+        organisationId: member.organisationId,
+        role: member.role,
+        venueIds: member.role === 'manager' ? [] : [...member.venueIds].sort()
+      }))
+      .sort((a, b) => a.organisationId.localeCompare(b.organisationId))
+  });
+  const initialState = JSON.stringify({
+    active: draft.active,
+    platformRole: draft.platformRole,
+    memberships: draft.memberships.map(member => ({
+      organisationId: member.organisationId,
+      role: member.role,
+      venueIds: member.role === 'manager' ? [] : [...member.venueIds].sort()
+    })).sort((a, b) => a.organisationId.localeCompare(b.organisationId))
+  });
+  const state = { saving: false, error: '' };
+  const dirty = () => original() !== initialState;
+  const draftMembership = organisationId => draft.memberships.find(member => member.organisationId === organisationId);
+  const contextsFor = organisationId => AUTH.venueContexts.filter(context => context.organisationId === organisationId);
+  const managerCount = organisationId => supabaseMembersForOrganisation(organisationId)
+    .filter(member => member.role === 'manager' && member.active).length;
+  const draftPayload = () => ({
+    action: 'apply_user_access',
+    user_id: userId,
+    active: draft.active,
+    platform_role: draft.platformRole,
+    organisations: draft.memberships.filter(member => !member.removed).map(member => ({
+      organisation_id: member.organisationId,
+      role: member.role,
+      venue_ids: member.role === 'manager' ? [] : [...member.venueIds]
+    }))
+  });
 
-  openModal(`
-    <div class="modal-head"><div style="flex:1"><div class="modal-title">Organisation access</div>
-      <div class="modal-sub">${esc(profile.display_name || profileLoginLabel(profile.email) || 'DailyOps user')} · ${esc(profileLoginLabel(profile.email) || 'No login identifier')}</div>
-    </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
-    <div class="modal-body stack" style="gap:13px">
-      <div class="row" style="gap:10px;align-items:flex-start">${avatarHtml(userId)}<div><div style="font-weight:650">${esc(profile.display_name || 'DailyOps user')}</div>
-        <div class="tiny mut">${profile.active ? 'Active profile' : 'Inactive profile'} · ${profile.platform_role === 'admin' ? 'Platform admin' : 'Platform user'}</div></div></div>
-      <div class="banner ${protectedLocked ? 'banner-warn' : 'banner-info'}">${ic(protectedLocked ? 'warn' : 'info', 17)}<div>${protectedLocked ? '<b>Master administrator · Protected account.</b> This account is protected by DailyOps security policy. Access, roles, activation, and venue membership cannot be changed by another administrator.' : 'Organisation role is stored separately for every organisation. Managers inherit all venues in that organisation; employees need explicit venue access.'}</div></div>
-      <div class="stack" style="gap:9px"><div class="h3">Current memberships</div>${membershipHtml}</div>
-      <div class="card" style="padding:13px"><div class="h3">Add organisation</div><div class="row wrap" style="gap:8px;margin-top:9px">
-        <select class="input" id="admin-add-org" ${availableOrganisations.length ? '' : 'disabled'}>${organisationOptions}</select>
-        <select class="input" id="admin-add-role" style="width:auto"><option value="employee" selected>Employee</option><option value="manager">Manager</option></select>
-        <button class="btn btn-primary" data-admin-add ${availableOrganisations.length && !protectedLocked ? '' : 'disabled'}>Add access</button>
-      </div><div class="hint" style="margin-top:7px">Adding an employee does not assign a venue. Configure venue access separately below or from the Team table.</div></div>
-    </div>
-    <div class="modal-foot"><button class="btn" data-x="close">Done</button></div>`, {
-    wide: true,
-    after(root) {
-      root.querySelectorAll('[data-x=close]').forEach(button => button.onclick = closeModal);
-      root.querySelectorAll('[data-admin-venue]').forEach(button => button.onclick = () => {
-        if (protectedLocked) return;
-        const venueId = button.dataset.adminVenue;
-        closeModal();
-        toggleRemoteVenueMembership(userId, venueId);
-      });
-      root.querySelectorAll('[data-admin-role]').forEach(select => select.onchange = () => {
-        if (protectedLocked) return;
-        const membershipRoot = select.closest('[data-admin-membership]');
-        const organisationId = membershipRoot.dataset.adminMembership;
-        const current = memberships.find(member => member.organisationId === organisationId);
-        const nextRole = select.value;
-        if (!current || current.role === nextRole) return;
-        const isDemotion = current.role === 'manager' && nextRole === 'employee';
-        const managerCount = supabaseMembersForOrganisation(organisationId)
-          .filter(member => member.role === 'manager' && member.active).length;
-        const warning = isDemotion
-          ? `${profile.display_name || 'This user'} will lose inherited access to every venue in ${organisationName(organisationId)}. Only explicit employee venue assignments will remain.${managerCount === 1 ? ` This will leave ${organisationName(organisationId)} with no organisation-scoped manager.` : ''}`
-          : `This changes ${profile.display_name || 'this user'} to an organisation manager in ${organisationName(organisationId)}. They will inherit access to every venue there.`;
-        closeModal();
-        confirmModal('Change organisation role?', warning, 'Change role', async () => {
-          try {
-            await invokeSupabaseUserAccess({
-              action: 'upsert_organisation_membership',
-              user_id: userId,
-              organisation_id: organisationId,
-              organisation_role: nextRole
-            });
-            await refreshSupabaseTeamAfterAccessChange();
-            toast(`${profile.display_name || 'User'} is now an ${nextRole === 'manager' ? 'organisation manager' : 'employee'} in ${organisationName(organisationId)}`, 'ok');
-          } catch (error) {
-            console.error('[supabase] organisation role change failed', { userId, organisationId, nextRole, error });
-            refreshSupabaseAccessAfterDeniedOperation(error, 'organisation-role-change');
-            render();
-            toast(error.message || 'Could not change that organisation role.', 'warn');
-          }
-        }, isDemotion);
-      });
-      root.querySelectorAll('[data-admin-remove]').forEach(button => button.onclick = () => {
-        if (protectedLocked) return;
-        const membershipRoot = button.closest('[data-admin-membership]');
-        const organisationId = membershipRoot.dataset.adminMembership;
-        const current = memberships.find(member => member.organisationId === organisationId);
-        if (!current) return;
-        const managerCount = supabaseMembersForOrganisation(organisationId)
-          .filter(member => member.role === 'manager' && member.active).length;
-        const warning = `This removes ${profile.display_name || 'the user'} from ${organisationName(organisationId)}, removes their venue access there, and clears current and future roster and cover assignments. Historical attribution, their login account, profile, and other organisation memberships remain intact.${current.role === 'manager' && managerCount === 1 ? ` This will leave ${organisationName(organisationId)} with no organisation-scoped manager.` : ''}`;
-        closeModal();
-        confirmModal('Remove organisation access?', warning, 'Remove access', async () => {
-          try {
-            await invokeSupabaseUserAccess({
-              action: 'remove_organisation_membership',
-              user_id: userId,
-              organisation_id: organisationId
-            });
-            await refreshSupabaseTeamAfterAccessChange();
-            toast(`Removed ${profile.display_name || 'user'} from ${organisationName(organisationId)}`, 'ok');
-          } catch (error) {
-            console.error('[supabase] organisation access removal failed', { userId, organisationId, error });
-            refreshSupabaseAccessAfterDeniedOperation(error, 'organisation-access-removal');
-            render();
-            toast(error.message || 'Could not remove that organisation access.', 'warn');
-          }
-        }, true);
-      });
-      const addButton = root.querySelector('[data-admin-add]');
-      if (addButton && availableOrganisations.length && !protectedLocked) addButton.onclick = async () => {
-        const organisationId = root.querySelector('#admin-add-org').value;
-        const role = root.querySelector('#admin-add-role').value;
-        addButton.disabled = true;
-        addButton.textContent = 'Adding…';
-        try {
-          await invokeSupabaseUserAccess({
-            action: 'upsert_organisation_membership',
-            user_id: userId,
-            organisation_id: organisationId,
-            organisation_role: role
-          });
-          closeModal();
-          await refreshSupabaseTeamAfterAccessChange();
-          toast(`${profile.display_name || 'User'} added to ${organisationName(organisationId)} as ${role}`, 'ok');
-        } catch (error) {
-          console.error('[supabase] organisation access add failed', { userId, organisationId, role, error });
-          refreshSupabaseAccessAfterDeniedOperation(error, 'organisation-access-add');
-          toast(error.message || 'Could not add that organisation access.', 'warn');
-          addButton.disabled = false;
-          addButton.textContent = 'Add access';
-        }
-      };
+  let renderDraft;
+  const requestClose = () => {
+    if (state.saving) return;
+    if (!dirty()) { closeModal(); return; }
+    confirmModal(
+      'Discard changes?',
+      'You have unsaved changes to this user\'s access.',
+      'Discard changes',
+      () => {},
+      true,
+      () => renderDraft(),
+      () => { closeModal(); renderDraft(); },
+      'Keep editing'
+    );
+  };
+  const restoreDraftModal = root => {
+    root.classList.add('is-open');
+    if (!root.querySelector('.modal')) {
+      root.innerHTML = '<div class="scrim"></div><div class="modal wide"></div>';
     }
+    modalOnRequestClose = requestClose;
+  };
+  const roleWarning = (member, nextRole) => {
+    const isDemotion = member.role === 'manager' && nextRole === 'employee';
+    const managerWarning = managerCount(member.organisationId) === 1
+      ? ` This will leave ${organisationName(member.organisationId)} with no organisation-scoped manager.`
+      : '';
+    return isDemotion
+      ? `Changing this user to Employee removes inherited organisation-wide venue access. Only explicitly selected employee venues will remain accessible.${managerWarning}`
+      : 'Managers inherit all venues in this organisation. Explicit employee venue memberships may remain stored but are not required while they are a manager.';
+  };
+
+  renderDraft = () => {
+    const root = $('#modal-root');
+    restoreDraftModal(root);
+    const activeMemberships = draft.memberships.filter(member => !member.removed);
+    const availableOrganisations = AUTH.organisations
+      .filter(organisation => !activeMemberships.some(member => member.organisationId === organisation.id))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const membershipHtml = draft.memberships.length ? draft.memberships.map(member => {
+      const contexts = contextsFor(member.organisationId);
+      const removed = member.removed;
+      const venueHtml = protectedLocked
+        ? '<span class="chip chip-info">Protected account</span>'
+        : removed
+          ? '<span class="chip chip-warn">Pending removal</span>'
+          : member.role === 'manager'
+            ? '<span class="chip chip-info">All venues through manager role</span>'
+            : contexts.map(context => `<button class="chip ${member.venueIds.has(context.realId) ? 'chip-accent' : ''}"
+                data-draft-venue="${context.realId}" data-draft-org="${member.organisationId}" ${state.saving ? 'disabled' : ''} style="cursor:pointer;height:28px;padding:0 11px">
+                <span class="venue-dot" style="width:7px;height:7px;background:${venueDotColor(context)}"></span>${esc(venueDisplayLabel(context))}</button>`).join('')
+              || '<span class="tiny mut">No venues available in this organisation</span>';
+      return `<div class="card" style="padding:14px" data-draft-membership="${member.organisationId}">
+        <div class="row-b wrap" style="gap:10px"><div><div style="font-weight:650">${esc(organisationName(member.organisationId))}</div>
+          <div class="tiny mut">${removed ? 'Pending removal' : member.role === 'manager' ? 'Organisation-wide manager access' : 'Employee with explicit venue access'}</div></div>
+          <div class="row wrap" style="gap:7px">
+            <select class="input" data-draft-role style="width:auto;min-width:118px;padding:6px 28px 6px 8px" ${protectedLocked || removed || state.saving ? 'disabled' : ''}>
+              <option value="employee" ${member.role === 'employee' ? 'selected' : ''}>Employee</option>
+              <option value="manager" ${member.role === 'manager' ? 'selected' : ''}>Manager</option>
+            </select>
+            ${removed
+              ? `<button class="btn btn-sm" data-draft-undo ${state.saving ? 'disabled' : ''}>Undo</button>`
+              : `<button class="btn btn-sm btn-danger" data-draft-remove ${protectedLocked || state.saving ? 'disabled' : ''}>Remove</button>`}
+          </div></div>
+        <div class="tiny mut" style="margin-top:11px">Venue access</div>
+        <div class="row wrap" style="gap:5px;margin-top:5px">${venueHtml}</div>
+      </div>`;
+    }).join('') : '<div class="empty" style="padding:18px">No organisation memberships. Add one below.</div>';
+    const organisationOptions = availableOrganisations.length
+      ? availableOrganisations.map(organisation => `<option value="${esc(organisation.id)}">${esc(organisation.name)}</option>`).join('')
+      : '<option value="">All organisations already assigned</option>';
+    const platformLocked = protectedAccount || userId === AUTH.profile.id || state.saving;
+    const activeLocked = protectedAccount || userId === AUTH.profile.id || state.saving;
+    const dirtyLabel = dirty();
+    const modal = root.querySelector('.modal');
+    modal.innerHTML = `
+      <div class="modal-head"><div style="flex:1"><div class="modal-title">Manage user access</div>
+        <div class="modal-sub">${esc(profile.display_name || profileLoginLabel(profile.email) || 'DailyOps user')} · ${esc(profileLoginLabel(profile.email) || 'No login identifier')}</div>
+      </div><button class="iconbtn" data-access-close aria-label="Close">${ic('x', 18)}</button></div>
+      <div class="modal-body stack" style="gap:14px">
+        <div class="card" style="padding:14px"><div class="h3">Profile</div>
+          <div class="row" style="gap:10px;margin-top:10px;align-items:flex-start">${avatarHtml(userId)}<div>
+            <div style="font-weight:650">${esc(profile.display_name || 'DailyOps user')}</div>
+            <div class="tiny mut">${esc(profileLoginLabel(profile.email) || 'No login identifier')}</div>
+            <div class="row wrap" style="gap:5px;margin-top:7px"><span class="chip ${draft.active ? 'chip-ok' : 'chip-warn'}">${draft.active ? 'Active' : 'Inactive'}</span>
+              ${protectedAccount ? '<span class="chip chip-info">Master administrator</span>' : ''}</div>
+          </div></div>
+          <div class="row-b" style="margin-top:13px;gap:10px"><div><div style="font-weight:600;font-size:14px">Access enabled</div><div class="tiny mut">Inactive users retain history but cannot use operational access.</div></div>
+            <button class="switch ${draft.active ? 'is-on' : ''}" data-draft-active ${activeLocked ? 'disabled title="This account cannot change its own or protected active state"' : ''}></button></div>
+        </div>
+        <div class="card" style="padding:14px"><div class="h3">Platform access</div>
+          <div class="row-b wrap" style="margin-top:10px;gap:10px"><div><div style="font-weight:600">Global DailyOps access</div><div class="tiny mut">Platform admins can manage users and organisations across DailyOps.</div></div>
+            <select class="input" data-draft-platform-role style="width:auto;min-width:150px" ${platformLocked ? 'disabled' : ''}>
+              <option value="user" ${draft.platformRole === 'user' ? 'selected' : ''}>Regular user</option>
+              <option value="admin" ${draft.platformRole === 'admin' ? 'selected' : ''}>Platform admin</option>
+            </select></div>
+          ${protectedLocked ? '<div class="banner banner-warn" style="margin-top:11px">' + ic('warn', 17) + '<div><b>Protected account.</b> This master administrator is protected by DailyOps security policy. Its platform access, activation, organisation access, and venue access cannot be changed by another account.</div></div>' : userId === AUTH.profile.id ? '<div class="hint" style="margin-top:9px">You cannot change your own platform access. Another platform administrator must perform this change.</div>' : ''}
+        </div>
+        <div class="card" style="padding:14px"><div class="h3">Organisation access</div>
+          <div class="tiny mut" style="margin-top:4px">Role is stored separately for each organisation. Managers inherit all venues; employees use explicit venue access.</div>
+          <div class="stack" style="gap:9px;margin-top:11px">${membershipHtml}</div>
+          <div class="card" style="padding:12px;margin-top:11px;background:var(--surface-2)"><div style="font-weight:650">Add organisation</div><div class="row wrap" style="gap:8px;margin-top:9px">
+            <select class="input" data-draft-add-org ${availableOrganisations.length && !protectedLocked && !state.saving ? '' : 'disabled'}>${organisationOptions}</select>
+            <select class="input" data-draft-add-role style="width:auto" ${protectedLocked || state.saving ? 'disabled' : ''}><option value="employee" selected>Employee</option><option value="manager">Manager</option></select>
+            <button class="btn btn-primary" data-draft-add ${availableOrganisations.length && !protectedLocked && !state.saving ? '' : 'disabled'}>Add access</button>
+          </div><div class="hint" style="margin-top:7px">Adding an employee does not assign a venue. Configure venue access separately below.</div></div>
+        </div>
+        ${state.error ? `<div class="banner banner-warn">${ic('warn', 17)}<div>${esc(state.error)}</div></div>` : ''}
+      </div>
+      <div class="modal-foot"><button class="btn" data-access-close>${dirtyLabel ? 'Close' : 'Done'}</button>
+        ${dirtyLabel ? `<button class="btn btn-primary" data-access-save ${state.saving ? 'disabled' : ''}>${state.saving ? 'Saving…' : 'Save changes'}</button>` : ''}</div>`;
+
+    root.querySelectorAll('[data-access-close]').forEach(button => button.onclick = requestClose);
+    root.querySelector('[data-draft-active]')?.addEventListener('click', () => {
+      if (activeLocked) return;
+      draft.active = !draft.active;
+      renderDraft();
+    });
+    root.querySelector('[data-draft-platform-role]')?.addEventListener('change', event => {
+      if (platformLocked) return;
+      const nextRole = event.target.value;
+      if (nextRole === draft.platformRole) return;
+      const title = nextRole === 'user' ? 'Remove platform administrator access?' : 'Grant platform administrator access?';
+      const body = nextRole === 'user'
+        ? 'This user will lose global DailyOps administration privileges. Their organisation memberships and venue access will remain unchanged.'
+        : 'This gives the user global administrative access across DailyOps.';
+      confirmModal(title, body, 'Continue', () => {
+        draft.platformRole = nextRole;
+        renderDraft();
+      }, nextRole === 'user', () => renderDraft(), () => { closeModal(); renderDraft(); });
+    });
+    root.querySelectorAll('[data-draft-role]').forEach(select => select.addEventListener('change', event => {
+      const card = event.target.closest('[data-draft-membership]');
+      const member = draftMembership(card.dataset.draftMembership);
+      const nextRole = event.target.value;
+      if (!member || member.role === nextRole) return;
+      confirmModal('Change organisation role?', roleWarning(member, nextRole), 'Continue', () => {
+        member.role = nextRole;
+        renderDraft();
+      }, nextRole === 'employee', () => renderDraft(), () => { closeModal(); renderDraft(); });
+    }));
+    root.querySelectorAll('[data-draft-venue]').forEach(button => button.addEventListener('click', () => {
+      if (protectedLocked || state.saving) return;
+      const member = draftMembership(button.dataset.draftOrg);
+      if (!member || member.removed || member.role !== 'employee') return;
+      if (member.venueIds.has(button.dataset.draftVenue)) member.venueIds.delete(button.dataset.draftVenue);
+      else member.venueIds.add(button.dataset.draftVenue);
+      renderDraft();
+    }));
+    root.querySelectorAll('[data-draft-remove]').forEach(button => button.addEventListener('click', () => {
+      if (protectedLocked || state.saving) return;
+      const member = draftMembership(button.closest('[data-draft-membership]').dataset.draftMembership);
+      if (!member) return;
+      const managerWarning = member.role === 'manager' && managerCount(member.organisationId) === 1
+        ? ` This will leave ${organisationName(member.organisationId)} with no organisation-scoped manager.`
+        : '';
+      confirmModal('Remove organisation access?', `This marks ${profile.display_name || 'the user'} for removal from ${organisationName(member.organisationId)}. Venue access and current/future roster and cover assignments will be cleared only when you save.${managerWarning}`, 'Mark for removal', () => {
+        if (member.existing) member.removed = true;
+        else draft.memberships = draft.memberships.filter(item => item !== member);
+        renderDraft();
+      }, true, () => renderDraft(), () => { closeModal(); renderDraft(); });
+    }));
+    root.querySelectorAll('[data-draft-undo]').forEach(button => button.addEventListener('click', () => {
+      const member = draftMembership(button.closest('[data-draft-membership]').dataset.draftMembership);
+      if (member) { member.removed = false; renderDraft(); }
+    }));
+    root.querySelector('[data-draft-add]')?.addEventListener('click', () => {
+      if (protectedLocked || state.saving) return;
+      const organisationId = root.querySelector('[data-draft-add-org]').value;
+      const role = root.querySelector('[data-draft-add-role]').value;
+      const existing = draftMembership(organisationId);
+      if (existing) {
+        existing.removed = false;
+        existing.role = role;
+      } else {
+        draft.memberships.push({ organisationId, role, venueIds: new Set(), existing: false, removed: false });
+      }
+      renderDraft();
+    });
+    root.querySelector('[data-access-save]')?.addEventListener('click', async () => {
+      if (state.saving || protectedLocked) return;
+      state.saving = true;
+      state.error = '';
+      renderDraft();
+      try {
+        await invokeSupabaseUserAccess(draftPayload());
+        await loadSupabaseTeam();
+        if (SUPABASE_ROSTER_WEEK.start === R.rosterWeekStart && R.teamView === 'roster') {
+          await loadSupabaseRosterWeek(R.rosterWeekStart, true);
+        }
+        closeModal();
+        render();
+        toast(`${profile.display_name || 'User'} access updated`, 'ok');
+      } catch (error) {
+        console.error('[supabase] batch user access save failed', { userId, error });
+        refreshSupabaseAccessAfterDeniedOperation(error, 'batch-user-access');
+        state.saving = false;
+        state.error = error.message || 'Could not save this access draft. No changes were applied.';
+        renderDraft();
+      }
+    });
+  };
+
+  openModal('<div class="modal-body"><div class="empty">Loading access…</div></div>', {
+    wide: true,
+    locked: false,
+    onRequestClose: requestClose,
+    after: () => renderDraft()
   });
 }
 
@@ -6486,7 +6577,7 @@ function handleAct(act, ds) {
       if (!isSupabaseMode()) save();
       render(); scrollTop();
       syncSupabaseRealtimeForCurrentView();
-      if (isSupabaseMode() && R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
+      if (isSupabaseMode() && R.tab === 'team' && R.teamView === 'roster' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
       if (isSupabaseMode() && R.tab === 'history' && isMgr()) loadSupabaseHistory(true);
       toast(`Switched to ${V().name}`); break;
     }
@@ -6525,7 +6616,7 @@ function handleAct(act, ds) {
       if (isSupabaseMode()) { toast('Demo reset is unavailable while using real Supabase venue identity.', 'warn'); break; }
       confirmModal('Wipe all demo data?', 'Everything goes back to the seeded demo — staff, templates, history and alerts.', 'Wipe and reseed', () => {
         localStorage.removeItem(STORE_KEY); S = defaultState(); save();
-        R = { tab: 'today', list: 'open', historyKey: null };
+        R = { tab: 'today', list: 'open', historyKey: null, rosterWeekStart: rosterWeekStartKey(dayKey()), teamView: 'people' };
         render(); toast('Demo data reset', 'ok');
       }, true); break;
     }
@@ -6658,10 +6749,19 @@ $('#app').addEventListener('click', e => {
     render();
     scrollTop();
     syncSupabaseRealtimeForCurrentView();
-    if (isSupabaseMode() && R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
+    if (isSupabaseMode() && R.tab === 'team' && R.teamView === 'roster' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
     if (isSupabaseMode() && R.tab === 'history' && isMgr()) loadSupabaseHistory();
     if (isSupabaseMode() && R.tab === 'alerts' && isMgr()) loadSupabaseNotifications();
     if (isSupabaseMode() && R.tab === 'settings' && isMgr()) loadSupabaseNotificationRecipients();
+    return;
+  }
+  const teamView = e.target.closest('[data-team-view]');
+  if (teamView) {
+    R.teamView = teamView.dataset.teamView === 'roster' ? 'roster' : 'people';
+    render();
+    if (isSupabaseMode() && R.teamView === 'roster' && isMgr()) {
+      loadSupabaseRosterWeek(R.rosterWeekStart);
+    }
     return;
   }
   const seg = e.target.closest('.segmented [data-list]');
@@ -6684,7 +6784,7 @@ $('#venue-switch').addEventListener('change', e => {
   if (!isSupabaseMode()) save();
   render(); scrollTop();
   syncSupabaseRealtimeForCurrentView();
-  if (isSupabaseMode() && R.tab === 'team' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
+  if (isSupabaseMode() && R.tab === 'team' && R.teamView === 'roster' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
   if (isSupabaseMode() && R.tab === 'history' && isMgr()) loadSupabaseHistory(true);
   if (isSupabaseMode() && isMgr()) loadSupabaseNotificationRecipients();
   toast(`Switched to ${V().name}`);
@@ -6728,7 +6828,7 @@ $('#page').addEventListener('change', e => {
 });
 
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && $('#modal-root').classList.contains('is-open')) closeModal();
+  if (e.key === 'Escape' && $('#modal-root').classList.contains('is-open')) requestModalClose();
 });
 
 document.addEventListener('visibilitychange', () => {

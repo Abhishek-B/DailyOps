@@ -1,8 +1,39 @@
 # manage-user-access Edge Function
 
-This authenticated Edge Function lets an active platform administrator add,
-change, or remove a user's organisation membership. It does not create Auth
-users, change `platform_role`, assign venues, or delete accounts.
+This authenticated Edge Function lets an active platform administrator apply a
+user's complete organisation/platform access state. It also retains the older
+single-membership actions for compatibility. It does not create Auth users,
+assign venues outside the requested employee access state, or delete accounts.
+
+The Team People access modal uses the batch action:
+
+```json
+{
+  "action": "apply_user_access",
+  "user_id": "target-profile-uuid",
+  "active": true,
+  "platform_role": "user",
+  "organisations": [
+    {
+      "organisation_id": "organisation-uuid",
+      "role": "employee",
+      "venue_ids": ["venue-uuid"]
+    },
+    {
+      "organisation_id": "another-organisation-uuid",
+      "role": "manager",
+      "venue_ids": []
+    }
+  ]
+}
+```
+
+The browser sends the desired final state once when the administrator presses
+**Save changes**. `admin_apply_user_access(...)` is service-role-only and
+applies organisation membership, employee venue access, active state, and
+platform role transactionally. Managers inherit all venues and therefore must
+use an empty `venue_ids` array. The RPC preserves migration 021's protected
+master-account guards and rejects self-demotion.
 
 Request body:
 
@@ -34,12 +65,14 @@ organisation memberships, and historical attribution. The database rejects
 mutations targeting the protected master administrator unless the verified
 caller is that same master account.
 
-Apply `supabase/migrations/020_user_organisation_access.sql` and then
-`supabase/migrations/021_access_hardening.sql` after migrations 001 through 019
-and before deploying this function. The migrations remove direct authenticated
-organisation-membership writes, protect browser platform-role changes, keep
-venue-membership writes scoped to employee memberships in managed
-organisations, and protect the master administrator identity.
+Apply `supabase/migrations/020_user_organisation_access.sql`, then
+`supabase/migrations/021_access_hardening.sql`, and then
+`supabase/migrations/022_team_access_editor.sql` after migrations 001 through
+019 and before deploying this function. The migrations remove direct
+authenticated organisation-membership writes, protect browser platform-role
+changes, keep venue-membership writes scoped to employee memberships in managed
+organisations, protect the master administrator identity, and add the atomic
+batch access RPC.
 
 Removing an organisation membership also removes that user's venue memberships
 and current/future roster and cover assignments for that organisation's venues.
