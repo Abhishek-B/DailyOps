@@ -466,9 +466,15 @@ table.tbl tbody tr:hover { background: var(--surface-2); }
 .modal-sub { font-size: 13px; color: var(--muted); margin-top: 2px; }
 .modal-body { padding: 18px 20px; overflow-y: auto; flex: 1 1 auto; }
 .modal-foot { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; gap: 9px; justify-content: flex-end; background: var(--surface-2); flex-wrap: wrap; }
+.access-inline-confirm { flex: 1 0 100%; display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 11px 13px; border: 1px solid color-mix(in srgb, var(--warn) 32%, transparent); border-radius: var(--r-md); background: var(--warn-soft); color: var(--ink-2); animation: access-panel-in .16s ease; }
+.access-inline-confirm-title { font-size: 13px; font-weight: 700; color: var(--ink); }
+.access-inline-confirm-body { margin-top: 2px; font-size: 12.5px; line-height: 1.45; color: var(--muted); }
+.access-inline-confirm-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+.access-venue-options { animation: access-panel-in .16s ease; }
 @keyframes fade { from { opacity: 0 } }
 @keyframes pop { from { opacity: 0; transform: translate(-50%, -46%) scale(.97) } }
 @keyframes slideup { from { opacity: 0; transform: translateY(14px) } }
+@keyframes access-panel-in { from { opacity: 0; transform: translateY(-4px) } }
 
 /* review step */
 .review-item { padding: 13px 0; border-bottom: 1px solid var(--line); }
@@ -544,6 +550,9 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
   .modal { width: calc(100% - 24px); max-height: calc(100% - 32px); border-radius: 20px; }
   .modal-foot { flex-direction: column-reverse; }
   .modal-foot .btn { width: 100%; }
+  .access-inline-confirm { flex-direction: column; }
+  .access-inline-confirm-actions { width: 100%; flex-direction: column-reverse; }
+  .access-inline-confirm-actions .btn { width: 100%; }
   .card-head { padding: 13px 14px; }
   .card-body { padding: 14px; }
   .hide-sm { display: none !important; }
@@ -5193,7 +5202,7 @@ function openSupabaseAdminUserAccessEditor(userId) {
       venueIds: member.role === 'manager' ? [] : [...member.venueIds].sort()
     })).sort((a, b) => a.organisationId.localeCompare(b.organisationId))
   });
-  const state = { saving: false, error: '' };
+  const state = { saving: false, error: '', discardPrompt: false, platformRolePrompt: null };
   const dirty = () => original() !== initialState;
   const draftMembership = organisationId => draft.memberships.find(member => member.organisationId === organisationId);
   const contextsFor = organisationId => AUTH.venueContexts.filter(context => context.organisationId === organisationId);
@@ -5214,33 +5223,32 @@ function openSupabaseAdminUserAccessEditor(userId) {
   let renderDraft;
   const requestClose = () => {
     if (state.saving) return;
+    if (state.discardPrompt) {
+      state.discardPrompt = false;
+      renderDraft();
+      setTimeout(() => $('#modal-root [data-access-close]')?.focus(), 0);
+      return;
+    }
+    if (state.platformRolePrompt) {
+      state.platformRolePrompt = null;
+      renderDraft();
+      setTimeout(() => $('#modal-root [data-draft-platform-role]')?.focus(), 0);
+      return;
+    }
     if (!dirty()) { closeModal(); return; }
-    confirmModal(
-      'Discard changes?',
-      'You have unsaved changes to this user\'s access.',
-      'Discard changes',
-      () => {},
-      true,
-      () => renderDraft(),
-      () => { closeModal(); renderDraft(); },
-      'Keep editing'
-    );
+    state.discardPrompt = true;
+    renderDraft();
+    setTimeout(() => $('#modal-root [data-access-discard-keep]')?.focus(), 0);
   };
   const restoreDraftModal = root => {
     root.classList.add('is-open');
+    let restored = false;
     if (!root.querySelector('.modal')) {
       root.innerHTML = '<div class="scrim"></div><div class="modal wide"></div>';
+      restored = true;
     }
     modalOnRequestClose = requestClose;
-  };
-  const roleWarning = (member, nextRole) => {
-    const isDemotion = member.role === 'manager' && nextRole === 'employee';
-    const managerWarning = managerCount(member.organisationId) === 1
-      ? ` This will leave ${organisationName(member.organisationId)} with no organisation-scoped manager.`
-      : '';
-    return isDemotion
-      ? `Changing this user to Employee removes inherited organisation-wide venue access. Only explicitly selected employee venues will remain accessible.${managerWarning}`
-      : 'Managers inherit all venues in this organisation. Explicit employee venue memberships may remain stored but are not required while they are a manager.';
+    if (restored) root.querySelector('.scrim').addEventListener('click', requestModalClose);
   };
 
   renderDraft = () => {
@@ -5250,6 +5258,7 @@ function openSupabaseAdminUserAccessEditor(userId) {
     const availableOrganisations = AUTH.organisations
       .filter(organisation => !activeMemberships.some(member => member.organisationId === organisation.id))
       .sort((a, b) => a.name.localeCompare(b.name));
+    const draftControlsLocked = state.saving || state.discardPrompt || !!state.platformRolePrompt;
     const membershipHtml = draft.memberships.length ? draft.memberships.map(member => {
       const contexts = contextsFor(member.organisationId);
       const removed = member.removed;
@@ -5260,30 +5269,39 @@ function openSupabaseAdminUserAccessEditor(userId) {
           : member.role === 'manager'
             ? '<span class="chip chip-info">All venues through manager role</span>'
             : contexts.map(context => `<button class="chip ${member.venueIds.has(context.realId) ? 'chip-accent' : ''}"
-                data-draft-venue="${context.realId}" data-draft-org="${member.organisationId}" ${state.saving ? 'disabled' : ''} style="cursor:pointer;height:28px;padding:0 11px">
+                data-draft-venue="${context.realId}" data-draft-org="${member.organisationId}" ${state.saving || state.discardPrompt || state.platformRolePrompt ? 'disabled' : ''} style="cursor:pointer;height:28px;padding:0 11px">
                 <span class="venue-dot" style="width:7px;height:7px;background:${venueDotColor(context)}"></span>${esc(venueDisplayLabel(context))}</button>`).join('')
               || '<span class="tiny mut">No venues available in this organisation</span>';
       return `<div class="card" style="padding:14px" data-draft-membership="${member.organisationId}">
         <div class="row-b wrap" style="gap:10px"><div><div style="font-weight:650">${esc(organisationName(member.organisationId))}</div>
           <div class="tiny mut">${removed ? 'Pending removal' : member.role === 'manager' ? 'Organisation-wide manager access' : 'Employee with explicit venue access'}</div></div>
           <div class="row wrap" style="gap:7px">
-            <select class="input" data-draft-role style="width:auto;min-width:118px;padding:6px 28px 6px 8px" ${protectedLocked || removed || state.saving ? 'disabled' : ''}>
+            <select class="input" data-draft-role style="width:auto;min-width:118px;padding:6px 28px 6px 8px" ${protectedLocked || removed || state.saving || state.discardPrompt || state.platformRolePrompt ? 'disabled' : ''}>
               <option value="employee" ${member.role === 'employee' ? 'selected' : ''}>Employee</option>
               <option value="manager" ${member.role === 'manager' ? 'selected' : ''}>Manager</option>
             </select>
             ${removed
-              ? `<button class="btn btn-sm" data-draft-undo ${state.saving ? 'disabled' : ''}>Undo</button>`
-              : `<button class="btn btn-sm btn-danger" data-draft-remove ${protectedLocked || state.saving ? 'disabled' : ''}>Remove</button>`}
+              ? `<button class="btn btn-sm" data-draft-undo ${state.saving || state.discardPrompt || state.platformRolePrompt ? 'disabled' : ''}>Undo</button>`
+              : `<button class="btn btn-sm btn-danger" data-draft-remove ${protectedLocked || state.saving || state.discardPrompt || state.platformRolePrompt ? 'disabled' : ''}>Remove</button>`}
           </div></div>
         <div class="tiny mut" style="margin-top:11px">Venue access</div>
-        <div class="row wrap" style="gap:5px;margin-top:5px">${venueHtml}</div>
+        <div class="row wrap access-venue-options" style="gap:5px;margin-top:5px">${venueHtml}</div>
       </div>`;
     }).join('') : '<div class="empty" style="padding:18px">No organisation memberships. Add one below.</div>';
     const organisationOptions = availableOrganisations.length
       ? availableOrganisations.map(organisation => `<option value="${esc(organisation.id)}">${esc(organisation.name)}</option>`).join('')
       : '<option value="">All organisations already assigned</option>';
-    const platformLocked = protectedAccount || userId === AUTH.profile.id || state.saving;
-    const activeLocked = protectedAccount || userId === AUTH.profile.id || state.saving;
+    const platformLocked = protectedAccount || userId === AUTH.profile.id || draftControlsLocked;
+    const activeLocked = protectedAccount || userId === AUTH.profile.id || draftControlsLocked;
+    const platformPromptCopy = state.platformRolePrompt === 'user'
+      ? {
+        title: 'Remove platform administrator access?',
+        body: 'This user will lose global DailyOps administration privileges. Their organisation memberships and venue access will remain unchanged.'
+      }
+      : {
+        title: 'Grant platform administrator access?',
+        body: 'This gives the user global administrative access across DailyOps.'
+      };
     const dirtyLabel = dirty();
     const modal = root.querySelector('.modal');
     modal.innerHTML = `
@@ -5307,53 +5325,73 @@ function openSupabaseAdminUserAccessEditor(userId) {
               <option value="user" ${draft.platformRole === 'user' ? 'selected' : ''}>Regular user</option>
               <option value="admin" ${draft.platformRole === 'admin' ? 'selected' : ''}>Platform admin</option>
             </select></div>
+          ${state.platformRolePrompt ? `<div class="access-inline-confirm" role="alert" aria-live="polite" style="margin-top:11px">
+            <div><div class="access-inline-confirm-title">${esc(platformPromptCopy.title)}</div><div class="access-inline-confirm-body">${esc(platformPromptCopy.body)}</div></div>
+            <div class="access-inline-confirm-actions"><button class="btn btn-sm" data-platform-role-cancel>Cancel</button><button class="btn btn-sm ${state.platformRolePrompt === 'user' ? 'btn-danger' : 'btn-primary'}" data-platform-role-continue>Continue</button></div>
+          </div>` : ''}
           ${protectedLocked ? '<div class="banner banner-warn" style="margin-top:11px">' + ic('warn', 17) + '<div><b>Protected account.</b> This master administrator is protected by DailyOps security policy. Its platform access, activation, organisation access, and venue access cannot be changed by another account.</div></div>' : userId === AUTH.profile.id ? '<div class="hint" style="margin-top:9px">You cannot change your own platform access. Another platform administrator must perform this change.</div>' : ''}
         </div>
         <div class="card" style="padding:14px"><div class="h3">Organisation access</div>
           <div class="tiny mut" style="margin-top:4px">Role is stored separately for each organisation. Managers inherit all venues; employees use explicit venue access.</div>
           <div class="stack" style="gap:9px;margin-top:11px">${membershipHtml}</div>
           <div class="card" style="padding:12px;margin-top:11px;background:var(--surface-2)"><div style="font-weight:650">Add organisation</div><div class="row wrap" style="gap:8px;margin-top:9px">
-            <select class="input" data-draft-add-org ${availableOrganisations.length && !protectedLocked && !state.saving ? '' : 'disabled'}>${organisationOptions}</select>
-            <select class="input" data-draft-add-role style="width:auto" ${protectedLocked || state.saving ? 'disabled' : ''}><option value="employee" selected>Employee</option><option value="manager">Manager</option></select>
-            <button class="btn btn-primary" data-draft-add ${availableOrganisations.length && !protectedLocked && !state.saving ? '' : 'disabled'}>Add access</button>
+            <select class="input" data-draft-add-org ${availableOrganisations.length && !protectedLocked && !draftControlsLocked ? '' : 'disabled'}>${organisationOptions}</select>
+            <select class="input" data-draft-add-role style="width:auto" ${protectedLocked || draftControlsLocked ? 'disabled' : ''}><option value="employee" selected>Employee</option><option value="manager">Manager</option></select>
+            <button class="btn btn-primary" data-draft-add ${availableOrganisations.length && !protectedLocked && !draftControlsLocked ? '' : 'disabled'}>Add access</button>
           </div><div class="hint" style="margin-top:7px">Adding an employee does not assign a venue. Configure venue access separately below.</div></div>
         </div>
         ${state.error ? `<div class="banner banner-warn">${ic('warn', 17)}<div>${esc(state.error)}</div></div>` : ''}
       </div>
-      <div class="modal-foot"><button class="btn" data-access-close>${dirtyLabel ? 'Close' : 'Done'}</button>
-        ${dirtyLabel ? `<button class="btn btn-primary" data-access-save ${state.saving ? 'disabled' : ''}>${state.saving ? 'Saving…' : 'Save changes'}</button>` : ''}</div>`;
+      <div class="modal-foot">
+        ${state.discardPrompt ? `<div class="access-inline-confirm" role="alert" aria-live="assertive">
+          <div><div class="access-inline-confirm-title">Discard unsaved changes?</div><div class="access-inline-confirm-body">You have unsaved changes to this user\'s access.</div></div>
+          <div class="access-inline-confirm-actions"><button class="btn btn-sm" data-access-discard-keep>Keep editing</button><button class="btn btn-sm btn-danger" data-access-discard-confirm>Discard changes</button></div>
+        </div>` : ''}
+        <button class="btn" data-access-close>${dirtyLabel ? 'Close' : 'Done'}</button>
+        ${dirtyLabel ? `<button class="btn btn-primary" data-access-save ${state.saving || draftControlsLocked ? 'disabled' : ''}>${state.saving ? 'Saving…' : 'Save changes'}</button>` : ''}</div>`;
 
     root.querySelectorAll('[data-access-close]').forEach(button => button.onclick = requestClose);
+    root.querySelector('[data-access-discard-keep]')?.addEventListener('click', () => {
+      state.discardPrompt = false;
+      renderDraft();
+      setTimeout(() => $('#modal-root [data-access-close]')?.focus(), 0);
+    });
+    root.querySelector('[data-access-discard-confirm]')?.addEventListener('click', () => closeModal());
     root.querySelector('[data-draft-active]')?.addEventListener('click', () => {
       if (activeLocked) return;
       draft.active = !draft.active;
+      renderDraft();
+    });
+    root.querySelector('[data-platform-role-cancel]')?.addEventListener('click', () => {
+      state.platformRolePrompt = null;
+      renderDraft();
+      setTimeout(() => $('#modal-root [data-draft-platform-role]')?.focus(), 0);
+    });
+    root.querySelector('[data-platform-role-continue]')?.addEventListener('click', () => {
+      if (!state.platformRolePrompt) return;
+      draft.platformRole = state.platformRolePrompt;
+      state.platformRolePrompt = null;
       renderDraft();
     });
     root.querySelector('[data-draft-platform-role]')?.addEventListener('change', event => {
       if (platformLocked) return;
       const nextRole = event.target.value;
       if (nextRole === draft.platformRole) return;
-      const title = nextRole === 'user' ? 'Remove platform administrator access?' : 'Grant platform administrator access?';
-      const body = nextRole === 'user'
-        ? 'This user will lose global DailyOps administration privileges. Their organisation memberships and venue access will remain unchanged.'
-        : 'This gives the user global administrative access across DailyOps.';
-      confirmModal(title, body, 'Continue', () => {
-        draft.platformRole = nextRole;
-        renderDraft();
-      }, nextRole === 'user', () => renderDraft(), () => { closeModal(); renderDraft(); });
+      state.platformRolePrompt = nextRole;
+      state.error = '';
+      renderDraft();
+      setTimeout(() => $('#modal-root [data-platform-role-continue]')?.focus(), 0);
     });
     root.querySelectorAll('[data-draft-role]').forEach(select => select.addEventListener('change', event => {
       const card = event.target.closest('[data-draft-membership]');
       const member = draftMembership(card.dataset.draftMembership);
       const nextRole = event.target.value;
       if (!member || member.role === nextRole) return;
-      confirmModal('Change organisation role?', roleWarning(member, nextRole), 'Continue', () => {
-        member.role = nextRole;
-        renderDraft();
-      }, nextRole === 'employee', () => renderDraft(), () => { closeModal(); renderDraft(); });
+      member.role = nextRole;
+      renderDraft();
     }));
     root.querySelectorAll('[data-draft-venue]').forEach(button => button.addEventListener('click', () => {
-      if (protectedLocked || state.saving) return;
+      if (protectedLocked || state.saving || state.discardPrompt || state.platformRolePrompt) return;
       const member = draftMembership(button.dataset.draftOrg);
       if (!member || member.removed || member.role !== 'employee') return;
       if (member.venueIds.has(button.dataset.draftVenue)) member.venueIds.delete(button.dataset.draftVenue);
@@ -5361,7 +5399,7 @@ function openSupabaseAdminUserAccessEditor(userId) {
       renderDraft();
     }));
     root.querySelectorAll('[data-draft-remove]').forEach(button => button.addEventListener('click', () => {
-      if (protectedLocked || state.saving) return;
+      if (protectedLocked || state.saving || state.discardPrompt || state.platformRolePrompt) return;
       const member = draftMembership(button.closest('[data-draft-membership]').dataset.draftMembership);
       if (!member) return;
       const managerWarning = member.role === 'manager' && managerCount(member.organisationId) === 1
@@ -5378,7 +5416,7 @@ function openSupabaseAdminUserAccessEditor(userId) {
       if (member) { member.removed = false; renderDraft(); }
     }));
     root.querySelector('[data-draft-add]')?.addEventListener('click', () => {
-      if (protectedLocked || state.saving) return;
+      if (protectedLocked || state.saving || state.discardPrompt || state.platformRolePrompt) return;
       const organisationId = root.querySelector('[data-draft-add-org]').value;
       const role = root.querySelector('[data-draft-add-role]').value;
       const existing = draftMembership(organisationId);
