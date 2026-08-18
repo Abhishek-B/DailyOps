@@ -5,3 +5,9 @@ verify_jwt = false
 
 [functions.end-of-day]
 verify_jwt = false
+
+[functions.create-user]
+verify_jwt = true
+
+[functions.manage-user-access]
+verify_jwt = true

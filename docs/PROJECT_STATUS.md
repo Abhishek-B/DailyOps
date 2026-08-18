@@ -46,7 +46,7 @@ The browser uses only the Supabase project URL and publishable key from `supabas
 - A manager membership grants organisation-level management access, including the organisation's venues under the deployed RLS policies.
 - An employee membership identifies the user as an employee; venue access is additionally constrained by the deployed venue membership/access model.
 
-The frontend uses `organisation_members.role` to select the normal manager or employee UI. An active `platform_role = 'admin'` profile is additionally treated as globally manager-capable, and the corresponding RLS helpers enforce that capability. RLS is the real security boundary; UI visibility is not authorisation.
+The frontend exposes all accessible organisation memberships, while `managedOrganisationIds()` remains a manager-only scope for Team, roster, template, history, and notification administration. `organisation_members.role` for the selected venue's organisation determines the current manager or employee UI. An active `platform_role = 'admin'` profile is additionally treated as globally manager-capable, and the corresponding RLS helpers enforce that capability. RLS is the real security boundary; UI visibility is not authorisation. Active platform admins use a separate authenticated `manage-user-access` Edge Function for organisation-membership administration; organisation role remains per membership row and is never collapsed into `platform_role`.
 
 ## 5. Current database model
 
@@ -70,7 +70,7 @@ Important deployed enums include `app_role` (`manager`, `employee`), `checklist_
 
 The schema also contains SECURITY DEFINER access helpers, task/checklist update guards, and `ensure_daily_checklists(uuid, date)`. These helpers and guards remain part of the RLS boundary and are not renamed by this cleanup.
 
-Migration history currently consists of `001_initial_schema.sql`, `002_add_platform_role.sql`, `003_grant_helper_function_execute.sql`, `004_grant_can_update_task_execute.sql`, `005_allow_managers_delete_adhoc_daily_tasks.sql`, `006_restrict_venue_member_reads.sql`, `007_scope_team_and_roster_writes.sql`, `008_grant_can_manage_profile_execute.sql`, `009_platform_admin_access.sql`, `010_add_shift_cover_requests.sql`, `011_enable_daily_operations_realtime.sql`, `012_add_notification_delivery_and_timezone.sql`, `013_add_telegram_notification_recipients.sql`, `014_fix_notification_service_role_grants.sql`, `015_notification_workflow_and_admin_cutoff.sql`, `016_incomplete_submission_notifications.sql`, and `017_reset_today_operations.sql`. Already-applied schema migrations remain immutable.
+Migration history currently consists of `001_initial_schema.sql`, `002_add_platform_role.sql`, `003_grant_helper_function_execute.sql`, `004_grant_can_update_task_execute.sql`, `005_allow_managers_delete_adhoc_daily_tasks.sql`, `006_restrict_venue_member_reads.sql`, `007_scope_team_and_roster_writes.sql`, `008_grant_can_manage_profile_execute.sql`, `009_platform_admin_access.sql`, `010_add_shift_cover_requests.sql`, `011_enable_daily_operations_realtime.sql`, `012_add_notification_delivery_and_timezone.sql`, `013_add_telegram_notification_recipients.sql`, `014_fix_notification_service_role_grants.sql`, `015_notification_workflow_and_admin_cutoff.sql`, `016_incomplete_submission_notifications.sql`, `017_reset_today_operations.sql`, `018_platform_admin_user_provisioning.sql`, `019_fix_create_user_compensation.sql`, and `020_user_organisation_access.sql`. Already-applied schema migrations remain immutable.
 
 Migration `012_add_notification_delivery_and_timezone.sql` adds an IANA `venues.timezone` field (existing venues default to `Australia/Sydney`), notification event idempotency/retry/audit fields, and service-role-only claim/finalize/fail functions. It does not add browser write access to `notification_events` or broaden RLS.
 
@@ -94,14 +94,20 @@ Migration `016_incomplete_submission_notifications.sql` adds the per-recipient `
 
 Migration `017_reset_today_operations.sql` adds the manager-only `reset_today_operations(uuid)` SECURITY DEFINER RPC. It uses the selected venue's IANA timezone, atomically rebuilds both current-day operation rows from active templates, preserves checklist IDs, advances notification revisions, clears task/submission state, and leaves notification audit history untouched.
 
+Migration `018_platform_admin_user_provisioning.sql` adds the service-role-only `provision_created_user(...)` SECURITY DEFINER RPC. It validates the Auth user, synthetic username email, roles, and organisation, then upserts the profile and organisation membership without creating venue memberships. No authenticated or anonymous EXECUTE grant is added.
+
+Migration `019_fix_create_user_compensation.sql` corrects the synthetic email validation to `username@dailyops.invalid` and adds the service-role-only `cleanup_failed_created_user_profile(uuid)` RPC. The compensation RPC can remove only a matching synthetic-email profile with no organisation or venue memberships; it cannot remove an established DailyOps user.
+
+Migration `020_user_organisation_access.sql` removes direct authenticated writes to `organisation_members`, protects browser changes to `profiles.platform_role`, and limits `venue_members` inserts, updates, and deletes to employee memberships in organisations managed by the caller. It adds the service-role-only `admin_manage_user_organisation_access(...)` RPC, which atomically upserts or removes one user's organisation membership and cleans current/future venue access, roster assignments, cover requests, and non-platform-admin notification recipients when access is removed. Active platform-admin authorisation is performed by the `manage-user-access` Edge Function before it calls the RPC.
+
 ## 6. What is live/real today
 
 **REAL NOW**
 
-- Supabase Auth username/password login, logout, and persisted session restoration. Usernames use `USERNAME_AUTH_DOMAIN = "email.com"`; existing full email login identifiers remain supported.
+- Supabase Auth username/password login, logout, and persisted session restoration. New usernames use `USERNAME_AUTH_DOMAIN = "dailyops.invalid"`; existing full email login identifiers remain supported.
 - The authenticated `profiles` row, including `id`, `display_name`, `email`, `active`, and `platform_role`.
 - Organisation membership loading from `organisation_members`.
-- Organisation role selection from `organisation_members.role`.
+- Organisation role selection from `organisation_members.role`, evaluated for the currently selected organisation/venue so mixed-role users can move between manager and employee contexts without signing out.
 - RLS-filtered venue loading, real venue switching, accent display, and selected-venue persistence.
 - Today's Opening Shift and Closing Shift operation instances from `daily_checklists`.
 - Today's task rows from `daily_tasks`.
@@ -129,6 +135,10 @@ Migration `017_reset_today_operations.sql` adds the manager-only `reset_today_op
 - Today's Opening/Closing Shift roster assignments through `roster_assignments`, including persistence and secure employee self-cover.
 - Employee roster-aware shift context and manager on-shift counts from real roster rows.
 - Platform-admin organisation and venue visibility, with database-enforced global management access for active `platform_role = 'admin'` profiles.
+- Platform-admin-only user creation through the authenticated `create-user` Edge Function, including synthetic `dailyops.invalid` Auth identities, profile provisioning, organisation role selection, platform role selection, no automatic employee venue membership, and protected compensation for failed provisioning.
+- Platform-admin global profile directory, including profiles with no organisation memberships, with per-organisation role and venue-access context.
+- Platform-admin organisation access administration through the authenticated `manage-user-access` Edge Function: add memberships, change a user's role per organisation, and remove organisation access without deleting the Auth account or historical attribution.
+- Manager-scoped venue membership administration enforced by RLS: managers can change employee venue access only inside organisations they manage; organisation membership mutations are not available to ordinary managers.
 - Manager-capable users can filter the venue context by `All organisations` or a managed organisation; ordinary managers cannot select organisations outside their manager memberships.
 - Multi-organisation venue labels show the organisation name alongside the venue in the venue picker and manager cross-venue summary.
 - Employee weekly roster and accessible-venue view across the current planning week.
@@ -166,13 +176,13 @@ Migration `017_reset_today_operations.sql` adds the manager-only `reset_today_op
 **DEFERRED**
 
 - SMS, push notifications, email fallback, and cover-request email delivery.
-- Automated Auth-user invitation/creation, email-based assignment of an existing Auth user to an organisation, and organisation-role editing. MVP onboarding creates Auth users manually in the Supabase dashboard and then bootstraps `organisation_members` with the Team screen instructions. The missing email-based assignment flow is intentionally deferred to a manager-scoped Edge Function or narrowly scoped SECURITY DEFINER RPC; it must never use a service-role key in the browser.
+- Ordinary manager/employee Auth-user creation and arbitrary email-based assignment remain restricted. Active platform admins can create users through the authenticated `create-user` Edge Function; organisation role and platform role are selected there, while employee venue access remains a separate Team action.
 - Realtime cover alerts and manager push notifications. The current cover flow is an in-app database-backed alert only.
 - Offline/PWA support and evidence/photo attachments.
 
 ## 8. Completed milestones
 
-Steps 1–14 are complete, with the organisation-wide team, weekly roster, historical reporting, current-day realtime follow-ups, and server-side notification foundation now implemented:
+Steps 1–14 plus the platform-admin user-provisioning follow-up are complete, with the organisation-wide team, weekly roster, historical reporting, current-day realtime follow-ups, and server-side notification foundation now implemented:
 
 1. Initial multi-organisation Postgres schema, indexes, constraints, triggers, and RLS model.
 2. Additive `platform_role` schema migration for platform-level `user`/`admin` status.
@@ -192,6 +202,8 @@ Steps 1–14 are complete, with the organisation-wide team, weekly roster, histo
 16. Supabase Realtime for selected-venue/current-day tasks, shift submission state, and roster changes, using scoped channels and authoritative refetches.
 17. Supabase Edge Functions/Telegram shift-complete delivery, venue-scoped recipient configuration, idempotent notification audit state, timezone-aware scheduled end-of-day summaries, and manager delivery-status Alerts.
 18. Submit-gated completion notifications, reopen/resubmit lifecycle revisions, shift-cover Telegram delivery, and platform-admin-only EOD cutoff editing.
+19. Platform-admin-only Auth user creation through `create-user`, service-role-only profile/membership provisioning, and `dailyops.invalid` username identities.
+20. Platform-admin global profile directory and secure per-organisation membership administration through `manage-user-access`, plus manager-scoped venue membership enforcement.
 
 The repository does not use a separate generated milestone registry; this list reflects the current project history and implementation state.
 
@@ -204,9 +216,9 @@ The repository does not use a separate generated milestone registry; this list r
 - The one-time template bootstrap still uses local/demo definitions when a venue has no remote template. It does not overwrite existing remote template data.
 - The explicit demo mode still uses localStorage seed data; normal Supabase history/reporting no longer falls back to it.
 - The real-venue-to-demo-context mapping remains only for any legacy screens that are still explicitly local/demo.
-- Auth-user creation and initial organisation membership bootstrap are manual because the static browser must not use Supabase Auth admin APIs or a service-role key. New username-based staff accounts use the configured `username@email.com` Auth convention; existing full email identifiers remain compatible at login.
+- The static browser never uses Supabase Auth Admin APIs or a service-role key. New staff use the `username@dailyops.invalid` convention through the platform-admin-only `create-user` Edge Function. Rare Auth-created/database-provisioning failures use server-side compensation; an orphan Auth UUID is logged for protected administrator cleanup if deletion also fails.
 - The current organisation/venue repair is a one-time SQL cleanup when duplicate organisation rows exist; the production model should retain one organisation row with multiple venue rows.
-- Organisation role changes are intentionally not exposed in the Team UI; they remain an administrator/manual SQL operation until a narrower workflow is designed.
+- Organisation membership changes are platform-admin-only and must go through `manage-user-access` and the service-role-only `admin_manage_user_organisation_access(...)` RPC. Ordinary managers retain venue/team/roster administration inside managed organisations but cannot write `organisation_members` or promote users.
 - Employees may insert their own current roster assignment through the existing RLS policy for the explicit "I'm covering" flow; they cannot update or delete roster rows.
 - Migration `006_restrict_venue_member_reads.sql` narrows employee reads of venue membership data while preserving manager administration.
 - Migration `007_scope_team_and_roster_writes.sql` prevents cross-organisation venue membership/roster writes through raw browser requests.
@@ -226,10 +238,9 @@ The repository does not use a separate generated milestone registry; this list r
 
 Use this order for the next phases:
 
-1. Secure existing-user organisation assignment through a manager-scoped Edge Function or narrowly scoped SECURITY DEFINER RPC.
-2. Cover-request email/SMS delivery and optional push notifications.
-3. Final security testing, provider failure drills, and database/outbox coverage for non-frontend writes.
-4. Custom domain and polish.
+1. Cover-request email/SMS delivery and optional push notifications.
+2. Final security testing, provider failure drills, and database/outbox coverage for non-frontend writes.
+3. Custom domain and polish.
 
 ## 11. Git workflow
 
@@ -270,8 +281,8 @@ The exact local origin must be allowed in Supabase Authentication URL Configurat
 
 ### Step 14 notification/EOD setup and test
 
-1. Apply migrations `012_add_notification_delivery_and_timezone.sql`, `013_add_telegram_notification_recipients.sql`, `014_fix_notification_service_role_grants.sql`, `015_notification_workflow_and_admin_cutoff.sql`, `016_incomplete_submission_notifications.sql`, and `017_reset_today_operations.sql` in that order.
-2. Create one Telegram bot with BotFather, deploy both Edge Functions, and configure `TELEGRAM_BOT_TOKEN` and a long random `DAILYOPS_CRON_SECRET` as Edge Function secrets. The exact commands and recipient workflow are in the README.
+1. Apply migrations `012_add_notification_delivery_and_timezone.sql`, `013_add_telegram_notification_recipients.sql`, `014_fix_notification_service_role_grants.sql`, `015_notification_workflow_and_admin_cutoff.sql`, `016_incomplete_submission_notifications.sql`, `017_reset_today_operations.sql`, `018_platform_admin_user_provisioning.sql`, `019_fix_create_user_compensation.sql`, and `020_user_organisation_access.sql` in that order.
+2. Create one Telegram bot with BotFather, deploy the notification functions, `create-user`, and `manage-user-access`, and configure `TELEGRAM_BOT_TOKEN` and a long random `DAILYOPS_CRON_SECRET` as Edge Function secrets. Redeploy `create-user` after applying migration 019. The exact commands and recipient workflow are in the README.
 3. Enable `pg_cron`, `pg_net`, and Vault, and create the single `dailyops-end-of-day` Cron job. The job invokes the function every 15 minutes; the function applies each venue's IANA timezone and cutoff.
 4. Have the first recipient open the bot and press Start, retrieve their Chat ID through a trusted admin workflow, and add it under manager Settings. Confirm the recipient row persists after refresh.
 5. Use the recipient Test button. Confirm one `test` event/message. Complete the final task in a test shift and confirm no Telegram is sent until Submit Shift is pressed; then confirm one concise `list-complete` event/message per enabled recipient.
@@ -288,7 +299,16 @@ The exact local origin must be allowed in Supabase Authentication URL Configurat
 2. Remove B from the template and add E. Reset again and verify the resulting routine set is exactly A/C/E, with no stale B.
 3. Submit a shift before a reset and confirm its Telegram event remains in `notification_events`. Reset, complete the rebuilt shift, and submit again; confirm the second completion uses a new notification event and the old audit row remains.
 4. Attempt `select * from public.reset_today_operations('<venue uuid>');` as an employee or with an unauthorised authenticated session. The RPC must reject the call.
-5. Create `jsmith@email.com` in Supabase Auth and sign in as `jsmith`. Verify whitespace trimming, lowercase matching, allowed-character validation, generic wrong-password failure, and continued full-email login for existing administrators.
+5. Create `jsmith@dailyops.invalid` through **Team → Create user** and sign in as `jsmith`. Verify whitespace trimming, lowercase matching, allowed-character validation, generic wrong-password failure, and continued full-email login for existing administrators.
+
+### Platform-admin user creation
+
+1. Deploy `create-user` with JWT verification enabled and apply migration `018_platform_admin_user_provisioning.sql`.
+2. Sign in as an active profile with `platform_role = 'admin'`. Team should show **Create user** and organisations should come from the platform-admin organisation query.
+3. Create an employee. The Edge Function creates `<username>@dailyops.invalid`, confirms the Auth email internally, provisions the profile and selected organisation membership, and creates no `venue_members` row. Assign venue access separately in Team.
+4. Create an organisation manager and a second platform admin. The manager receives normal manager access through `organisation_members.role`; the second admin receives existing cross-organisation platform capabilities through `profiles.platform_role`.
+5. Managers, employees, and unauthenticated callers must receive `403`/`401` and cannot create Auth users through the function. The browser never receives or stores the initial password.
+6. If Auth creation succeeds but provisioning fails, the function first removes only the unprovisioned trigger-created profile through the service-role-only cleanup RPC, then deletes the new Auth user. If either compensation step fails, use the server log's orphan Auth UUID in a protected Supabase dashboard cleanup workflow; never paste service-role credentials into the frontend.
 
 ## 13. Deployment
 

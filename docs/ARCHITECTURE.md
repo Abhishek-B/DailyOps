@@ -21,7 +21,7 @@ Browser on GitHub Pages
 
 `index.html` keeps the rendering and interaction model while using Supabase for identity, organisation membership, venue access, organisation-wide manager team visibility, weekly cross-venue roster planning, recurring templates, today's operational instances, historical review, reporting metrics, CSV export, and scoped current-day Realtime synchronisation. The configured public URL/key selects this path; placeholders select demo mode.
 
-Authentication remains Supabase email/password internally. The frontend presents a username-first form and maps a username such as `jsmith` to `jsmith@email.com` through one `USERNAME_AUTH_DOMAIN` constant. Identifiers containing `@` remain compatible with existing administrator/test email accounts.
+Authentication remains Supabase email/password internally. The frontend presents a username-first form and maps a username such as `jsmith` to `jsmith@dailyops.invalid` through one `USERNAME_AUTH_DOMAIN` constant. Identifiers containing `@` remain compatible with existing administrator/test email accounts. The matching Edge Function normalization rules are kept in `supabase/functions/_shared/username.ts`.
 
 ## Core relational model
 
@@ -40,6 +40,7 @@ Team and roster scope
 - spans all organisations in the manager membership set when `All organisations` is selected
 - gives active platform admins the combined organisation and venue scope through the existing platform-admin RLS helpers
 - aggregates shared employees for cross-venue weekly planning while retaining organisation-specific memberships and venue access
+- gives active platform admins a global profile directory, including profiles with no organisation memberships, enriched with every organisation membership and its venue context
 
 Recurring shift-task template and template tasks
 - define future routine work
@@ -78,6 +79,8 @@ Server-side notifications
 - a database-managed `daily_checklists.notification_revision` distinguishes first submission from resubmission after reopen; browser callers cannot choose the revision
 - a database trigger allows only active platform admins to change `venues.cutoff_time` or `venues.timezone`, while preserving other permitted manager venue updates
 - `reset_today_operations(uuid)` is a SECURITY DEFINER RPC that checks `can_manage_venue`, calculates the venue-local date, rebuilds both current-day operation snapshots from active templates in one transaction, and advances notification revisions without sending notifications
+- `create-user` requires an authenticated bearer token, verifies an active platform-admin profile, creates an Auth user with the server-only Admin API, and calls the service-role-only `provision_created_user(...)` RPC for profile/membership provisioning
+- `manage-user-access` requires an authenticated bearer token, verifies an active platform-admin profile, and calls the service-role-only `admin_manage_user_organisation_access(...)` RPC for atomic organisation-membership changes
 
 Historical operations and CSV
 - query recent prior daily operation instances for the selected venue
@@ -93,7 +96,7 @@ Live operational synchronisation
 
 ## Authorization boundary
 
-The browser key is publishable. RLS policies use the signed-in Auth UUID, organisation memberships, venue memberships, active profiles, and the platform-admin helper to decide access. Ordinary managers inherit access to all venues in their organisation; active platform admins inherit management access across organisations; employees require an active venue membership. Managers can administer members, profiles, venue memberships, and rosters only within managed organisations/venues. Migrations 006 and 007 narrow venue-membership reads and require manager-created memberships/rosters to stay within the target organisation; migration 008 records the authenticated helper grant required for manager profile updates; migration 009 makes the active platform-admin capability explicit in RLS; migration 010 scopes cover-request alerts to managed venues; migration 011 only adds the three live operational tables to the standard Realtime publication and does not broaden RLS; migration 015 adds only the service-role reads needed by server-side notification validation and the cutoff trigger; migration 017 exposes only the authenticated, venue-manager-authorised Reset Today RPC. Disabling a profile or removing venue access clears future roster assignments but preserves historical rows and attribution. The browser does not create Auth users or yet assign unassociated Auth users to an organisation by email. That workflow is intentionally deferred to a manager-scoped Edge Function or narrowly scoped SECURITY DEFINER RPC. Database triggers prevent employees from changing task definition fields, attributing a completion to another user, selecting a notification revision, or changing protected venue timing settings.
+The browser key is publishable. RLS policies use the signed-in Auth UUID, organisation memberships, venue memberships, active profiles, and the platform-admin helper to decide access. Ordinary managers inherit access to all venues in their organisation; active platform admins inherit management access across organisations; employees require an active venue membership. Managers can administer profiles, venue memberships, and rosters only within managed organisations/venues; they cannot write `organisation_members`. Migration 020 restricts venue membership inserts/updates/deletes to employee memberships in the target venue organisation and protects browser platform-role changes. Migration 020 also exposes only the service-role-only organisation-access RPC, which is called by the authenticated platform-admin `manage-user-access` Edge Function. The browser does not create Auth users directly. `create-user` and `manage-user-access` independently verify active platform-admin callers. Database triggers prevent employees from changing task definition fields, attributing a completion to another user, selecting a notification revision, changing protected venue timing settings, or changing `platform_role` through the browser.
 
 ## Snapshot invariant
 
