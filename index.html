@@ -251,6 +251,7 @@ body.mobile-view .statusbar {
 
 .content { flex: 1 1 auto; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; }
 .page { max-width: 1080px; margin: 0 auto; padding: 26px 26px 90px; }
+.page.is-roster-page { width: 100%; max-width: 1780px; }
 .bottomnav { display: none; }
 
 /* ---------- typography ---------- */
@@ -423,6 +424,42 @@ table.tbl tbody tr:hover { background: var(--surface-2); }
 .team-roster-planner td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface); }
 .team-roster-planner th:first-child { z-index: 2; }
 .team-roster-planner tbody tr:hover td:first-child { background: var(--surface-2); }
+.roster-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; align-items: start; }
+.roster-layout.has-editor { grid-template-columns: minmax(0, 1fr) minmax(320px, 360px); }
+.roster-main { min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.roster-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.roster-filterbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.roster-week-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); }
+.roster-week-board { display: grid; grid-template-columns: minmax(165px, 190px) repeat(7, minmax(110px, 1fr)); min-width: 940px; }
+.roster-week-cell { min-height: 104px; padding: 9px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--surface); }
+.roster-week-cell:nth-child(8n) { border-right: 0; }
+.roster-week-head { min-height: 48px; padding: 9px 10px; background: var(--surface-2); font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .055em; }
+.roster-week-head.roster-sticky, .roster-person.roster-sticky { position: sticky; left: 0; z-index: 2; background: var(--surface-2); }
+.roster-person { display: flex; align-items: flex-start; gap: 9px; min-height: 104px; }
+.roster-person-name { min-width: 0; font-size: 13.5px; font-weight: 640; overflow-wrap: anywhere; }
+.roster-person-meta { margin-top: 3px; font-size: 11px; color: var(--muted); }
+.roster-assignment-card { display: block; width: 100%; padding: 7px 8px; margin-bottom: 6px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 9px; background: var(--surface-2); text-align: left; transition: background .14s, border-color .14s, transform .14s; }
+.roster-assignment-card:hover { background: var(--accent-soft); border-color: var(--accent-line); transform: translateY(-1px); }
+.roster-assignment-card .roster-card-title { display: block; font-size: 12px; font-weight: 650; line-height: 1.25; }
+.roster-assignment-card .roster-card-sub { display: block; margin-top: 3px; font-size: 11px; color: var(--muted); }
+.roster-add { display: inline-block; padding: 3px 4px; color: var(--muted); font-size: 11.5px; border-radius: 6px; }
+.roster-add:hover { color: var(--accent); background: var(--accent-soft); }
+.roster-coverage { display: flex; gap: 6px; flex-wrap: wrap; }
+.roster-coverage-day { min-width: 66px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); text-align: left; }
+.roster-coverage-day.is-gap { border-color: color-mix(in srgb, var(--warn) 35%, transparent); background: var(--warn-soft); }
+.roster-coverage-day b { display: block; font-size: 11px; }
+.roster-coverage-day span { display: block; margin-top: 2px; font-size: 11px; color: var(--muted); }
+.roster-day-group { padding: 14px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); }
+.roster-day-operation { padding: 10px 0 0; border-top: 1px solid var(--line); margin-top: 10px; }
+.roster-day-operation:first-of-type { border-top: 0; margin-top: 0; }
+.roster-person-chip { display: inline-flex; align-items: center; gap: 6px; margin: 4px 5px 0 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); font-size: 12px; }
+.roster-drawer { position: sticky; top: 14px; border: 1px solid var(--line); border-radius: var(--r-xl); background: var(--surface); box-shadow: var(--shadow-md); overflow: hidden; }
+.roster-drawer-head { padding: 16px; border-bottom: 1px solid var(--line); }
+.roster-drawer-body { padding: 16px; }
+.roster-drawer-foot { display: flex; gap: 8px; justify-content: flex-end; padding: 13px 16px; border-top: 1px solid var(--line); background: var(--surface-2); }
+.roster-drawer-foot .btn-danger { margin-right: auto; }
+.roster-copy-panel { padding: 11px 13px; border: 1px solid color-mix(in srgb, var(--info) 28%, transparent); border-radius: var(--r-md); background: var(--info-soft); }
+.roster-copy-panel .row { justify-content: space-between; align-items: center; }
 .num { font-variant-numeric: tabular-nums; }
 
 /* ---------- stat tiles ---------- */
@@ -558,6 +595,9 @@ html[data-theme="dark"] .toast { background: var(--surface-3); color: var(--ink)
   .hide-sm { display: none !important; }
   .userpick select { max-width: 88px; }
   table.tbl th, table.tbl td { padding: 9px 11px; }
+  .page.is-roster-page { max-width: none; }
+  .roster-layout, .roster-layout.has-editor { grid-template-columns: 1fr; }
+  .roster-drawer { position: relative; top: auto; }
 }
 @container app (max-width: 520px) {
   .stats { grid-template-columns: 1fr 1fr; }
@@ -739,6 +779,7 @@ const P = {
   list:    '<path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/>',
   users:   '<path d="M16 20v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 20v-2a4 4 0 00-3-3.9"/><path d="M16 3.1a4 4 0 010 7.8"/>',
   clock:   '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 1.9"/>',
+  calendar:'<rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
   cog:     '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.6 1.6 0 00-1.8-.3 1.6 1.6 0 00-1 1.5V21a2 2 0 11-4 0v-.1A1.6 1.6 0 008 19.4a1.6 1.6 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.6 1.6 0 00.3-1.8 1.6 1.6 0 00-1.5-1H2a2 2 0 110-4h.1A1.6 1.6 0 003.6 8a1.6 1.6 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.6 1.6 0 001.8.3H8a1.6 1.6 0 001-1.5V2a2 2 0 114 0v.1a1.6 1.6 0 001 1.5 1.6 1.6 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.6 1.6 0 00-.3 1.8V8a1.6 1.6 0 001.5 1H22a2 2 0 110 4h-.1a1.6 1.6 0 00-1.5 1z"/>',
   plus:    '<path d="M12 5v14M5 12h14"/>',
   trash:   '<path d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/>',
@@ -1474,6 +1515,8 @@ async function refreshSupabaseAccess(reason) {
     await loadSupabaseTemplates();
     await loadSupabaseToday();
     clearSupabaseManagerState();
+    R.rosterEditor = null;
+    R.rosterCopyPrompt = false;
     showApp();
     render();
     syncSupabaseRealtimeForCurrentView();
@@ -1482,6 +1525,7 @@ async function refreshSupabaseAccess(reason) {
       loadSupabaseNotifications();
       loadSupabaseNotificationRecipients();
       if (R.tab === 'history') loadSupabaseHistory(true);
+      if (R.tab === 'roster') loadSupabaseRosterWeek(R.rosterWeekStart, true);
     } else {
       loadSupabaseMyRosterWeek(rosterWeekStartKey(dayKey()), true);
     }
@@ -1567,7 +1611,9 @@ function currentSupabaseOrganisationId() {
 }
 
 function currentSupabaseOrganisationIds() {
-  const managedIds = managedOrganisationIds();
+  const managedIds = isPlatformAdmin()
+    ? AUTH.organisations.map(organisation => organisation.id)
+    : managedOrganisationIds();
   return AUTH.selectedOrganisationId
     ? managedIds.filter(id => id === AUTH.selectedOrganisationId)
     : managedIds;
@@ -1646,11 +1692,20 @@ function supabaseDirectoryMemberForUser(userId) {
   return platformAdminDirectoryMembers().find(member => member.id === userId) || null;
 }
 
-function canRosterSupabaseMemberAtVenue(member, context) {
-  const membership = (member.memberships || [member]).find(row =>
-    row.organisationId === context.organisationId && row.role === 'employee'
-  );
-  return !!membership && membership.active && membership.venueIds.includes(context.realId);
+function supabaseOrganisationEmployeeMembership(member, context) {
+  return (member?.memberships || [member]).find(row =>
+    row.organisationId === context?.organisationId && row.role === 'employee'
+  ) || null;
+}
+
+function isSupabaseOrganisationEmployeeAtVenue(member, context) {
+  const membership = supabaseOrganisationEmployeeMembership(member, context);
+  return !!member && member.active !== false && !!membership && membership.active !== false;
+}
+
+function hasPermanentSupabaseVenueAccess(member, context) {
+  const membership = supabaseOrganisationEmployeeMembership(member, context);
+  return !!membership && (membership.explicitVenueIds || []).includes(context.realId);
 }
 
 function supabaseMemberForUser(userId, organisationId) {
@@ -1985,6 +2040,9 @@ async function selectOrganisation(id) {
     : targetContexts.some(context => context.realId === savedVenueId)
       ? savedVenueId
       : targetContexts[0].realId;
+  R.rosterVenueId = '';
+  R.rosterEditor = null;
+  R.rosterCopyPrompt = false;
 
   try {
     localStorage.setItem(`dailyops.supabase.organisation-selection.${AUTH.profile.id}`, nextOrganisationId || 'all');
@@ -1996,7 +2054,7 @@ async function selectOrganisation(id) {
     SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
     render();
     syncSupabaseRealtimeForCurrentView();
-    if (R.tab === 'team' && R.teamView === 'roster' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart, true);
+    if (R.tab === 'roster' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart, true);
     if (R.tab === 'history' && isMgr()) loadSupabaseHistory(true);
     if (isMgr()) loadSupabaseCoverRequests();
     if (isMgr()) loadSupabaseNotificationRecipients();
@@ -2017,7 +2075,7 @@ function organisationRoleForVenue(v) {
 function ensureCurrentTabAllowed() {
   if (isSupabaseMode()
     && !isMgr()
-    && ['team', 'templates', 'history', 'alerts', 'settings'].includes(R.tab)) {
+    && ['team', 'roster', 'templates', 'history', 'alerts', 'settings'].includes(R.tab)) {
     R.tab = 'today';
   }
 }
@@ -2209,6 +2267,15 @@ function rosterWeekDates(start) {
   return Array.from({ length: 7 }, (_, index) => dayKey(addDays(first, index)));
 }
 
+const ROSTER_OPERATION_META = {
+  open: { label: 'Opening', full: 'Opening Shift', order: 0 },
+  close: { label: 'Closing', full: 'Closing Shift', order: 1 }
+};
+const rosterOperationTypes = () => Object.keys(ROSTER_OPERATION_META)
+  .sort((a, b) => ROSTER_OPERATION_META[a].order - ROSTER_OPERATION_META[b].order);
+const rosterOperationLabel = operation => ROSTER_OPERATION_META[operation]?.label || operation || 'Operation';
+const rosterOperationFullLabel = operation => ROSTER_OPERATION_META[operation]?.full || operation || 'Operation';
+
 function rosterVenueName(venueId) {
   const context = (isSupabaseMode() ? AUTH.venueContexts : venueCatalog())
     .find(item => isSupabaseMode() ? item.realId === venueId : item.id === venueId);
@@ -2216,7 +2283,7 @@ function rosterVenueName(venueId) {
 }
 
 function rosterShiftLabel(shiftType) {
-  return LIST_META[shiftType] ? LIST_META[shiftType].label : shiftType;
+  return rosterOperationLabel(shiftType);
 }
 
 async function loadSupabaseRosterWeek(start, force = false) {
@@ -2281,6 +2348,59 @@ async function loadSupabaseRosterWeek(start, force = false) {
     };
   }
   render();
+}
+
+async function copyPreviousSupabaseRosterWeek() {
+  if (!isSupabaseMode() || !isMgr() || R.rosterCopyPrompt === 'saving') return;
+  const targetStart = R.rosterWeekStart || rosterWeekStartKey(dayKey());
+  const targetDates = rosterWeekDates(targetStart);
+  if (targetDates[6] < dayKey()) {
+    toast('Past roster dates are read-only.', 'warn');
+    return;
+  }
+  R.rosterCopyPrompt = 'saving';
+  render();
+  const venueIds = managerVenueCatalog().map(context => context.realId);
+  const previousDates = rosterWeekDates(dayKey(addDays(parseKey(targetStart), -7)));
+  try {
+    const sourceResult = venueIds.length
+      ? await DB.from('roster_assignments').select('id,venue_id,user_id,work_date,shift_type,start_time,end_time').in('venue_id', venueIds).gte('work_date', previousDates[0]).lte('work_date', previousDates[6])
+      : { data: [], error: null };
+    if (sourceResult.error) throw sourceResult.error;
+    const destinationRows = rosterWeekRows();
+    const existing = new Set(destinationRows.map(row => `${row.venue_id}:${row.user_id}:${row.work_date}:${row.shift_type}`));
+    const members = rosterPlanningMembers();
+    const contextsById = Object.fromEntries(managerVenueCatalog().map(context => [context.realId, context]));
+    let copied = 0, already = 0, skipped = 0;
+    for (const row of sourceResult.data || []) {
+      const destinationDate = dayKey(addDays(parseKey(row.work_date), 7));
+      if (destinationDate < dayKey()) { skipped++; continue; }
+      const key = `${row.venue_id}:${row.user_id}:${destinationDate}:${row.shift_type}`;
+      if (existing.has(key)) { already++; continue; }
+      const context = contextsById[row.venue_id];
+      const member = members.find(item => item.id === row.user_id);
+      if (!context || !member || !isSupabaseOrganisationEmployeeAtVenue(member, context)) { skipped++; continue; }
+      const result = await DB.from('roster_assignments').insert({
+        id: crypto.randomUUID(), venue_id: row.venue_id, user_id: row.user_id,
+        work_date: destinationDate, shift_type: row.shift_type,
+        start_time: row.start_time, end_time: row.end_time
+      });
+      if (result.error && result.error.code === '23505') { already++; continue; }
+      if (result.error) throw result.error;
+      existing.add(key);
+      copied++;
+    }
+    await loadSupabaseRosterWeek(targetStart, true);
+    R.rosterCopyPrompt = false;
+    render();
+    toast(`${copied} assignment${copied === 1 ? '' : 's'} copied · ${already} already existed · ${skipped} skipped because access changed`, 'ok');
+  } catch (error) {
+    console.error('[supabase] previous roster week copy failed', { targetStart, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'roster-copy');
+    R.rosterCopyPrompt = false;
+    render();
+    toast('Could not copy the previous roster week. No further assignments were copied.', 'warn');
+  }
 }
 
 async function loadSupabaseMyRosterWeek(start, force = false) {
@@ -3517,12 +3637,19 @@ function exportSupabaseHistory(days, filename) {
 /* ==========================================================================
    RENDER
    ========================================================================== */
-let R = { tab: 'today', list: 'open', historyKey: null, rosterWeekStart: rosterWeekStartKey(dayKey()), teamView: 'people' };
+let R = {
+  tab: 'today', list: 'open', historyKey: null,
+  rosterWeekStart: rosterWeekStartKey(dayKey()),
+  rosterView: 'week', rosterDay: dayKey(), rosterVenueId: '', rosterPeopleSearch: '',
+  rosterEditor: null, rosterCopyPrompt: false,
+  teamView: 'people'
+};
 
 const NAV_MGR = [
   { id:'today',     label:'Today',      icon:'home'  },
   { id:'templates', label:'Templates',  icon:'list'  },
   { id:'team',      label:'Team',       icon:'users' },
+  { id:'roster',    label:'Roster',     icon:'calendar' },
   { id:'history',   label:'History',    icon:'clock' },
   { id:'settings',  label:'Settings',   icon:'cog'   }
 ];
@@ -3702,11 +3829,13 @@ function render() {
   const previousScrollTop = content ? content.scrollTop : null;
   renderChrome();
   const page = $('#page');
+  page.classList.toggle('is-roster-page', R.tab === 'roster');
   let html = '';
   if (!isMgr())                     html = pageEmployee();
   else if (R.tab === 'today')       html = pageManagerToday();
   else if (R.tab === 'templates')   html = pageTemplates();
   else if (R.tab === 'team')        html = pageTeam();
+  else if (R.tab === 'roster')      html = isSupabaseMode() ? pageSupabaseRoster() : pageTeam();
   else if (R.tab === 'history')     html = pageHistory();
   else if (R.tab === 'alerts')      html = pageAlerts();
   else if (R.tab === 'settings')    html = pageSettings();
@@ -4055,7 +4184,351 @@ function pageTemplates() {
 /* ==========================================================================
    MANAGER · TEAM & ROSTER
    ========================================================================== */
+function rosterPlanningContexts() {
+  const contexts = managerVenueCatalog();
+  return R.rosterVenueId ? contexts.filter(context => context.realId === R.rosterVenueId) : contexts;
+}
+
+function rosterWeekRows() {
+  const scope = currentSupabaseRosterScopeKey();
+  const weekStart = R.rosterWeekStart || rosterWeekStartKey(dayKey());
+  return SUPABASE_ROSTER_WEEK.organisationId === scope && SUPABASE_ROSTER_WEEK.start === weekStart
+    ? (SUPABASE_ROSTER_WEEK.rows || []) : [];
+}
+
+function rosterPlanningMembers() {
+  return aggregateSupabaseTeamMembers(supabaseMembersForCurrentScope())
+    .filter(member => member.active && member.memberships.some(row => row.role === 'employee'))
+    .sort((a, b) => a.displayName.localeCompare(b.displayName));
+}
+
+function rosterEligibleMembersForVenue(context) {
+  return rosterPlanningMembers().filter(member => isSupabaseOrganisationEmployeeAtVenue(member, context));
+}
+
+function rosterEditorWarnings(draft) {
+  const context = managerVenueCatalog().find(item => item.realId === draft.venueId);
+  const member = rosterPlanningMembers().find(item => item.id === draft.userId);
+  if (!context || !member || !draft.userId || !draft.workDate) return [];
+
+  const warnings = [];
+  const venueLabel = venueDisplayLabel(context);
+  if (!hasPermanentSupabaseVenueAccess(member, context)) {
+    warnings.push({
+      kind: 'info',
+      text: `${member.displayName} does not currently have permanent access to ${venueLabel}. You can still roster them here.`
+    });
+  }
+
+  const otherRows = rosterWeekRows().filter(row =>
+    row.id !== draft.id && row.user_id === draft.userId && row.work_date === draft.workDate
+  );
+  const duplicate = otherRows.some(row =>
+    row.venue_id === draft.venueId && row.shift_type === draft.shiftType
+  );
+  if (duplicate) {
+    warnings.push({
+      kind: 'duplicate',
+      text: `${member.displayName} is already assigned to ${rosterOperationFullLabel(draft.shiftType)} at ${venueLabel} on this date.`
+    });
+  }
+
+  otherRows
+    .filter(row => row.venue_id !== draft.venueId && row.shift_type === draft.shiftType)
+    .forEach(row => {
+      const otherContext = AUTH.venueContexts.find(item => item.realId === row.venue_id);
+      warnings.push({
+        kind: 'info',
+        text: `${member.displayName} is also assigned to ${rosterOperationFullLabel(draft.shiftType)} at ${otherContext ? venueDisplayLabel(otherContext) : 'another venue'} on this day.`
+      });
+    });
+
+  if (draft.startTime && draft.endTime) {
+    otherRows
+      .filter(row => row.start_time && row.end_time && draft.startTime < String(row.end_time).slice(0, 5) && String(row.start_time).slice(0, 5) < draft.endTime)
+      .forEach(row => {
+        const otherContext = AUTH.venueContexts.find(item => item.realId === row.venue_id);
+        const time = rosterTimeLabel(row.start_time, row.end_time);
+        warnings.push({
+          kind: 'info',
+          text: `${member.displayName} has an overlapping assignment at ${otherContext ? venueDisplayLabel(otherContext) : 'another venue'}${time ? `, ${time}` : ''}.`
+        });
+      });
+  }
+  return warnings;
+}
+
+function rosterProfileName(userId) {
+  const profile = SUPABASE_TEAM.profilesById[userId];
+  return profile?.display_name || profileLoginLabel(profile?.email) || 'DailyOps user';
+}
+
+function rosterTimeLabel(startTime, endTime) {
+  if (!startTime && !endTime) return '';
+  const label = value => String(value || '').slice(0, 5).replace(/^0/, '');
+  return `${label(startTime) || '—'}–${label(endTime) || '—'}`;
+}
+
+function rosterWeekLabel(start) {
+  const dates = rosterWeekDates(start);
+  return `${fmtDateShort(dates[0])} – ${fmtDateShort(dates[6])}`;
+}
+
+function rosterAssignmentCard(row) {
+  const context = AUTH.venueContexts.find(item => item.realId === row.venue_id);
+  const time = rosterTimeLabel(row.start_time, row.end_time);
+  return `<button class="roster-assignment-card" data-act="roster-edit" data-id="${esc(row.id)}" title="Edit assignment">
+    <span class="row" style="gap:5px"><span class="venue-dot" style="width:7px;height:7px;background:${context ? venueDotColor(context) : 'var(--muted)'}"></span><span class="roster-card-title">${esc(context ? venueDisplayLabel(context) : 'Unknown venue')}</span></span>
+    <span class="roster-card-sub">${esc(rosterOperationLabel(row.shift_type))}${time ? ` · ${esc(time)}` : ''}</span>
+  </button>`;
+}
+
+function rosterCoverageGaps(dates, rows, contexts) {
+  const gaps = [];
+  rosterOperationTypes().forEach(operation => dates.forEach(date => contexts.forEach(context => {
+    if (!rows.some(row => row.venue_id === context.realId && row.work_date === date && row.shift_type === operation)) {
+      gaps.push({ date, venueId: context.realId, operation });
+    }
+  })));
+  return gaps;
+}
+
+function rosterCoverageHtml(dates, rows, contexts) {
+  const gaps = rosterCoverageGaps(dates, rows, contexts);
+  return `<div class="card"><div class="card-head"><div><div class="h3">Coverage</div><div class="tiny mut">Each managed venue should have at least one person assigned to every supported operation.</div></div></div>
+    <div class="card-body"><div class="roster-coverage">${dates.map(date => {
+      const dayGaps = gaps.filter(gap => gap.date === date);
+      const dayName = new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(parseKey(date));
+      return `<button class="roster-coverage-day ${dayGaps.length ? 'is-gap' : ''}" data-act="roster-gap-day" data-date="${date}" title="${dayGaps.length ? `${dayGaps.length} coverage gap${dayGaps.length === 1 ? '' : 's'}` : 'Coverage complete'}"><b>${esc(dayName)}</b><span>${dayGaps.length ? `⚠ ${dayGaps.length}` : '✓ Covered'}</span></button>`;
+    }).join('')}</div>
+    ${gaps.length ? `<div class="tiny mut" style="margin-top:10px">${gaps.slice(0, 3).map(gap => `${esc(venueDisplayLabel(AUTH.venueContexts.find(context => context.realId === gap.venueId) || {}))} · ${esc(rosterOperationLabel(gap.operation))} · ${esc(fmtDateShort(gap.date))}`).join('<br>')}${gaps.length > 3 ? `<br>+${gaps.length - 3} more gaps` : ''}</div>` : '<div class="tiny mut" style="margin-top:10px">No coverage gaps in the selected scope.</div>'}</div></div>`;
+}
+
+function rosterEditorDraft(row, date, userId, venueId, shiftType) {
+  return {
+    id: row?.id || null,
+    venueId: row?.venue_id || venueId || R.rosterVenueId || '',
+    userId: row?.user_id || userId || '',
+    workDate: row?.work_date || date || R.rosterDay || dayKey(),
+    shiftType: row?.shift_type || shiftType || rosterOperationTypes()[0],
+    startTime: row?.start_time ? String(row.start_time).slice(0, 5) : '',
+    endTime: row?.end_time ? String(row.end_time).slice(0, 5) : ''
+  };
+}
+
+function openSupabaseRosterEditor(assignmentId, date, userId, venueId, shiftType) {
+  const row = assignmentId ? rosterWeekRows().find(item => item.id === assignmentId) : null;
+  if (assignmentId && !row) {
+    toast('That roster assignment is no longer loaded. Refresh and try again.', 'warn');
+    return;
+  }
+  R.rosterEditor = { draft: rosterEditorDraft(row, date, userId, venueId, shiftType), saving: false, error: '' };
+  render();
+}
+
+function closeSupabaseRosterEditor() {
+  R.rosterEditor = null;
+  render();
+}
+
+async function saveSupabaseRosterEditor() {
+  const editor = R.rosterEditor;
+  if (!editor || editor.saving) return;
+  const draft = editor.draft;
+  if (draft.workDate < dayKey()) {
+    editor.error = 'Past roster dates are read-only.';
+    render();
+    return;
+  }
+  const context = managerVenueCatalog().find(item => item.realId === draft.venueId);
+  const member = rosterPlanningMembers().find(item => item.id === draft.userId);
+  if (!context || !member || !isSupabaseOrganisationEmployeeAtVenue(member, context)) {
+    editor.error = 'Choose an active employee of the selected venue’s organisation.';
+    render();
+    return;
+  }
+  if (!rosterOperationTypes().includes(draft.shiftType)) {
+    editor.error = 'Choose a supported operation.';
+    render();
+    return;
+  }
+  if (draft.startTime && draft.endTime && draft.endTime < draft.startTime) {
+    editor.error = 'End time must be after start time.';
+    render();
+    return;
+  }
+  if (rosterEditorWarnings(draft).some(warning => warning.kind === 'duplicate')) {
+    editor.error = `${member.displayName} is already assigned to ${rosterOperationFullLabel(draft.shiftType)} at ${venueDisplayLabel(context)} on this date.`;
+    render();
+    return;
+  }
+  editor.saving = true;
+  editor.error = '';
+  render();
+  const payload = {
+    venue_id: draft.venueId,
+    user_id: draft.userId,
+    work_date: draft.workDate,
+    shift_type: draft.shiftType,
+    start_time: draft.startTime || null,
+    end_time: draft.endTime || null
+  };
+  try {
+    const result = draft.id
+      ? await DB.from('roster_assignments').update(payload).eq('id', draft.id)
+      : await DB.from('roster_assignments').insert({ id: crypto.randomUUID(), ...payload });
+    if (result.error) {
+      if (result.error.code === '23505') throw new Error('That employee already has this operation assigned at this venue on that date.');
+      throw result.error;
+    }
+    R.rosterWeekStart = rosterWeekStartKey(draft.workDate);
+    if (R.rosterView === 'day') R.rosterDay = draft.workDate;
+    await loadSupabaseRosterWeek(R.rosterWeekStart, true);
+    if (draft.workDate === dayKey()) await loadSupabaseToday();
+    R.rosterEditor = null;
+    render();
+    toast(draft.id ? 'Roster assignment updated' : 'Roster assignment added', 'ok');
+  } catch (error) {
+    console.error('[supabase] roster assignment save failed', { draft, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'roster-assignment-save');
+    editor.saving = false;
+    editor.error = error.message || 'Could not save that roster assignment. Please try again.';
+    render();
+  }
+}
+
+async function removeSupabaseRosterAssignment() {
+  const editor = R.rosterEditor;
+  if (!editor || !editor.draft.id || editor.saving) return;
+  if (editor.draft.workDate < dayKey()) {
+    editor.error = 'Past roster dates are read-only.';
+    render();
+    return;
+  }
+  editor.saving = true;
+  editor.error = '';
+  render();
+  try {
+    const result = await DB.from('roster_assignments').delete().eq('id', editor.draft.id);
+    if (result.error) throw result.error;
+    R.rosterWeekStart = rosterWeekStartKey(editor.draft.workDate);
+    if (R.rosterView === 'day') R.rosterDay = editor.draft.workDate;
+    await loadSupabaseRosterWeek(R.rosterWeekStart, true);
+    if (editor.draft.workDate === dayKey()) await loadSupabaseToday();
+    R.rosterEditor = null;
+    render();
+    toast('Roster assignment removed', 'ok');
+  } catch (error) {
+    console.error('[supabase] roster assignment removal failed', { assignmentId: editor.draft.id, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'roster-assignment-remove');
+    editor.saving = false;
+    editor.error = error.message || 'Could not remove that roster assignment. Please try again.';
+    render();
+  }
+}
+
+function rosterEditorHtml() {
+  const editor = R.rosterEditor;
+  if (!editor) return '';
+  const draft = editor.draft;
+  const readOnly = draft.workDate < dayKey();
+  const contexts = managerVenueCatalog();
+  const context = contexts.find(item => item.realId === draft.venueId);
+  const eligible = context ? rosterEligibleMembersForVenue(context) : [];
+  const currentProfile = draft.userId && SUPABASE_TEAM.profilesById[draft.userId];
+  const employeeOptions = eligible.slice();
+  if (currentProfile && !employeeOptions.some(member => member.id === currentProfile.id)) {
+    employeeOptions.unshift({ id: currentProfile.id, displayName: rosterProfileName(currentProfile.id), active: false });
+  }
+  const warnings = rosterEditorWarnings(draft);
+  const disabled = editor.saving || readOnly;
+  return `<aside class="roster-drawer" aria-label="Roster assignment editor">
+    <div class="roster-drawer-head"><div class="row-b" style="gap:10px"><div><div class="h3">${draft.id ? 'Edit assignment' : 'Add assignment'}</div><div class="tiny mut">${readOnly ? 'Past assignments are read-only.' : 'Changes save to the shared roster.'}</div></div><button class="iconbtn" data-act="roster-editor-cancel" aria-label="Close assignment editor">${ic('x', 18)}</button></div></div>
+    <div class="roster-drawer-body stack" style="gap:12px">
+      <div class="field"><label class="label" for="roster-editor-date">Date</label><input class="input" id="roster-editor-date" type="date" data-roster-editor-field="workDate" value="${esc(draft.workDate)}" ${disabled ? 'disabled' : ''}></div>
+      <div class="field"><label class="label" for="roster-editor-org">Organisation</label><input class="input" id="roster-editor-org" value="${esc(context ? organisationName(context.organisationId) : 'Select a venue')}" readonly></div>
+      <div class="field"><label class="label" for="roster-editor-venue">Venue</label><select class="input" id="roster-editor-venue" data-roster-editor-field="venueId" ${disabled ? 'disabled' : ''}><option value="">Select venue</option>${contexts.map(item => `<option value="${esc(item.realId)}" ${item.realId === draft.venueId ? 'selected' : ''}>${esc(venueDisplayLabel(item))}</option>`).join('')}</select></div>
+      <div class="field"><label class="label" for="roster-editor-operation">Operation</label><select class="input" id="roster-editor-operation" data-roster-editor-field="shiftType" ${disabled ? 'disabled' : ''}>${rosterOperationTypes().map(operation => `<option value="${operation}" ${operation === draft.shiftType ? 'selected' : ''}>${esc(rosterOperationFullLabel(operation))}</option>`).join('')}</select></div>
+      <div class="field"><label class="label" for="roster-editor-employee">Employee</label><select class="input" id="roster-editor-employee" data-roster-editor-field="userId" ${disabled || !context ? 'disabled' : ''}><option value="">Select employee</option>${employeeOptions.map(member => { const hasAccess = context && hasPermanentSupabaseVenueAccess(member, context); const label = member.active === false ? ' · no longer eligible' : hasAccess ? '' : ' · no permanent venue access'; return `<option value="${esc(member.id)}" ${member.id === draft.userId ? 'selected' : ''}${member.active === false ? ' disabled' : ''}>${esc(member.displayName)}${label}</option>`; }).join('')}</select>${context && !eligible.length ? '<div class="hint" style="margin-top:6px">No active employees belong to this venue’s organisation.</div>' : '<div class="hint" style="margin-top:6px">Active employees in this organisation can be scheduled here. Permanent venue access is not required.</div>'}</div>
+      <div class="grid grid-2"><div class="field"><label class="label" for="roster-editor-start">Start time <span class="mut">optional</span></label><input class="input" id="roster-editor-start" type="time" data-roster-editor-field="startTime" value="${esc(draft.startTime)}" ${disabled ? 'disabled' : ''}></div><div class="field"><label class="label" for="roster-editor-end">End time <span class="mut">optional</span></label><input class="input" id="roster-editor-end" type="time" data-roster-editor-field="endTime" value="${esc(draft.endTime)}" ${disabled ? 'disabled' : ''}></div></div>
+      ${warnings.length ? `<div class="stack" style="gap:7px">${warnings.map(warning => `<div class="banner ${warning.kind === 'duplicate' ? 'banner-warn' : 'banner-info'}" role="${warning.kind === 'duplicate' ? 'alert' : 'status'}">${ic(warning.kind === 'duplicate' ? 'warn' : 'info', 17)}<div>${esc(warning.text)}</div></div>`).join('')}</div>` : ''}
+      ${editor.error ? `<div class="banner banner-warn" role="alert">${ic('warn', 17)}<div>${esc(editor.error)}</div></div>` : ''}
+    </div>
+    <div class="roster-drawer-foot">${draft.id ? `<button class="btn btn-danger" data-act="roster-editor-remove" ${disabled ? 'disabled' : ''}>Remove assignment</button>` : ''}<button class="btn" data-act="roster-editor-cancel" ${editor.saving ? 'disabled' : ''}>Cancel</button><button class="btn btn-primary" data-act="roster-editor-save" ${disabled || !draft.userId || !draft.venueId ? 'disabled' : ''}>${editor.saving ? 'Saving…' : draft.id ? 'Save' : 'Add assignment'}</button></div>
+  </aside>`;
+}
+
+function rosterFiltersHtml(contexts, filterContexts = managerVenueCatalog()) {
+  return `<div class="roster-filterbar"><span class="tiny mut">${esc(AUTH.selectedOrganisationId ? organisationName(AUTH.selectedOrganisationId) : 'All managed organisations')}</span><select class="input" data-roster-filter="venue" style="width:auto;min-width:170px"><option value="">All venues</option>${filterContexts.map(context => `<option value="${esc(context.realId)}" ${context.realId === R.rosterVenueId ? 'selected' : ''}>${esc(venueDisplayLabel(context))}</option>`).join('')}</select><input class="input" data-roster-filter="people" style="width:min(220px,100%)" placeholder="Search people" value="${esc(R.rosterPeopleSearch || '')}"></div>`;
+}
+
+function rosterWeekViewHtml() {
+  const weekStart = R.rosterWeekStart || rosterWeekStartKey(dayKey());
+  const dates = rosterWeekDates(weekStart);
+  const contexts = rosterPlanningContexts();
+  const rows = rosterWeekRows().filter(row => !R.rosterVenueId || row.venue_id === R.rosterVenueId);
+  const people = rosterPlanningMembers().filter(member => !R.rosterPeopleSearch || member.displayName.toLowerCase().includes(R.rosterPeopleSearch.toLowerCase()));
+  const weekState = SUPABASE_ROSTER_WEEK;
+  const loaded = weekState.organisationId === currentSupabaseRosterScopeKey() && weekState.start === weekStart;
+  const planner = !loaded || weekState.loading
+    ? '<div class="empty" style="padding:30px">Loading the roster…</div>'
+    : weekState.error
+      ? `<div class="banner banner-warn" style="margin:14px">${ic('warn', 17)}<div>${esc(weekState.error)}<br><button class="btn btn-sm" data-act="roster-week-reload" style="margin-top:9px">Try again</button></div></div>`
+      : `<div class="roster-week-wrap"><div class="roster-week-board"><div class="roster-week-head roster-sticky">Employee</div>${dates.map(date => `<div class="roster-week-head"><div>${esc(new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(parseKey(date)))}</div><div class="tiny mut" style="margin-top:2px">${esc(fmtDateShort(date))}</div></div>`).join('')}${people.map(member => `<div class="roster-week-cell roster-person roster-sticky"><div>${avatarHtml(member.id, 'sm')}</div><div style="min-width:0"><div class="roster-person-name">${esc(member.displayName)}</div><div class="roster-person-meta">${rows.filter(row => row.user_id === member.id).length} assignment${rows.filter(row => row.user_id === member.id).length === 1 ? '' : 's'}</div></div></div>${dates.map(date => { const assignments = rows.filter(row => row.user_id === member.id && row.work_date === date); return `<div class="roster-week-cell">${assignments.map(row => rosterAssignmentCard(row)).join('')}${date >= dayKey() ? `<button class="roster-add" data-act="roster-add" data-date="${date}" data-user="${esc(member.id)}">+ Add</button>` : assignments.length ? '<span class="tiny mut">Past</span>' : ''}</div>`; }).join('')}`).join('') || '<div class="empty" style="grid-column:1/-1;padding:28px">No active employees are available in the selected scope.</div>'}</div></div>`;
+  return `<div class="roster-toolbar"><div class="segmented" role="tablist" aria-label="Roster view"><button data-act="roster-view" data-view="week" class="${R.rosterView === 'week' ? 'is-active' : ''}" role="tab" aria-selected="${R.rosterView === 'week'}">Week</button><button data-act="roster-view" data-view="day" class="${R.rosterView === 'day' ? 'is-active' : ''}" role="tab" aria-selected="${R.rosterView === 'day'}">Day</button></div><div class="row wrap" style="gap:6px"><button class="btn btn-sm btn-icon" data-act="roster-week-prev" title="Previous week">${ic('left', 14)}</button><button class="btn btn-sm" data-act="roster-week-today">This week</button><button class="btn btn-sm btn-icon" data-act="roster-week-next" title="Next week">${ic('right', 14)}</button><button class="btn btn-sm" data-act="roster-copy-open" ${R.rosterCopyPrompt === 'saving' ? 'disabled' : ''}>Copy previous week</button></div></div>${R.rosterCopyPrompt ? `<div class="roster-copy-panel" role="alert"><div class="row"><div><b>${R.rosterCopyPrompt === 'saving' ? 'Copying roster…' : `Copy roster from ${esc(rosterWeekLabel(dayKey(addDays(parseKey(weekStart), -7))))} into ${esc(rosterWeekLabel(weekStart))}?`}</b><div class="tiny mut" style="margin-top:3px">Existing assignments in the destination week will be kept.</div></div><div class="row wrap" style="gap:7px"><button class="btn btn-sm" data-act="roster-copy-cancel" ${R.rosterCopyPrompt === 'saving' ? 'disabled' : ''}>Cancel</button><button class="btn btn-sm btn-primary" data-act="roster-copy-confirm" ${R.rosterCopyPrompt === 'saving' ? 'disabled' : ''}>${R.rosterCopyPrompt === 'saving' ? 'Copying…' : 'Copy'}</button></div></div></div>` : ''}${rosterCoverageHtml(dates, rows, contexts)}<div class="card"><div class="card-head"><div style="flex:1"><div class="h3">Weekly plan</div><div class="tiny mut">Only existing assignments are shown. Add or edit people without leaving the week visible.</div></div>${rosterFiltersHtml(contexts, managerVenueCatalog())}</div>${planner}</div>`;
+}
+
+function rosterDayViewHtml() {
+  const date = R.rosterDay || dayKey();
+  const contexts = rosterPlanningContexts();
+  const rows = rosterWeekRows().filter(row => row.work_date === date && (!R.rosterVenueId || row.venue_id === R.rosterVenueId));
+  const gaps = rosterCoverageGaps([date], rosterWeekRows(), contexts);
+  const past = date < dayKey();
+  const groups = contexts.map(context => `<div class="roster-day-group"><div class="row" style="gap:7px"><span class="venue-dot" style="background:${venueDotColor(context)}"></span><div><div class="h3">${esc(venueDisplayLabel(context))}</div><div class="tiny mut">${esc(organisationName(context.organisationId))}</div></div></div>${rosterOperationTypes().map(operation => { const assignments = rows.filter(row => row.venue_id === context.realId && row.shift_type === operation); return `<div class="roster-day-operation"><div class="row-b"><div style="font-weight:650">${esc(rosterOperationFullLabel(operation))}</div>${!past ? `<button class="roster-add" data-act="roster-add" data-date="${date}" data-venue="${esc(context.realId)}" data-shift="${operation}">+ Add person</button>` : '<span class="tiny mut">Read-only</span>'}</div><div style="margin-top:3px">${assignments.length ? assignments.map(row => `<button class="roster-person-chip" data-act="roster-edit" data-id="${esc(row.id)}">${avatarHtml(row.user_id, 'sm')}<span>${esc(rosterProfileName(row.user_id))}${rosterTimeLabel(row.start_time, row.end_time) ? ` · ${esc(rosterTimeLabel(row.start_time, row.end_time))}` : ''}</span></button>`).join('') : '<span class="tiny mut">Nobody assigned</span>'}</div></div>`; }).join('')}</div>`).join('');
+  return `<div class="roster-toolbar"><div class="segmented" role="tablist" aria-label="Roster view"><button data-act="roster-view" data-view="week" class="${R.rosterView === 'week' ? 'is-active' : ''}" role="tab" aria-selected="${R.rosterView === 'week'}">Week</button><button data-act="roster-view" data-view="day" class="${R.rosterView === 'day' ? 'is-active' : ''}" role="tab" aria-selected="${R.rosterView === 'day'}">Day</button></div><div class="row wrap" style="gap:6px"><button class="btn btn-sm btn-icon" data-act="roster-day-prev" title="Previous day">${ic('left', 14)}</button><button class="btn btn-sm" data-act="roster-day-today">Today</button><button class="btn btn-sm btn-icon" data-act="roster-day-next" title="Next day">${ic('right', 14)}</button></div></div><div class="row-b wrap" style="gap:10px"><div><div class="page-title" style="font-size:20px">${esc(fmtDateShort(date))}</div><div class="page-sub">Quick staffing changes for the selected operating day.</div></div>${rosterFiltersHtml(contexts, managerVenueCatalog())}</div>${gaps.length ? `<div class="banner banner-warn">${ic('warn', 17)}<div><b>${gaps.length} coverage gap${gaps.length === 1 ? '' : 's'}</b><div class="tiny" style="margin-top:3px">${gaps.map(gap => `${esc(venueDisplayLabel(AUTH.venueContexts.find(context => context.realId === gap.venueId) || {}))} · ${esc(rosterOperationLabel(gap.operation))}`).join('<br>')}</div></div></div>` : ''}<div class="stack" style="gap:12px">${groups || '<div class="empty">No managed venues match the current filter.</div>'}</div>`;
+}
+
+function pageSupabaseRoster() {
+  const weekStart = R.rosterWeekStart || rosterWeekStartKey(dayKey());
+  const expectedWeek = R.rosterView === 'day' ? rosterWeekStartKey(R.rosterDay || dayKey()) : weekStart;
+  if (expectedWeek !== weekStart) {
+    R.rosterWeekStart = expectedWeek;
+    setTimeout(() => loadSupabaseRosterWeek(expectedWeek, true), 0);
+  }
+  return `<div class="page-head row-b wrap"><div><div class="page-title">Roster</div><div class="page-sub">Plan staffing across ${esc(AUTH.selectedOrganisationId ? organisationName(AUTH.selectedOrganisationId) : 'all managed organisations')}.</div></div><div class="tiny mut">${esc(rosterWeekLabel(weekStart))}</div></div><div class="roster-layout ${R.rosterEditor ? 'has-editor' : ''}"><div class="roster-main">${R.rosterView === 'day' ? rosterDayViewHtml() : rosterWeekViewHtml()}</div>${rosterEditorHtml()}</div>`;
+}
+
 function pageSupabaseTeam() {
+  const scopeOrganisationIds = currentSupabaseOrganisationIds();
+  const scopeIsAll = !AUTH.selectedOrganisationId && scopeOrganisationIds.length > 1;
+  const all = supabaseMembersForCurrentScope();
+  const groupedMembers = aggregateSupabaseTeamMembers(all);
+  const globalAdminDirectory = isPlatformAdmin() && !AUTH.selectedOrganisationId;
+  const directoryMembers = globalAdminDirectory ? platformAdminDirectoryMembers() : groupedMembers;
+  const peopleRows = directoryMembers.map(member => {
+    const accessSummary = member.memberships.length
+      ? member.memberships.map(orgMember => {
+        const orgName = organisationName(orgMember.organisationId);
+        if (orgMember.role === 'manager') return `<div><b>${esc(orgName)}</b> · Manager</div>`;
+        const contexts = AUTH.venueContexts.filter(context => context.organisationId === orgMember.organisationId);
+        const assigned = contexts.filter(context => orgMember.explicitVenueIds.includes(context.realId));
+        const visible = assigned.slice(0, 2).map(context => venueDisplayLabel(context)).join(', ');
+        const more = assigned.length > 2 ? ` +${assigned.length - 2} more` : '';
+        return `<div><b>${esc(orgName)}</b> · Employee${assigned.length ? ` · ${esc(visible)}${esc(more)}` : ' · No venue access'}</div>`;
+      }).join('')
+      : '<span class="tiny mut">No organisation access</span>';
+    const protectedLabel = member.protected
+      ? '<div class="tiny" style="color:var(--warn)">Master administrator · Protected account</div>'
+      : '';
+    const manageLabel = member.protected && member.id !== AUTH.profile.id ? 'View' : 'Manage';
+    return `<tr><td><div class="row" style="gap:10px">${avatarHtml(member.id)}<div><div style="font-weight:600">${esc(member.displayName)}</div><div class="tiny mut">${esc(profileLoginLabel(member.email) || 'No login identifier')}</div>${protectedLabel}</div></div></td><td><div class="stack" style="gap:5px">${accessSummary}</div></td><td><div class="stack" style="gap:5px"><span class="chip ${member.platformRole === 'admin' ? 'chip-info' : ''}">${member.platformRole === 'admin' ? 'Platform admin' : 'User'}</span><span class="chip ${member.active ? 'chip-ok' : ''} chip-dot">${member.active ? 'Active' : 'Inactive'}</span></div></td><td style="text-align:right"><button class="btn btn-sm ${member.protected && member.id !== AUTH.profile.id ? '' : 'btn-primary'}" data-act="edit-user" data-id="${member.id}" data-global="1">${manageLabel}</button></td></tr>`;
+  }).join('');
+  const scopeLabel = globalAdminDirectory ? 'all organisations and profiles' : scopeIsAll ? 'all managed organisations' : organisationName(currentSupabaseOrganisationId());
+  const teamActions = isPlatformAdmin() ? `<div class="row wrap" style="gap:8px"><button class="btn btn-sm btn-primary" data-act="create-user">${ic('plus', 15)} Create user</button></div>` : '';
+  return `<div class="page-head row-b wrap"><div><div class="page-title">Team</div><div class="page-sub">People and access across ${esc(scopeLabel)}.</div></div>${teamActions}</div><div class="stack"><div class="banner banner-info">${ic('info', 17)}<div>${isPlatformAdmin() ? 'This directory includes every profile, including users with no organisation membership. Use Manage to edit organisation and venue access.' : 'Manage people and venue access here. Weekly staffing plans are now under Roster.'}</div></div><div class="card"><div class="card-head"><div style="flex:1"><div class="h3">People</div><div class="tiny mut">Manage organisation access, venue access, and account status from each person’s details.</div></div><span class="tiny mut nowrap hide-sm">${directoryMembers.length} people · ${directoryMembers.filter(member => member.active).length} active</span></div><div class="tablewrap"><table class="tbl"><thead><tr><th>Person</th><th>Access</th><th>Status</th><th></th></tr></thead><tbody>${peopleRows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px">No people found.</td></tr>'}</tbody></table></div><div class="card-foot tiny mut">Platform role and organisation role are separate. Detailed venue access and organisation changes are saved together from Manage.</div></div></div>`;
+}
+
+function pageSupabaseTeamLegacy() {
   const day = today();
   const v = V();
   const scopeOrganisationIds = currentSupabaseOrganisationIds();
@@ -4118,7 +4591,7 @@ function pageSupabaseTeam() {
   const planningVenues = managerVenueCatalog();
   const plannerRows = employees.filter(member => member.active).map(member => {
     const eligibleVenues = planningVenues.filter(context =>
-      canRosterSupabaseMemberAtVenue(member, context)
+      isSupabaseOrganisationEmployeeAtVenue(member, context)
     );
     const cells = weekDates.map(date => {
       const assignments = weekRows.filter(row => row.user_id === member.id && row.work_date === date);
@@ -5436,7 +5909,7 @@ function openSupabaseAdminUserAccessEditor(userId) {
       try {
         await invokeSupabaseUserAccess(draftPayload());
         await loadSupabaseTeam();
-        if (SUPABASE_ROSTER_WEEK.start === R.rosterWeekStart && R.teamView === 'roster') {
+        if (SUPABASE_ROSTER_WEEK.start === R.rosterWeekStart && R.tab === 'roster') {
           await loadSupabaseRosterWeek(R.rosterWeekStart, true);
         }
         closeModal();
@@ -5651,7 +6124,6 @@ function openSupabaseUserEditor(id, organisationId) {
               const result = await DB.from('venue_members').delete()
                 .eq('venue_id', venueId).eq('user_id', member.id);
               if (result.error) throw result.error;
-              await clearSupabaseFutureRoster(member.id, [venueId]);
             }
             if (!active) await clearSupabaseFutureRoster(member.id, member.venueIds);
           }
@@ -6119,8 +6591,8 @@ async function toggleRemoteRoster(lk, userId, workDate, venueId) {
   if (!isMgr()) { toast('Only a manager can change the roster.', 'warn'); return; }
   const context = venueCatalog().find(item => item.realId === venueId) || V();
   const member = supabaseMemberForUser(userId, context.organisationId);
-  if (!member || member.role !== 'employee' || !member.active || !member.venueIds.includes(context.realId)) {
-    toast('That employee is not active or does not have access to this venue.', 'warn');
+  if (!member || member.role !== 'employee' || !member.active) {
+    toast('That employee is not an active employee of this organisation.', 'warn');
     return;
   }
   const date = workDate || dayKey();
@@ -6214,7 +6686,6 @@ async function toggleRemoteVenueMembership(userId, venueId) {
     if (assigned) {
       const result = await DB.from('venue_members').delete().eq('venue_id', venueId).eq('user_id', userId);
       if (result.error) throw result.error;
-      await clearSupabaseFutureRoster(userId, [venueId]);
     } else {
       const result = await DB.from('venue_members').insert({ venue_id: venueId, user_id: userId });
       if (result.error && result.error.code !== '23505') throw result.error;
@@ -6240,6 +6711,21 @@ function navigateSupabaseRosterWeek(offsetDays) {
 
 function resetSupabaseRosterWeek() {
   R.rosterWeekStart = rosterWeekStartKey(dayKey());
+  loadSupabaseRosterWeek(R.rosterWeekStart, true);
+}
+
+function navigateSupabaseRosterDay(offsetDays) {
+  const current = parseKey(R.rosterDay || dayKey());
+  R.rosterDay = dayKey(addDays(current, offsetDays));
+  R.rosterView = 'day';
+  R.rosterWeekStart = rosterWeekStartKey(R.rosterDay);
+  loadSupabaseRosterWeek(R.rosterWeekStart, true);
+}
+
+function resetSupabaseRosterDay() {
+  R.rosterDay = dayKey();
+  R.rosterView = 'day';
+  R.rosterWeekStart = rosterWeekStartKey(R.rosterDay);
   loadSupabaseRosterWeek(R.rosterWeekStart, true);
 }
 
@@ -6475,6 +6961,71 @@ function handleAct(act, ds) {
       save(); render();
       toast(`${u.name.split(' ')[0]} ${i >= 0 ? 'removed from' : 'added to'} ${venue(ds.venue).name}`); break;
     }
+    case 'roster-view':
+      if (isSupabaseMode() && isMgr()) {
+        R.rosterView = ds.view === 'day' ? 'day' : 'week';
+        if (R.rosterView === 'day') {
+          const weekDates = rosterWeekDates(R.rosterWeekStart || rosterWeekStartKey(dayKey()));
+          R.rosterDay = weekDates.includes(R.rosterDay)
+            ? R.rosterDay
+            : (weekDates.includes(dayKey()) ? dayKey() : weekDates[0]);
+          R.rosterWeekStart = rosterWeekStartKey(R.rosterDay);
+        }
+        R.rosterEditor = null;
+        render();
+        loadSupabaseRosterWeek(R.rosterWeekStart, true);
+      }
+      break;
+    case 'roster-add':
+      if (isSupabaseMode() && isMgr()) openSupabaseRosterEditor(null, ds.date, ds.user, ds.venue, ds.shift);
+      break;
+    case 'roster-edit':
+      if (isSupabaseMode() && isMgr()) openSupabaseRosterEditor(ds.id);
+      break;
+    case 'roster-editor-cancel':
+      if (isSupabaseMode()) closeSupabaseRosterEditor();
+      break;
+    case 'roster-editor-save':
+      if (isSupabaseMode() && isMgr()) saveSupabaseRosterEditor();
+      break;
+    case 'roster-editor-remove':
+      if (isSupabaseMode() && isMgr()) removeSupabaseRosterAssignment();
+      break;
+    case 'roster-day-prev':
+      if (isSupabaseMode()) navigateSupabaseRosterDay(-1);
+      break;
+    case 'roster-day-next':
+      if (isSupabaseMode()) navigateSupabaseRosterDay(1);
+      break;
+    case 'roster-day-today':
+      if (isSupabaseMode()) resetSupabaseRosterDay();
+      break;
+    case 'roster-gap-day':
+      if (isSupabaseMode() && isMgr()) {
+        R.rosterDay = ds.date;
+        R.rosterView = 'day';
+        R.rosterWeekStart = rosterWeekStartKey(ds.date);
+        R.rosterEditor = null;
+        loadSupabaseRosterWeek(R.rosterWeekStart, true);
+      }
+      break;
+    case 'roster-copy-open':
+      if (isSupabaseMode() && isMgr()) {
+        if ((R.rosterWeekStart || rosterWeekStartKey(dayKey())) < rosterWeekStartKey(dayKey())) {
+          toast('Past roster dates are read-only.', 'warn');
+          break;
+        }
+        R.rosterCopyPrompt = true;
+        render();
+      }
+      break;
+    case 'roster-copy-cancel':
+      R.rosterCopyPrompt = false;
+      render();
+      break;
+    case 'roster-copy-confirm':
+      if (isSupabaseMode() && isMgr()) copyPreviousSupabaseRosterWeek();
+      break;
     case 'roster-week-prev':
       if (isSupabaseMode()) navigateSupabaseRosterWeek(-7);
       break;
@@ -6615,7 +7166,7 @@ function handleAct(act, ds) {
       if (!isSupabaseMode()) save();
       render(); scrollTop();
       syncSupabaseRealtimeForCurrentView();
-      if (isSupabaseMode() && R.tab === 'team' && R.teamView === 'roster' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
+      if (isSupabaseMode() && R.tab === 'roster' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
       if (isSupabaseMode() && R.tab === 'history' && isMgr()) loadSupabaseHistory(true);
       toast(`Switched to ${V().name}`); break;
     }
@@ -6654,7 +7205,7 @@ function handleAct(act, ds) {
       if (isSupabaseMode()) { toast('Demo reset is unavailable while using real Supabase venue identity.', 'warn'); break; }
       confirmModal('Wipe all demo data?', 'Everything goes back to the seeded demo — staff, templates, history and alerts.', 'Wipe and reseed', () => {
         localStorage.removeItem(STORE_KEY); S = defaultState(); save();
-        R = { tab: 'today', list: 'open', historyKey: null, rosterWeekStart: rosterWeekStartKey(dayKey()), teamView: 'people' };
+        R = { tab: 'today', list: 'open', historyKey: null, rosterWeekStart: rosterWeekStartKey(dayKey()), rosterView: 'week', rosterDay: dayKey(), rosterVenueId: '', rosterPeopleSearch: '', rosterEditor: null, rosterCopyPrompt: false, teamView: 'people' };
         render(); toast('Demo data reset', 'ok');
       }, true); break;
     }
@@ -6787,7 +7338,7 @@ $('#app').addEventListener('click', e => {
     render();
     scrollTop();
     syncSupabaseRealtimeForCurrentView();
-    if (isSupabaseMode() && R.tab === 'team' && R.teamView === 'roster' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
+    if (isSupabaseMode() && R.tab === 'roster' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
     if (isSupabaseMode() && R.tab === 'history' && isMgr()) loadSupabaseHistory();
     if (isSupabaseMode() && R.tab === 'alerts' && isMgr()) loadSupabaseNotifications();
     if (isSupabaseMode() && R.tab === 'settings' && isMgr()) loadSupabaseNotificationRecipients();
@@ -6822,7 +7373,7 @@ $('#venue-switch').addEventListener('change', e => {
   if (!isSupabaseMode()) save();
   render(); scrollTop();
   syncSupabaseRealtimeForCurrentView();
-  if (isSupabaseMode() && R.tab === 'team' && R.teamView === 'roster' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
+  if (isSupabaseMode() && R.tab === 'roster' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
   if (isSupabaseMode() && R.tab === 'history' && isMgr()) loadSupabaseHistory(true);
   if (isSupabaseMode() && isMgr()) loadSupabaseNotificationRecipients();
   toast(`Switched to ${V().name}`);
@@ -6854,6 +7405,27 @@ $('#btn-alerts').addEventListener('click', () => {
 });
 
 $('#page').addEventListener('change', e => {
+  const rosterFilter = e.target.closest('[data-roster-filter]');
+  if (rosterFilter && isSupabaseMode() && R.tab === 'roster') {
+    if (rosterFilter.dataset.rosterFilter === 'venue') R.rosterVenueId = rosterFilter.value;
+    if (rosterFilter.dataset.rosterFilter === 'people') R.rosterPeopleSearch = rosterFilter.value.trim();
+    render();
+    return;
+  }
+  const rosterField = e.target.closest('[data-roster-editor-field]');
+  if (rosterField && R.rosterEditor) {
+    const field = rosterField.dataset.rosterEditorField;
+    R.rosterEditor.draft[field] = rosterField.value;
+    if (field === 'venueId' && rosterField.value) {
+      const context = managerVenueCatalog().find(item => item.realId === rosterField.value);
+      const member = rosterPlanningMembers().find(item => item.id === R.rosterEditor.draft.userId);
+      if (context && (!member || !isSupabaseOrganisationEmployeeAtVenue(member, context))) {
+        R.rosterEditor.draft.userId = '';
+      }
+    }
+    render();
+    return;
+  }
   const el = e.target.closest('[data-set]');
   if (!el) return;
   if (isSupabaseMode() && el.dataset.set === 'cutoff') {
