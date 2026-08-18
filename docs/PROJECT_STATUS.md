@@ -70,7 +70,7 @@ Important deployed enums include `app_role` (`manager`, `employee`), `checklist_
 
 The schema also contains SECURITY DEFINER access helpers, task/checklist update guards, and `ensure_daily_checklists(uuid, date)`. These helpers and guards remain part of the RLS boundary and are not renamed by this cleanup.
 
-Migration history currently consists of `001_initial_schema.sql`, `002_add_platform_role.sql`, `003_grant_helper_function_execute.sql`, `004_grant_can_update_task_execute.sql`, `005_allow_managers_delete_adhoc_daily_tasks.sql`, `006_restrict_venue_member_reads.sql`, `007_scope_team_and_roster_writes.sql`, `008_grant_can_manage_profile_execute.sql`, `009_platform_admin_access.sql`, `010_add_shift_cover_requests.sql`, `011_enable_daily_operations_realtime.sql`, `012_add_notification_delivery_and_timezone.sql`, `013_add_telegram_notification_recipients.sql`, `014_fix_notification_service_role_grants.sql`, `015_notification_workflow_and_admin_cutoff.sql`, `016_incomplete_submission_notifications.sql`, `017_reset_today_operations.sql`, `018_platform_admin_user_provisioning.sql`, `019_fix_create_user_compensation.sql`, and `020_user_organisation_access.sql`. Already-applied schema migrations remain immutable.
+Migration history currently consists of `001_initial_schema.sql`, `002_add_platform_role.sql`, `003_grant_helper_function_execute.sql`, `004_grant_can_update_task_execute.sql`, `005_allow_managers_delete_adhoc_daily_tasks.sql`, `006_restrict_venue_member_reads.sql`, `007_scope_team_and_roster_writes.sql`, `008_grant_can_manage_profile_execute.sql`, `009_platform_admin_access.sql`, `010_add_shift_cover_requests.sql`, `011_enable_daily_operations_realtime.sql`, `012_add_notification_delivery_and_timezone.sql`, `013_add_telegram_notification_recipients.sql`, `014_fix_notification_service_role_grants.sql`, `015_notification_workflow_and_admin_cutoff.sql`, `016_incomplete_submission_notifications.sql`, `017_reset_today_operations.sql`, `018_platform_admin_user_provisioning.sql`, `019_fix_create_user_compensation.sql`, `020_user_organisation_access.sql`, and `021_access_hardening.sql`. Already-applied schema migrations remain immutable; 021 is the next migration to apply.
 
 Migration `012_add_notification_delivery_and_timezone.sql` adds an IANA `venues.timezone` field (existing venues default to `Australia/Sydney`), notification event idempotency/retry/audit fields, and service-role-only claim/finalize/fail functions. It does not add browser write access to `notification_events` or broaden RLS.
 
@@ -99,6 +99,8 @@ Migration `018_platform_admin_user_provisioning.sql` adds the service-role-only 
 Migration `019_fix_create_user_compensation.sql` corrects the synthetic email validation to `username@dailyops.invalid` and adds the service-role-only `cleanup_failed_created_user_profile(uuid)` RPC. The compensation RPC can remove only a matching synthetic-email profile with no organisation or venue memberships; it cannot remove an established DailyOps user.
 
 Migration `020_user_organisation_access.sql` removes direct authenticated writes to `organisation_members`, protects browser changes to `profiles.platform_role`, and limits `venue_members` inserts, updates, and deletes to employee memberships in organisations managed by the caller. It adds the service-role-only `admin_manage_user_organisation_access(...)` RPC, which atomically upserts or removes one user's organisation membership and cleans current/future venue access, roster assignments, cover requests, and non-platform-admin notification recipients when access is removed. Active platform-admin authorisation is performed by the `manage-user-access` Edge Function before it calls the RPC.
+
+Migration `021_access_hardening.sql` adds the immutable `protected_accounts` master-admin identity, resolved once from the configured bootstrap Auth email and stored as a profile UUID. It adds database guards for the master profile, organisation memberships, venue memberships, and protected-account configuration, replaces the organisation-access RPC with a caller-aware service-role-only signature, and adds the current-user `profiles`, `organisation_members`, and `venue_members` tables to the existing `supabase_realtime` publication. The updated `manage-user-access` Edge Function passes the caller UUID it independently verified from the JWT. Other admins/managers cannot change the protected account's access, role, activation, or venue memberships.
 
 ## 6. What is live/real today
 
@@ -138,6 +140,8 @@ Migration `020_user_organisation_access.sql` removes direct authenticated writes
 - Platform-admin-only user creation through the authenticated `create-user` Edge Function, including synthetic `dailyops.invalid` Auth identities, profile provisioning, organisation role selection, platform role selection, no automatic employee venue membership, and protected compensation for failed provisioning.
 - Platform-admin global profile directory, including profiles with no organisation memberships, with per-organisation role and venue-access context.
 - Platform-admin organisation access administration through the authenticated `manage-user-access` Edge Function: add memberships, change a user's role per organisation, and remove organisation access without deleting the Auth account or historical attribution.
+- Protected master-admin account enforcement through migration 021, including database guards and protected-account UI treatment.
+- Live access revalidation for profile and organisation-membership changes, visibility/focus recovery, a 45-second access poll, and fail-closed handling after denied manager operations.
 - Manager-scoped venue membership administration enforced by RLS: managers can change employee venue access only inside organisations they manage; organisation membership mutations are not available to ordinary managers.
 - Manager-capable users can filter the venue context by `All organisations` or a managed organisation; ordinary managers cannot select organisations outside their manager memberships.
 - Multi-organisation venue labels show the organisation name alongside the venue in the venue picker and manager cross-venue summary.
@@ -233,6 +237,7 @@ The repository does not use a separate generated milestone registry; this list r
 - Shift-cover requests currently use two client writes: the employee roster assignment and the notification row. If the first write succeeds and the second fails, the UI reports the failure and the manager should verify the assignment before retrying.
 - RLS helper EXECUTE grants were initially missing in the live project and were corrected in migrations `003_grant_helper_function_execute.sql` and `004_grant_can_update_task_execute.sql`. The one-off delete capability is isolated in `005_allow_managers_delete_adhoc_daily_tasks.sql`. Keep these grants/policies and verify them when provisioning another Supabase project.
 - The frontend has been validated through repository/static checks and the existing development workflow; a full authenticated browser regression suite is still follow-up work.
+- A real two-browser downgrade test and direct stale-session write probes must be run against the deployed project after migration 021 and the updated Edge Function are deployed. Static inspection confirms the current RLS helpers and manager-only RPCs resolve authorization from current database rows rather than cached frontend role state.
 
 ## 10. Next milestones
 
@@ -270,7 +275,7 @@ The exact local origin must be allowed in Supabase Authentication URL Configurat
 
 ### Step 13 two-client Realtime test
 
-1. Apply migration `011_enable_daily_operations_realtime.sql`, or enable the same three tables in the `supabase_realtime` publication from the Supabase dashboard.
+1. Apply migration `011_enable_daily_operations_realtime.sql` and migration `021_access_hardening.sql`, or enable the three operational tables plus `profiles`, `organisation_members`, and `venue_members` in the `supabase_realtime` publication from the Supabase dashboard.
 2. Open the Live Server URL in a normal window as a manager and a second browser/private window as an employee. Sign both users into the same organisation and venue, and leave both on Today's Operations.
 3. In the employee window, complete or reopen a task and add a note/reason. Confirm the manager window updates without a manual refresh and that progress, status, note, and reason match.
 4. In the manager window, add a one-off task, then delete it. Confirm the employee window reflects both changes. The delete may arrive through the selected-venue/day refetch fallback rather than an immediate change event.
@@ -281,7 +286,7 @@ The exact local origin must be allowed in Supabase Authentication URL Configurat
 
 ### Step 14 notification/EOD setup and test
 
-1. Apply migrations `012_add_notification_delivery_and_timezone.sql`, `013_add_telegram_notification_recipients.sql`, `014_fix_notification_service_role_grants.sql`, `015_notification_workflow_and_admin_cutoff.sql`, `016_incomplete_submission_notifications.sql`, `017_reset_today_operations.sql`, `018_platform_admin_user_provisioning.sql`, `019_fix_create_user_compensation.sql`, and `020_user_organisation_access.sql` in that order.
+1. Apply migrations `012_add_notification_delivery_and_timezone.sql`, `013_add_telegram_notification_recipients.sql`, `014_fix_notification_service_role_grants.sql`, `015_notification_workflow_and_admin_cutoff.sql`, `016_incomplete_submission_notifications.sql`, `017_reset_today_operations.sql`, `018_platform_admin_user_provisioning.sql`, `019_fix_create_user_compensation.sql`, `020_user_organisation_access.sql`, and `021_access_hardening.sql` in that order.
 2. Create one Telegram bot with BotFather, deploy the notification functions, `create-user`, and `manage-user-access`, and configure `TELEGRAM_BOT_TOKEN` and a long random `DAILYOPS_CRON_SECRET` as Edge Function secrets. Redeploy `create-user` after applying migration 019. The exact commands and recipient workflow are in the README.
 3. Enable `pg_cron`, `pg_net`, and Vault, and create the single `dailyops-end-of-day` Cron job. The job invokes the function every 15 minutes; the function applies each venue's IANA timezone and cutoff.
 4. Have the first recipient open the bot and press Start, retrieve their Chat ID through a trusted admin workflow, and add it under manager Settings. Confirm the recipient row persists after refresh.

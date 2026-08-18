@@ -679,7 +679,7 @@ let AUTH = {
 };
 let SUPABASE_TODAY = { date: null, byVenue: {} };
 let SUPABASE_TEMPLATES = { byVenue: {} };
-let SUPABASE_TEAM = { members: [], profilesById: {}, venueIdsByUser: {} };
+let SUPABASE_TEAM = { members: [], profilesById: {}, venueIdsByUser: {}, protectedProfileIds: [] };
 let SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows: [], loading: false, error: null };
 let SUPABASE_MY_ROSTER_WEEK = { start: null, end: null, rows: [], loading: false, error: null };
 let SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
@@ -701,6 +701,18 @@ const REMOTE_MUTATIONS = new Set();
 let AUTH_RESTORE_ID = 0;
 let SUPABASE_HISTORY_LOAD_ID = 0;
 let SUPABASE_REALTIME_REQUEST_ID = 0;
+let SUPABASE_ACCESS = {
+  channel: null,
+  userId: null,
+  status: 'CLOSED',
+  pollTimer: null,
+  refreshTimer: null,
+  refreshing: false,
+  refreshPending: false,
+  verified: true,
+  requestId: 0
+};
+const SUPABASE_ACCESS_REFRESH_MS = 45000;
 
 /* ------------------------------------------------------------------ icons */
 const P = {
@@ -1191,7 +1203,6 @@ async function loadAuthenticatedProfile(session) {
     .maybeSingle();
   if (error) throw error;
   if (!data) throw new Error('Your account is signed in, but no DailyOps profile exists for it. Contact an administrator.');
-  if (!data.active) throw new Error('Your DailyOps account is inactive. Contact an administrator.');
   AUTH.profile = {
     id: data.id,
     display_name: data.display_name,
@@ -1200,6 +1211,11 @@ async function loadAuthenticatedProfile(session) {
     active: !!data.active,
     platform_role: data.platform_role
   };
+  if (!data.active) {
+    const inactiveError = new Error('Your DailyOps account is inactive. Contact an administrator.');
+    inactiveError.accessCode = 'inactive';
+    throw inactiveError;
+  }
 }
 
 async function loadOrganisationAccess(session) {
@@ -1272,6 +1288,264 @@ async function loadOrganisationAccess(session) {
   loadSupabaseVenueContexts(venueRows);
 }
 
+function blankSupabaseAccessState() {
+  return {
+    channel: null,
+    userId: null,
+    status: 'CLOSED',
+    pollTimer: null,
+    refreshTimer: null,
+    refreshing: false,
+    refreshPending: false,
+    verified: true,
+    previousSelection: null,
+    requestId: 0
+  };
+}
+
+function clearSupabaseManagerState() {
+  SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows: [], loading: false, error: null };
+  SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
+  SUPABASE_NOTIFICATIONS = { rows: [], loading: false, error: null };
+  SUPABASE_NOTIFICATION_RECIPIENTS = { venueId: null, rows: [], eligibleProfiles: [], loading: false, error: null };
+  SUPABASE_HISTORY_LOAD_ID++;
+  SUPABASE_HISTORY = { venueId: null, days: [], profilesById: {}, loading: false, error: null, selectedDate: null };
+}
+
+function clearSupabaseAccessRuntime(keepProfile = true) {
+  AUTH.organisationMemberships = [];
+  AUTH.organisations = [];
+  AUTH.selectedOrganisationId = null;
+  AUTH.venueContexts = [];
+  AUTH.selectedVenueId = null;
+  SUPABASE_TODAY = { date: null, byVenue: {} };
+  SUPABASE_TEMPLATES = { byVenue: {} };
+  SUPABASE_TEAM = { members: [], profilesById: {}, venueIdsByUser: {}, protectedProfileIds: [] };
+  clearSupabaseManagerState();
+  SUPABASE_MY_ROSTER_WEEK = { start: null, end: null, rows: [], loading: false, error: null };
+  if (!keepProfile) AUTH.profile = null;
+  S = null;
+}
+
+function supabaseAccessSnapshot() {
+  return JSON.stringify({
+    profile: AUTH.profile && {
+      id: AUTH.profile.id,
+      display_name: AUTH.profile.display_name,
+      email: AUTH.profile.email,
+      active: AUTH.profile.active,
+      platform_role: AUTH.profile.platform_role
+    },
+    memberships: AUTH.organisationMemberships
+      .map(row => [row.organisation_id, row.role])
+      .sort(),
+    organisations: AUTH.organisations
+      .map(row => [row.id, row.name])
+      .sort(),
+    venues: AUTH.venueContexts
+      .map(row => [row.realId, row.organisationId])
+      .sort(),
+    selectedOrganisationId: AUTH.selectedOrganisationId,
+    selectedVenueId: AUTH.selectedVenueId
+  });
+}
+
+function preserveSupabaseSelection(previousSelection) {
+  if (!previousSelection) return;
+  const contexts = AUTH.venueContexts;
+  const previousOrganisationId = previousSelection.organisationId;
+  const previousVenueId = previousSelection.venueId;
+  const previousOrganisationStillLegal = previousOrganisationId === null
+    ? contexts.length > 0
+    : accessibleOrganisationIds().includes(previousOrganisationId)
+      && contexts.some(context => context.organisationId === previousOrganisationId);
+  if (!previousOrganisationStillLegal) return;
+
+  AUTH.selectedOrganisationId = previousOrganisationId;
+  const legalContexts = contexts.filter(context =>
+    !AUTH.selectedOrganisationId || context.organisationId === AUTH.selectedOrganisationId
+  );
+  if (legalContexts.some(context => context.realId === previousVenueId)) {
+    AUTH.selectedVenueId = previousVenueId;
+  } else {
+    AUTH.selectedVenueId = legalContexts[0]?.realId || null;
+  }
+  if (AUTH.selectedVenueId) selectVenue(AUTH.selectedVenueId);
+  try {
+    localStorage.setItem(
+      `dailyops.supabase.organisation-selection.${AUTH.profile.id}`,
+      AUTH.selectedOrganisationId || 'all'
+    );
+  } catch (error) {
+    console.warn('[store] could not save refreshed organisation selection', error);
+  }
+}
+
+function failClosedSupabaseAccessView(message) {
+  SUPABASE_ACCESS.verified = false;
+  SUPABASE_ACCESS.previousSelection = {
+    organisationId: AUTH.selectedOrganisationId,
+    venueId: AUTH.selectedVenueId
+  };
+  clearSupabaseAccessRuntime(true);
+  R.tab = 'today';
+  unsubscribeSupabaseRealtime();
+  showAccessError(message);
+}
+
+async function detachSupabaseAccessChannel() {
+  const previous = SUPABASE_ACCESS.channel;
+  if (SUPABASE_ACCESS.refreshTimer !== null) clearTimeout(SUPABASE_ACCESS.refreshTimer);
+  if (SUPABASE_ACCESS.pollTimer !== null) clearInterval(SUPABASE_ACCESS.pollTimer);
+  SUPABASE_ACCESS.refreshTimer = null;
+  SUPABASE_ACCESS.pollTimer = null;
+  SUPABASE_ACCESS.channel = null;
+  if (previous && DB) {
+    try { await DB.removeChannel(previous); }
+    catch (error) { console.warn('[supabase] access channel cleanup failed', error); }
+  }
+}
+
+async function stopSupabaseAccessRevalidation() {
+  SUPABASE_ACCESS.requestId++;
+  await detachSupabaseAccessChannel();
+  SUPABASE_ACCESS = blankSupabaseAccessState();
+}
+
+function queueSupabaseAccessRefresh(reason, failClosed = false) {
+  if (!isSupabaseMode() || !AUTH.session || !AUTH.profile) return;
+  if (failClosed && SUPABASE_ACCESS.verified) {
+    failClosedSupabaseAccessView('DailyOps is rechecking your access. Your operational data will return when access is verified.');
+  }
+  if (SUPABASE_ACCESS.refreshing) {
+    SUPABASE_ACCESS.refreshPending = true;
+    return;
+  }
+  if (SUPABASE_ACCESS.refreshTimer !== null) return;
+  SUPABASE_ACCESS.refreshTimer = setTimeout(() => {
+    SUPABASE_ACCESS.refreshTimer = null;
+    refreshSupabaseAccess(reason);
+  }, 120);
+}
+
+async function refreshSupabaseAccess(reason) {
+  if (!isSupabaseMode() || !DB || !AUTH.session || !AUTH.profile) return;
+  if (SUPABASE_ACCESS.refreshing) {
+    SUPABASE_ACCESS.refreshPending = true;
+    return;
+  }
+  SUPABASE_ACCESS.refreshing = true;
+  const previousSnapshot = supabaseAccessSnapshot();
+  const previousSelection = SUPABASE_ACCESS.previousSelection || {
+    organisationId: AUTH.selectedOrganisationId,
+    venueId: AUTH.selectedVenueId
+  };
+  const wasUnverified = !SUPABASE_ACCESS.verified;
+  SUPABASE_ACCESS.previousSelection = null;
+  try {
+    await loadAuthenticatedProfile(AUTH.session);
+    if (!AUTH.profile.active) {
+      failClosedSupabaseAccessView('Your DailyOps account is inactive.');
+      await DB.auth.signOut();
+      return;
+    }
+    await loadOrganisationAccess(AUTH.session);
+    preserveSupabaseSelection(previousSelection);
+    const changed = previousSnapshot !== supabaseAccessSnapshot();
+    const needsRebuild = changed || wasUnverified || !S || !AUTH.venueContexts.length;
+    SUPABASE_ACCESS.verified = true;
+    if (!needsRebuild) return;
+
+    load();
+    await loadSupabaseTeam();
+    await loadSupabaseTemplates();
+    await loadSupabaseToday();
+    clearSupabaseManagerState();
+    showApp();
+    render();
+    syncSupabaseRealtimeForCurrentView();
+    if (isMgr()) {
+      loadSupabaseCoverRequests();
+      loadSupabaseNotifications();
+      loadSupabaseNotificationRecipients();
+      if (R.tab === 'history') loadSupabaseHistory(true);
+    } else {
+      loadSupabaseMyRosterWeek(rosterWeekStartKey(dayKey()), true);
+    }
+    console.info('[supabase] access revalidated', { reason, changed });
+  } catch (error) {
+    console.error('[supabase] access revalidation failed', { reason, error });
+    if (error.accessCode === 'inactive' || (AUTH.profile && !AUTH.profile.active)) {
+      failClosedSupabaseAccessView('Your DailyOps account is inactive.');
+      await DB.auth.signOut();
+    } else {
+      failClosedSupabaseAccessView('DailyOps could not verify your organisation access. Please try again or sign out.');
+    }
+  } finally {
+    SUPABASE_ACCESS.refreshing = false;
+    if (SUPABASE_ACCESS.refreshPending && AUTH.session) {
+      SUPABASE_ACCESS.refreshPending = false;
+      queueSupabaseAccessRefresh('pending-access-refresh');
+    }
+  }
+}
+
+async function startSupabaseAccessRevalidation() {
+  if (!isSupabaseMode() || !DB || !AUTH.session || !AUTH.profile) return;
+  const userId = AUTH.profile.id;
+  if (SUPABASE_ACCESS.channel && SUPABASE_ACCESS.userId === userId) return;
+  const requestId = ++SUPABASE_ACCESS.requestId;
+  await detachSupabaseAccessChannel();
+  if (requestId !== SUPABASE_ACCESS.requestId || !AUTH.session) return;
+
+  const channel = DB.channel(`dailyops-access-${userId}`)
+    .on('postgres_changes', {
+      event: '*', schema: 'public', table: 'profiles', filter: `id=eq.${userId}`
+    }, () => queueSupabaseAccessRefresh('profile-realtime', true))
+    .on('postgres_changes', {
+      event: '*', schema: 'public', table: 'organisation_members', filter: `user_id=eq.${userId}`
+    }, () => queueSupabaseAccessRefresh('organisation-membership-realtime', true))
+    .on('postgres_changes', {
+      event: '*', schema: 'public', table: 'venue_members', filter: `user_id=eq.${userId}`
+    }, () => queueSupabaseAccessRefresh('venue-membership-realtime', true));
+
+  SUPABASE_ACCESS = {
+    ...blankSupabaseAccessState(),
+    channel,
+    userId,
+    status: 'CONNECTING',
+    requestId
+  };
+  SUPABASE_ACCESS.pollTimer = setInterval(() => {
+    if (SUPABASE_ACCESS.channel === channel && AUTH.session) {
+      queueSupabaseAccessRefresh('periodic-access-refresh');
+    }
+  }, SUPABASE_ACCESS_REFRESH_MS);
+  channel.subscribe(status => {
+    if (SUPABASE_ACCESS.channel !== channel) return;
+    SUPABASE_ACCESS.status = status;
+    if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+      console.warn('[supabase] access realtime unavailable; periodic access refresh remains active', { status });
+    }
+  });
+}
+
+function isSupabaseAccessDenied(error) {
+  const status = error?.status || error?.context?.status;
+  const code = error?.code;
+  const message = String(error?.message || '').toLowerCase();
+  return status === 401 || status === 403 || code === '42501'
+    || message.includes('row-level security')
+    || message.includes('permission denied')
+    || message.includes('jwt');
+}
+
+function refreshSupabaseAccessAfterDeniedOperation(error, operation) {
+  if (!isSupabaseAccessDenied(error)) return;
+  console.warn('[supabase] manager operation was denied; revalidating access', { operation });
+  queueSupabaseAccessRefresh(`denied-${operation}`, true);
+}
+
 /* --------------------------------------------------------------- team/roster */
 function currentSupabaseOrganisationId() {
   return (currentVenueContext() && currentVenueContext().organisationId)
@@ -1340,6 +1614,7 @@ function platformAdminDirectoryMembers() {
       phone: profile.phone || '',
       active: !!profile.active,
       platformRole: profile.platform_role || 'user',
+      protected: isProtectedProfile(profile.id),
       explicitVenueIds: [],
       venueIds: [],
       memberships: [],
@@ -1348,6 +1623,10 @@ function platformAdminDirectoryMembers() {
     });
   });
   return [...byId.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
+}
+
+function isProtectedProfile(userId) {
+  return (SUPABASE_TEAM.protectedProfileIds || []).includes(userId);
 }
 
 function supabaseDirectoryMemberForUser(userId) {
@@ -1411,6 +1690,19 @@ async function loadSupabaseTeam() {
     console.error('[supabase] team profile load failed', { memberIds, error: profileResult.error });
     throw accessError('team-load', 'We could not load the profiles for your organisation team.');
   }
+  const protectedProfileIds = [];
+  if ((profileResult.data || []).length) {
+    const protectedResults = await Promise.all((profileResult.data || []).map(profile =>
+      DB.rpc('is_protected_master_admin', { p_user_id: profile.id })
+    ));
+    protectedResults.forEach((result, index) => {
+      if (result.error) {
+        console.warn('[supabase] protected profile flag unavailable', { profileId: profileResult.data[index].id, error: result.error });
+      } else if (result.data === true) {
+        protectedProfileIds.push(profileResult.data[index].id);
+      }
+    });
+  }
   const missingProfiles = memberIds.filter(userId => !(profileResult.data || []).some(profile => profile.id === userId));
   if (missingProfiles.length) {
     console.error('[supabase] organisation members without profiles', { missingProfiles });
@@ -1450,6 +1742,7 @@ async function loadSupabaseTeam() {
       phone: profile.phone || '',
       active: !!profile.active,
       platformRole: profile.platform_role || 'user',
+      protected: protectedProfileIds.includes(row.user_id),
       explicitVenueIds,
       // Managers inherit access to every venue in their organisation under the
       // deployed RLS model. Employees use explicit venue_members rows.
@@ -1457,7 +1750,7 @@ async function loadSupabaseTeam() {
     };
   }).filter(Boolean);
 
-  SUPABASE_TEAM = { members, profilesById, venueIdsByUser, isGlobalDirectory: platformAdmin };
+  SUPABASE_TEAM = { members, profilesById, venueIdsByUser, isGlobalDirectory: platformAdmin, protectedProfileIds };
 }
 
 /* ---------------------------------------------------------------- templates */
@@ -1753,7 +2046,8 @@ function user(id) {
 }
 const me = () => authUserForLocalUi() || user(S.session.userId) || S.users[0];
 const isMgr = () => isSupabaseMode()
-  ? organisationRoleForVenue(currentVenueContext()) === 'manager'
+  ? SUPABASE_ACCESS.verified !== false
+    && organisationRoleForVenue(currentVenueContext()) === 'manager'
   : (me() || {}).role === 'manager';
 const isPlatformAdmin = () => isSupabaseMode()
   && !!AUTH.profile?.active
@@ -1963,6 +2257,7 @@ async function loadSupabaseRosterWeek(start, force = false) {
   } catch (error) {
     if (!isCurrentRequest()) return;
     console.error('[supabase] roster week load failed', { organisationId, weekStart, weekEnd, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'roster-load');
     SUPABASE_ROSTER_WEEK = {
       organisationId,
       start: weekStart,
@@ -2051,6 +2346,7 @@ async function loadSupabaseCoverRequests() {
     SUPABASE_COVER_REQUESTS = { rows: result.data || [], loading: false, error: null };
   } catch (error) {
     console.error('[supabase] cover request load failed', { error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'cover-request-load');
     SUPABASE_COVER_REQUESTS = {
       rows: [], loading: false,
       error: 'We could not load shift cover notifications. Apply migration 010 and try again.'
@@ -2097,6 +2393,7 @@ async function loadSupabaseNotifications() {
     };
   } catch (error) {
     console.error('[supabase] notification event load failed', { error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'notification-load');
     SUPABASE_NOTIFICATIONS = {
       rows: [], loading: false,
       error: 'We could not load notification delivery status. Apply migrations 012 and 013 and check the manager access policy.'
@@ -2173,6 +2470,7 @@ async function loadSupabaseNotificationRecipients() {
     };
   } catch (error) {
     console.error('[supabase] Telegram notification recipient load failed', { venueId, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'notification-recipient-load');
     SUPABASE_NOTIFICATION_RECIPIENTS = {
       venueId, rows: [], eligibleProfiles: [], loading: false,
       error: 'We could not load Telegram recipients. Apply migration 013 and check manager access.'
@@ -2262,6 +2560,7 @@ function openTelegramRecipientEditor(id) {
           toast(existing ? 'Telegram recipient updated' : 'Telegram recipient added', 'ok');
         } catch (error) {
           console.error('[supabase] Telegram recipient save failed', { venueId, recipientId: id, error });
+          refreshSupabaseAccessAfterDeniedOperation(error, 'notification-recipient-save');
           toast(error?.code === '23505' ? 'That profile or Chat ID is already configured for this venue.' : 'Could not save the Telegram recipient.', 'warn');
           saveButton.disabled = false;
         }
@@ -2278,6 +2577,7 @@ async function removeSupabaseNotificationRecipient(id) {
     toast('Telegram recipient removed', 'ok');
   } catch (error) {
     console.error('[supabase] Telegram recipient delete failed', { recipientId: id, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'notification-recipient-delete');
     toast('Could not remove the Telegram recipient.', 'warn');
   }
 }
@@ -2299,6 +2599,7 @@ async function testSupabaseTelegramRecipient(id) {
     toast('Telegram test notification sent', 'ok');
   } catch (error) {
     console.error('[supabase] Telegram test notification failed', { venueId: V().realId, recipientId: id, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'telegram-test');
     await loadSupabaseNotifications();
     toast('Telegram test failed. Check Alerts for the recorded delivery error.', 'warn');
   }
@@ -2317,6 +2618,7 @@ async function markSupabaseCoverRequests(ids) {
     await loadSupabaseCoverRequests();
   } catch (error) {
     console.error('[supabase] cover request mark-read failed', { requestIds, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'cover-request-mark-read');
     toast('Could not mark that cover notification as read.', 'warn');
   }
 }
@@ -2784,6 +3086,7 @@ async function requestSupabaseListComplete(checklistId) {
     // Task persistence has already succeeded. Delivery is audited/retried on
     // the server, so an unavailable function must not roll back the task UI.
     console.warn('[supabase] list-complete notification request failed', { checklistId, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'list-complete-notification');
     toast('Shift submitted, but the Telegram notification could not be sent. Check Alerts.', 'warn');
   }
 }
@@ -2801,6 +3104,7 @@ async function requestSupabaseListReopened(checklistId) {
     if (R.tab === 'alerts' && isMgr()) loadSupabaseNotifications();
   } catch (error) {
     console.warn('[supabase] list-reopened notification request failed', { checklistId, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'list-reopened-notification');
     toast('Shift reopened, but the Telegram notification could not be sent. Check Alerts.', 'warn');
   }
 }
@@ -2819,6 +3123,7 @@ async function requestSupabaseShiftCoverNotification(coverRequestId) {
     return result.data;
   } catch (error) {
     console.warn('[supabase] shift-cover notification request failed', { coverRequestId, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'shift-cover-notification');
     toast('Cover saved, but the Telegram notification could not be sent. Check Alerts.', 'warn');
     return null;
   }
@@ -3760,7 +4065,9 @@ function pageSupabaseTeam() {
           aria-label="${esc(member.displayName)} on ${k} shift" style="margin:0 auto"></button></td>`).join('')}
     </tr>`).join('') : `<tr><td colspan="3" class="mut" style="text-align:center;padding:22px">Nobody is available to roster at ${esc(v.name)} yet.</td></tr>`;
 
-  const venueChips = member => member.role === 'manager'
+  const venueChips = member => member.protected && member.id !== AUTH.profile.id
+    ? '<span class="chip chip-info">Protected account</span>'
+    : member.role === 'manager'
     ? `<span class="chip chip-info">All venues (manager)</span>`
     : venueCatalog()
       .filter(context => context.organisationId === member.organisationId)
@@ -3790,6 +4097,7 @@ function pageSupabaseTeam() {
         <div style="font-weight:600">${esc(member.displayName)}</div>
         <div class="tiny mut">${esc(profileLoginLabel(member.email) || 'No login identifier')}</div>
         <div class="tiny mut">${member.platformRole === 'admin' ? 'Platform admin' : 'Platform user'}</div>
+        ${member.protected ? '<div class="tiny" style="color:var(--warn)">Master administrator · Protected account</div>' : ''}
       </div></div></td>
       <td><div class="stack" style="gap:7px">${member.memberships.length ? member.memberships.map(orgMember => {
         const orgName = organisationName(orgMember.organisationId);
@@ -3806,7 +4114,7 @@ function pageSupabaseTeam() {
         <span class="chip ${member.active ? 'chip-ok' : ''} chip-dot">${member.active ? 'Active' : 'Disabled'}</span></div></td>
       <td style="text-align:right"><div class="row" style="gap:4px;justify-content:flex-end">
         <button class="switch ${member.active ? 'is-on' : ''}" data-act="toggle-user" data-id="${member.id}" data-global="1"
-          aria-label="Toggle access for ${esc(member.displayName)}" ${member.id === AUTH.profile.id ? 'disabled' : ''}></button>
+          aria-label="Toggle access for ${esc(member.displayName)}" ${member.id === AUTH.profile.id || member.protected ? 'disabled title="Protected by DailyOps security policy"' : ''}></button>
         <button class="btn btn-sm btn-icon btn-ghost" data-act="edit-user" data-id="${member.id}" data-global="1" title="Manage organisation access">${ic('pencil', 14)}</button>
       </div></td>
     </tr>`).join('') : all.map(member => `
@@ -3815,6 +4123,7 @@ function pageSupabaseTeam() {
         <div style="font-weight:600">${esc(member.displayName)}</div>
         <div class="tiny mut">${esc(member.email)}</div>
         ${scopeIsAll ? '<div class="tiny mut">' + esc(organisationName(member.organisationId)) + '</div>' : ''}
+        ${member.protected ? '<div class="tiny" style="color:var(--warn)">Master administrator · Protected account</div>' : ''}
         </div></div></td>
       <td><div class="row wrap" style="gap:5px">${venueChips(member)}</div></td>
       <td>${assignmentSummary(member)}</td>
@@ -3822,7 +4131,7 @@ function pageSupabaseTeam() {
         <span class="chip ${member.active ? 'chip-ok' : ''} chip-dot">${member.active ? 'Active' : 'Disabled'}</span></div></td>
       <td style="text-align:right"><div class="row" style="gap:4px;justify-content:flex-end">
         <button class="switch ${member.active ? 'is-on' : ''}" data-act="toggle-user" data-id="${member.id}" data-organisation="${member.organisationId}"
-          aria-label="Toggle access for ${esc(member.displayName)}" ${member.id === AUTH.profile.id ? 'disabled' : ''}></button>
+          aria-label="Toggle access for ${esc(member.displayName)}" ${member.id === AUTH.profile.id || member.protected ? 'disabled title="Protected by DailyOps security policy"' : ''}></button>
         <button class="btn btn-sm btn-icon btn-ghost" data-act="edit-user" data-id="${member.id}" data-organisation="${member.organisationId}" title="Edit profile and access">${ic('pencil', 14)}</button>
       </div></td>
     </tr>`).join('');
@@ -4500,6 +4809,7 @@ function openTaskMeta(lk, taskId) {
         } catch (error) {
           Object.assign(task, previous);
           console.error('[supabase] task note/reason update failed', { taskId: task.id, error });
+          refreshSupabaseAccessAfterDeniedOperation(error, 'task-note-reason');
           render();
           toast('Could not save the task details. Please try again.', 'warn');
         }
@@ -4602,6 +4912,7 @@ function openReview(lk) {
             previousTasks.forEach(({ task, values }) => Object.assign(task, values));
             Object.assign(L, previousList);
             console.error('[supabase] checklist submission failed', { checklistId: L.id, error });
+            refreshSupabaseAccessAfterDeniedOperation(error, 'shift-submit');
             try { await loadSupabaseToday(); }
             catch (reloadError) { console.error('[supabase] checklist resync after submission failure failed', reloadError); }
             render();
@@ -4746,6 +5057,7 @@ function mutateRemoteTemplate(lockKey, details, action, successMessage) {
       toast(successMessage, 'ok');
     } catch (error) {
       console.error('[supabase] template mutation failed', { ...details, error });
+      refreshSupabaseAccessAfterDeniedOperation(error, 'template-mutation');
       toast('Could not save the template change. Please try again.', 'warn');
     } finally {
       REMOTE_MUTATIONS.delete(lockKey);
@@ -4802,6 +5114,7 @@ function openTemplateEditor(lk, id) {
             toast(t ? 'Routine task updated' : 'Added to the recurring template', 'ok');
           } catch (error) {
             console.error('[supabase] template task save failed', { listType: lk, taskId: id, error });
+            refreshSupabaseAccessAfterDeniedOperation(error, 'template-task-save');
             toast('Could not save that routine task. Please try again.', 'warn');
             saveButton.disabled = false;
           }
@@ -4820,6 +5133,7 @@ function openTemplateEditor(lk, id) {
 async function invokeSupabaseCreateUser(payload) {
   const result = await DB.functions.invoke('create-user', { body: payload });
   if (!result.error) return result.data;
+  refreshSupabaseAccessAfterDeniedOperation(result.error, 'create-user');
 
   let message = 'The user could not be created. Please try again.';
   const response = result.error.context;
@@ -4839,6 +5153,7 @@ async function invokeSupabaseCreateUser(payload) {
 async function invokeSupabaseUserAccess(payload) {
   const result = await DB.functions.invoke('manage-user-access', { body: payload });
   if (!result.error) return result.data;
+  refreshSupabaseAccessAfterDeniedOperation(result.error, 'manage-user-access');
 
   let message = 'Could not update organisation access. Please try again.';
   const response = result.error.context;
@@ -4870,6 +5185,8 @@ function openSupabaseAdminUserAccessEditor(userId) {
   }
   const profile = SUPABASE_TEAM.profilesById[userId];
   if (!profile) { toast('That profile is no longer available.', 'warn'); return; }
+  const protectedAccount = isProtectedProfile(userId);
+  const protectedLocked = protectedAccount && userId !== AUTH.profile.id;
   const memberships = SUPABASE_TEAM.members
     .filter(member => member.id === userId)
     .sort((a, b) => organisationName(a.organisationId).localeCompare(organisationName(b.organisationId)));
@@ -4879,7 +5196,9 @@ function openSupabaseAdminUserAccessEditor(userId) {
     .sort((a, b) => a.name.localeCompare(b.name));
   const membershipHtml = memberships.length ? memberships.map(member => {
     const contexts = AUTH.venueContexts.filter(context => context.organisationId === member.organisationId);
-    const venueHtml = member.role === 'manager'
+    const venueHtml = protectedLocked
+      ? '<span class="chip chip-info">Protected account</span>'
+      : member.role === 'manager'
       ? '<span class="chip chip-info">All venues through manager role</span>'
       : contexts.map(context => `<button class="chip ${member.explicitVenueIds.includes(context.realId) ? 'chip-accent' : ''}"
           data-admin-venue="${context.realId}" data-admin-org="${member.organisationId}" style="cursor:pointer;height:28px;padding:0 11px">
@@ -4888,10 +5207,10 @@ function openSupabaseAdminUserAccessEditor(userId) {
     return `<div class="card" style="padding:13px" data-admin-membership="${member.organisationId}">
       <div class="row-b" style="gap:9px"><div><div style="font-weight:650">${esc(organisationName(member.organisationId))}</div>
         <div class="tiny mut">${member.role === 'manager' ? 'Organisation-wide manager access' : 'Employee with explicit venue access'}</div></div>
-        <div class="row" style="gap:6px"><select class="input" data-admin-role style="width:auto;padding:6px 28px 6px 8px">
+        <div class="row" style="gap:6px"><select class="input" data-admin-role style="width:auto;padding:6px 28px 6px 8px" ${protectedLocked ? 'disabled' : ''}>
           <option value="employee" ${member.role === 'employee' ? 'selected' : ''}>Employee</option>
           <option value="manager" ${member.role === 'manager' ? 'selected' : ''}>Manager</option>
-        </select><button class="btn btn-sm btn-danger" data-admin-remove>Remove</button></div></div>
+        </select><button class="btn btn-sm btn-danger" data-admin-remove ${protectedLocked ? 'disabled' : ''}>Remove</button></div></div>
       <div class="tiny mut" style="margin-top:10px">Venue access</div>
       <div class="row wrap" style="gap:5px;margin-top:5px">${venueHtml}</div>
     </div>`;
@@ -4907,12 +5226,12 @@ function openSupabaseAdminUserAccessEditor(userId) {
     <div class="modal-body stack" style="gap:13px">
       <div class="row" style="gap:10px;align-items:flex-start">${avatarHtml(userId)}<div><div style="font-weight:650">${esc(profile.display_name || 'DailyOps user')}</div>
         <div class="tiny mut">${profile.active ? 'Active profile' : 'Inactive profile'} · ${profile.platform_role === 'admin' ? 'Platform admin' : 'Platform user'}</div></div></div>
-      <div class="banner banner-info">${ic('info', 17)}<div>Organisation role is stored separately for every organisation. Managers inherit all venues in that organisation; employees need explicit venue access.</div></div>
+      <div class="banner ${protectedLocked ? 'banner-warn' : 'banner-info'}">${ic(protectedLocked ? 'warn' : 'info', 17)}<div>${protectedLocked ? '<b>Master administrator · Protected account.</b> This account is protected by DailyOps security policy. Access, roles, activation, and venue membership cannot be changed by another administrator.' : 'Organisation role is stored separately for every organisation. Managers inherit all venues in that organisation; employees need explicit venue access.'}</div></div>
       <div class="stack" style="gap:9px"><div class="h3">Current memberships</div>${membershipHtml}</div>
       <div class="card" style="padding:13px"><div class="h3">Add organisation</div><div class="row wrap" style="gap:8px;margin-top:9px">
         <select class="input" id="admin-add-org" ${availableOrganisations.length ? '' : 'disabled'}>${organisationOptions}</select>
         <select class="input" id="admin-add-role" style="width:auto"><option value="employee" selected>Employee</option><option value="manager">Manager</option></select>
-        <button class="btn btn-primary" data-admin-add ${availableOrganisations.length ? '' : 'disabled'}>Add access</button>
+        <button class="btn btn-primary" data-admin-add ${availableOrganisations.length && !protectedLocked ? '' : 'disabled'}>Add access</button>
       </div><div class="hint" style="margin-top:7px">Adding an employee does not assign a venue. Configure venue access separately below or from the Team table.</div></div>
     </div>
     <div class="modal-foot"><button class="btn" data-x="close">Done</button></div>`, {
@@ -4920,11 +5239,13 @@ function openSupabaseAdminUserAccessEditor(userId) {
     after(root) {
       root.querySelectorAll('[data-x=close]').forEach(button => button.onclick = closeModal);
       root.querySelectorAll('[data-admin-venue]').forEach(button => button.onclick = () => {
+        if (protectedLocked) return;
         const venueId = button.dataset.adminVenue;
         closeModal();
         toggleRemoteVenueMembership(userId, venueId);
       });
       root.querySelectorAll('[data-admin-role]').forEach(select => select.onchange = () => {
+        if (protectedLocked) return;
         const membershipRoot = select.closest('[data-admin-membership]');
         const organisationId = membershipRoot.dataset.adminMembership;
         const current = memberships.find(member => member.organisationId === organisationId);
@@ -4949,12 +5270,14 @@ function openSupabaseAdminUserAccessEditor(userId) {
             toast(`${profile.display_name || 'User'} is now an ${nextRole === 'manager' ? 'organisation manager' : 'employee'} in ${organisationName(organisationId)}`, 'ok');
           } catch (error) {
             console.error('[supabase] organisation role change failed', { userId, organisationId, nextRole, error });
+            refreshSupabaseAccessAfterDeniedOperation(error, 'organisation-role-change');
             render();
             toast(error.message || 'Could not change that organisation role.', 'warn');
           }
         }, isDemotion);
       });
       root.querySelectorAll('[data-admin-remove]').forEach(button => button.onclick = () => {
+        if (protectedLocked) return;
         const membershipRoot = button.closest('[data-admin-membership]');
         const organisationId = membershipRoot.dataset.adminMembership;
         const current = memberships.find(member => member.organisationId === organisationId);
@@ -4974,13 +5297,14 @@ function openSupabaseAdminUserAccessEditor(userId) {
             toast(`Removed ${profile.display_name || 'user'} from ${organisationName(organisationId)}`, 'ok');
           } catch (error) {
             console.error('[supabase] organisation access removal failed', { userId, organisationId, error });
+            refreshSupabaseAccessAfterDeniedOperation(error, 'organisation-access-removal');
             render();
             toast(error.message || 'Could not remove that organisation access.', 'warn');
           }
         }, true);
       });
       const addButton = root.querySelector('[data-admin-add]');
-      if (addButton && availableOrganisations.length) addButton.onclick = async () => {
+      if (addButton && availableOrganisations.length && !protectedLocked) addButton.onclick = async () => {
         const organisationId = root.querySelector('#admin-add-org').value;
         const role = root.querySelector('#admin-add-role').value;
         addButton.disabled = true;
@@ -4997,6 +5321,7 @@ function openSupabaseAdminUserAccessEditor(userId) {
           toast(`${profile.display_name || 'User'} added to ${organisationName(organisationId)} as ${role}`, 'ok');
         } catch (error) {
           console.error('[supabase] organisation access add failed', { userId, organisationId, role, error });
+          refreshSupabaseAccessAfterDeniedOperation(error, 'organisation-access-add');
           toast(error.message || 'Could not add that organisation access.', 'warn');
           addButton.disabled = false;
           addButton.textContent = 'Add access';
@@ -5119,10 +5444,14 @@ async function clearSupabaseFutureRoster(userId, venueIds) {
 function openSupabaseUserEditor(id, organisationId) {
   const member = supabaseMemberForUser(id, organisationId || currentSupabaseOrganisationId());
   if (!member) { toast('That organisation member is no longer available.', 'warn'); return; }
+  const protectedAccount = isProtectedProfile(member.id);
+  const protectedLocked = protectedAccount && member.id !== AUTH.profile.id;
   const isEmployee = member.role === 'employee';
   const picked = new Set(member.explicitVenueIds);
   const organisationVenues = venueCatalog().filter(context => context.organisationId === member.organisationId);
-  const chips = () => isEmployee
+  const chips = () => protectedLocked
+    ? '<span class="chip chip-info">Protected account</span>'
+    : isEmployee
     ? organisationVenues.map(context => `<button class="chip ${picked.has(context.realId) ? 'chip-accent' : ''}" data-venue="${context.realId}" style="cursor:pointer;height:28px;padding:0 11px">
         <span class="venue-dot" style="width:7px;height:7px;background:${venueDotColor(context)}"></span>${esc(context.name)}</button>`).join('')
     : '<span class="chip chip-info">All venues through manager role</span>';
@@ -5148,8 +5477,9 @@ function openSupabaseUserEditor(id, organisationId) {
         <span class="hint">Employees only see venues with an explicit venue membership. Managers inherit all venues in their organisation.</span></div>
       <div class="row-b" style="padding-top:4px">
         <div><div style="font-weight:600;font-size:14px">Access enabled</div><div class="tiny mut">Turn off to retain history while blocking operational access</div></div>
-        <button class="switch ${member.active ? 'is-on' : ''}" id="us-active" ${member.id === AUTH.profile.id ? 'disabled title="You cannot disable your own signed-in access"' : ''}></button>
+        <button class="switch ${member.active ? 'is-on' : ''}" id="us-active" ${member.id === AUTH.profile.id || protectedLocked ? 'disabled title="This account is protected by DailyOps security policy"' : ''}></button>
       </div>
+      ${protectedLocked ? '<div class="banner banner-warn">' + ic('warn', 17) + '<div><b>Master administrator · Protected account.</b> This account is protected by DailyOps security policy. Access and venue membership cannot be changed by another account.</div></div>' : ''}
     </div>
     <div class="modal-foot"><button class="btn" data-x="close">Cancel</button>
       <button class="btn btn-primary" data-x="save">Save changes</button></div>`, {
@@ -5157,12 +5487,12 @@ function openSupabaseUserEditor(id, organisationId) {
       let active = member.active;
       root.querySelectorAll('[data-x=close]').forEach(button => button.onclick = closeModal);
       root.querySelector('#us-active').onclick = () => {
-        if (member.id === AUTH.profile.id) return;
+        if (member.id === AUTH.profile.id || protectedLocked) return;
         active = !active;
         root.querySelector('#us-active').classList.toggle('is-on', active);
       };
       root.querySelector('#us-venues').addEventListener('click', event => {
-        const button = event.target.closest('[data-venue]'); if (!button || !isEmployee) return;
+        const button = event.target.closest('[data-venue]'); if (!button || !isEmployee || protectedLocked) return;
         const venueId = button.dataset.venue;
         if (picked.has(venueId)) picked.delete(venueId); else picked.add(venueId);
         button.classList.toggle('chip-accent', picked.has(venueId));
@@ -5180,7 +5510,7 @@ function openSupabaseUserEditor(id, organisationId) {
           if (profileResult.error) throw profileResult.error;
           if (!profileResult.data) throw new Error('The profile was not updated; RLS may have denied the operation.');
 
-          if (isEmployee) {
+          if (isEmployee && !protectedLocked) {
             const current = new Set(member.explicitVenueIds);
             const added = [...picked].filter(venueId => !current.has(venueId));
             const removed = [...current].filter(venueId => !picked.has(venueId));
@@ -5205,6 +5535,7 @@ function openSupabaseUserEditor(id, organisationId) {
           toast(`${name.split(' ')[0]} updated`, 'ok');
         } catch (error) {
           console.error('[supabase] team member update failed', { userId: member.id, error });
+          refreshSupabaseAccessAfterDeniedOperation(error, 'team-member-update');
           toast('Could not save that team member. Please try again.', 'warn');
           saveButton.disabled = false;
         }
@@ -5390,6 +5721,7 @@ function openCopyTemplate() {
             toast(copied ? `${plural(copied, 'task')} copied from ${venue(src).name}` : 'Nothing new to copy', copied ? 'ok' : 'warn');
           } catch (error) {
             console.error('[supabase] template copy failed', { sourceVenueId: src, error });
+            refreshSupabaseAccessAfterDeniedOperation(error, 'template-copy');
             toast('Could not copy those routine tasks. Please try again.', 'warn');
             saveButton.disabled = false;
           }
@@ -5558,6 +5890,7 @@ function toggleTask(lk, id) {
     }).catch(error => {
       Object.assign(t, previous);
       console.error('[supabase] task status update failed', { taskId: id, error });
+      refreshSupabaseAccessAfterDeniedOperation(error, 'task-status');
       render();
       toast('Could not save that task change. Please try again.', 'warn');
     }).finally(() => REMOTE_MUTATIONS.delete(t.id));
@@ -5635,6 +5968,7 @@ async function reapplyRemoteRoutineTasks(lk) {
     toast(`${plural(added, 'routine task')} added to ${LIST_META[lk].full}`, 'ok');
   } catch (error) {
     console.error('[supabase] routine task re-apply failed', { checklistId: L.id, listType: lk, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'routine-reapply');
     try { await loadSupabaseToday(); }
     catch (reloadError) { console.error('[supabase] routine task re-apply resync failed', reloadError); }
     render();
@@ -5689,6 +6023,7 @@ async function toggleRemoteRoster(lk, userId, workDate, venueId) {
     toast(`${member.displayName.split(' ')[0]} ${existingId ? 'removed from' : 'added to'} the ${LIST_META[lk].label.toLowerCase()} shift`, 'ok');
   } catch (error) {
     console.error('[supabase] roster assignment change failed', { venueId: context.realId, date, userId, listType: lk, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'roster-mutation');
     toast('Could not save that roster change. Please try again.', 'warn');
   } finally {
     REMOTE_MUTATIONS.delete(lockKey);
@@ -5699,6 +6034,10 @@ async function toggleRemoteMemberActive(userId, organisationId) {
   const member = supabaseMemberForUser(userId, organisationId || currentSupabaseOrganisationId());
   const profile = SUPABASE_TEAM.profilesById[userId];
   if (!member && !profile) return;
+  if (isProtectedProfile(userId) && userId !== AUTH.profile.id) {
+    toast('The master administrator account is protected by DailyOps security policy.', 'warn');
+    return;
+  }
   if (userId === AUTH.profile.id) { toast('You cannot disable your own signed-in access.', 'warn'); return; }
   const lockKey = `member-active:${organisationId || 'global'}:${userId}`;
   if (REMOTE_MUTATIONS.has(lockKey)) return;
@@ -5720,6 +6059,7 @@ async function toggleRemoteMemberActive(userId, organisationId) {
     toast(`${displayName.split(' ')[0]} ${active ? 'can now access DailyOps' : 'is now inactive'}`, 'ok');
   } catch (error) {
     console.error('[supabase] team member active state update failed', { userId, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'profile-active-update');
     toast('Could not update that member’s active state. Please try again.', 'warn');
   } finally {
     REMOTE_MUTATIONS.delete(lockKey);
@@ -5731,6 +6071,10 @@ async function toggleRemoteVenueMembership(userId, venueId) {
   const member = context && supabaseMemberForUser(userId, context.organisationId);
   if (!context || !member || member.role !== 'employee') {
     toast('Only employee venue memberships can be changed here.', 'warn');
+    return;
+  }
+  if (isProtectedProfile(userId) && userId !== AUTH.profile.id) {
+    toast('The master administrator account is protected by DailyOps security policy.', 'warn');
     return;
   }
   const assigned = member.explicitVenueIds.includes(venueId);
@@ -5753,6 +6097,7 @@ async function toggleRemoteVenueMembership(userId, venueId) {
     toast(`${member.displayName.split(' ')[0]} ${assigned ? 'removed from' : 'added to'} ${context.name}`, 'ok');
   } catch (error) {
     console.error('[supabase] venue membership change failed', { venueId, userId, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'venue-membership');
     toast('Could not save that venue membership. Please try again.', 'warn');
   } finally {
     REMOTE_MUTATIONS.delete(lockKey);
@@ -5782,6 +6127,7 @@ async function reopenList(lk) {
     } catch (error) {
       Object.assign(L, previous);
       console.error('[supabase] checklist reopen failed', { checklistId: L.id, error });
+      refreshSupabaseAccessAfterDeniedOperation(error, 'shift-reopen');
       render(); toast('Could not reopen this shift. Please try again.', 'warn');
     }
     return;
@@ -5812,6 +6158,7 @@ async function removeRemoteAdhocTask(lk, taskId) {
     toast('One-off task removed', 'ok');
   } catch (error) {
     console.error('[supabase] one-off task delete failed', { taskId, checklistId: L.id, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'one-off-delete');
     toast('Could not remove that one-off task. Please try again.', 'warn');
   } finally {
     REMOTE_MUTATIONS.delete(lockKey);
@@ -5900,6 +6247,7 @@ async function saveSupabaseCoverRequest(lk, coveredForUserId) {
     toast(`You're on the ${LIST_META[lk].label.toLowerCase()} shift — manager notified`, 'ok');
   } catch (error) {
     console.error('[supabase] self-cover request failed', { venueId: context.realId, listType: lk, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'cover-request');
     toast('Could not save your cover request. Please try again.', 'warn');
   } finally {
     REMOTE_MUTATIONS.delete(lockKey);
@@ -5929,6 +6277,7 @@ async function tickAll(lk) {
     } catch (error) {
       previous.forEach(x => Object.assign(x.task, { status: x.status, doneBy: x.doneBy, doneAt: x.doneAt, reason: x.reason }));
       console.error('[supabase] task bulk update failed', { checklistId: L.id, error });
+      refreshSupabaseAccessAfterDeniedOperation(error, 'task-bulk-update');
       try { await loadSupabaseToday(); }
       catch (reloadError) { console.error('[supabase] checklist resync after bulk update failure failed', reloadError); }
       render(); toast('Could not save all task changes. Please try again.', 'warn');
@@ -6215,6 +6564,7 @@ async function saveSupabaseVenueCutoff(value) {
     toast('End-of-day cutoff saved', 'ok');
   } catch (error) {
     console.error('[supabase] venue cutoff update failed', { venueId: context.realId, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'venue-settings');
     render();
     toast('Could not save the end-of-day cutoff.', 'warn');
   } finally {
@@ -6245,6 +6595,7 @@ async function resetSupabaseTodayOperations() {
       venueId: context.realId,
       error
     });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'reset-today');
     render();
     toast(
       resetCompleted
@@ -6380,6 +6731,12 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && $('#modal-root').classList.contains('is-open')) closeModal();
 });
 
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') queueSupabaseAccessRefresh('visibility');
+});
+
+window.addEventListener('focus', () => queueSupabaseAccessRefresh('focus'));
+
 /* ------------------------------------------------------------------- init */
 function tickClock() {
   const el = $('#sb-time');
@@ -6439,6 +6796,7 @@ async function restoreAuthenticatedApp(session) {
   AUTH.session = session;
   if (!session) {
     unsubscribeSupabaseRealtime();
+    stopSupabaseAccessRevalidation();
     AUTH.profile = null;
     AUTH.organisationMemberships = [];
     AUTH.organisations = [];
@@ -6449,7 +6807,7 @@ async function restoreAuthenticatedApp(session) {
     SUPABASE_HISTORY_LOAD_ID++;
     SUPABASE_HISTORY = { venueId: null, days: [], profilesById: {}, loading: false, error: null, selectedDate: null };
     SUPABASE_TEMPLATES = { byVenue: {} };
-    SUPABASE_TEAM = { members: [], profilesById: {}, venueIdsByUser: {} };
+    SUPABASE_TEAM = { members: [], profilesById: {}, venueIdsByUser: {}, protectedProfileIds: [] };
     SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows: [], loading: false, error: null };
     SUPABASE_MY_ROSTER_WEEK = { start: null, end: null, rows: [], loading: false, error: null };
     SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
@@ -6480,13 +6838,16 @@ async function restoreAuthenticatedApp(session) {
   } catch (error) {
     if (restoreId !== AUTH_RESTORE_ID) return;
     console.error('[supabase] organisation, venue, and today operations restore failed', error);
+    clearSupabaseAccessRuntime(true);
     showAccessError(error.accessCode ? error.message : 'We could not load your DailyOps organisation and venue access.');
+    startSupabaseAccessRevalidation();
     return;
   }
   if (restoreId !== AUTH_RESTORE_ID) return;
   showApp();
   render();
   syncSupabaseRealtimeForCurrentView();
+  startSupabaseAccessRevalidation();
   if (isMgr()) {
     loadSupabaseCoverRequests();
     loadSupabaseNotifications();
@@ -6578,6 +6939,7 @@ async function startApp() {
       AUTH.session = session;
       if (event === 'SIGNED_OUT' || !session) {
         unsubscribeSupabaseRealtime();
+        stopSupabaseAccessRevalidation();
         AUTH_RESTORE_ID++;
         AUTH.profile = null;
         AUTH.organisationMemberships = [];
@@ -6589,7 +6951,7 @@ async function startApp() {
         SUPABASE_HISTORY_LOAD_ID++;
         SUPABASE_HISTORY = { venueId: null, days: [], profilesById: {}, loading: false, error: null, selectedDate: null };
         SUPABASE_TEMPLATES = { byVenue: {} };
-        SUPABASE_TEAM = { members: [], profilesById: {}, venueIdsByUser: {} };
+        SUPABASE_TEAM = { members: [], profilesById: {}, venueIdsByUser: {}, protectedProfileIds: [] };
         SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows: [], loading: false, error: null };
         SUPABASE_MY_ROSTER_WEEK = { start: null, end: null, rows: [], loading: false, error: null };
         SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };

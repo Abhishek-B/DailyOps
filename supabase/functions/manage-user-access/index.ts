@@ -24,6 +24,17 @@ function logDatabaseError(context: string, error: unknown) {
   });
 }
 
+function isProtectedAccountError(error: unknown) {
+  const details = error && typeof error === "object"
+    ? error as Record<string, unknown>
+    : {};
+  return details.code === "P0001" &&
+    typeof details.message === "string" &&
+    details.message.toLowerCase().includes(
+      "master administrator account is protected",
+    );
+}
+
 function validationError(message: string) {
   return json({ error: message }, 400);
 }
@@ -104,10 +115,16 @@ Deno.serve(async (req) => {
       p_user_id: userId,
       p_organisation_id: organisationId,
       p_organisation_role: organisationRole,
+      p_caller_id: caller.userId,
     },
   );
   if (result.error) {
     logDatabaseError("organisation access mutation failed", result.error);
+    if (isProtectedAccountError(result.error)) {
+      return json({
+        error: "The protected master administrator account cannot be changed",
+      }, 403);
+    }
     return json({ error: "Could not update organisation access" }, 500);
   }
 

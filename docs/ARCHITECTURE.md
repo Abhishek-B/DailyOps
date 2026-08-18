@@ -94,9 +94,15 @@ Live operational synchronisation
 - removes the channel on venue, tab, session, or access changes
 - keeps ordinary query loading and manual recovery available if Realtime is disconnected
 
+Access revalidation uses a separate current-user channel for `profiles`, `organisation_members`, and `venue_members`. It is combined with focus/visibility refresh and a 45-second identity/access poll, so access changes do not depend exclusively on Postgres DELETE event delivery.
+
 ## Authorization boundary
 
 The browser key is publishable. RLS policies use the signed-in Auth UUID, organisation memberships, venue memberships, active profiles, and the platform-admin helper to decide access. Ordinary managers inherit access to all venues in their organisation; active platform admins inherit management access across organisations; employees require an active venue membership. Managers can administer profiles, venue memberships, and rosters only within managed organisations/venues; they cannot write `organisation_members`. Migration 020 restricts venue membership inserts/updates/deletes to employee memberships in the target venue organisation and protects browser platform-role changes. Migration 020 also exposes only the service-role-only organisation-access RPC, which is called by the authenticated platform-admin `manage-user-access` Edge Function. The browser does not create Auth users directly. `create-user` and `manage-user-access` independently verify active platform-admin callers. Database triggers prevent employees from changing task definition fields, attributing a completion to another user, selecting a notification revision, changing protected venue timing settings, or changing `platform_role` through the browser.
+
+Migration 021 adds a UUID-backed `protected_accounts` configuration for the master administrator. The migration resolves the existing bootstrap Auth user once, validates its profile is active and `platform_role = 'admin'`, and stores only the UUID and protection kind. Database triggers prevent other callers or privileged application paths from deactivating/demoting/deleting the protected profile or mutating its organisation/venue membership rows. The caller-aware organisation-access RPC and Edge Function reject attempts to target it from another account. The frontend reads only a safe protected flag through `is_protected_master_admin(uuid)`; it never contains the master UUID or email as a security rule.
+
+Access is live-revalidated separately from operational data. The browser subscribes to the current user's `profiles`, `organisation_members`, and `venue_members` rows, refreshes on visibility/focus, and polls the small identity/access set every 45 seconds. It preserves a legal organisation/venue selection, redirects away from manager-only tabs after a downgrade, clears stale manager data, and fails closed while rechecking. Backend RLS and current-row helper checks remain mandatory; the frontend state is only a convergence mechanism.
 
 ## Snapshot invariant
 

@@ -26,16 +26,20 @@ The removal action omits `organisation_role`:
 ```
 
 The function verifies the bearer token and independently checks that the caller
-has an active profile with `platform_role = 'admin'`. It then calls the
-service-role-only `admin_manage_user_organisation_access(...)` RPC. The RPC is
-atomic and preserves the Auth user, profile, other organisation memberships,
-and historical attribution.
+has an active profile with `platform_role = 'admin'`. It passes that verified
+caller UUID to the service-role-only
+`admin_manage_user_organisation_access(..., p_caller_id)` RPC. The RPC is
+atomic, validates the caller again, and preserves the Auth user, profile, other
+organisation memberships, and historical attribution. The database rejects
+mutations targeting the protected master administrator unless the verified
+caller is that same master account.
 
-Apply `supabase/migrations/020_user_organisation_access.sql` after migrations
-001 through 019 and before deploying this function. The migration removes
-direct authenticated organisation-membership writes, protects browser
-platform-role changes, and keeps venue-membership writes scoped to employee
-memberships in managed organisations.
+Apply `supabase/migrations/020_user_organisation_access.sql` and then
+`supabase/migrations/021_access_hardening.sql` after migrations 001 through 019
+and before deploying this function. The migrations remove direct authenticated
+organisation-membership writes, protect browser platform-role changes, keep
+venue-membership writes scoped to employee memberships in managed
+organisations, and protect the master administrator identity.
 
 Removing an organisation membership also removes that user's venue memberships
 and current/future roster and cover assignments for that organisation's venues.
