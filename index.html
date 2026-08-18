@@ -154,6 +154,17 @@ body.mobile-view .statusbar {
 }
 .statusbar .sb-right { display: flex; align-items: center; gap: 5px; }
 
+/* A real phone should use the browser viewport directly, not contain a
+   desktop-only phone frame inside the browser. */
+body.native-mobile .viewport {
+  display: block; height: 100dvh; min-height: 100dvh; padding: 0; background: var(--bg);
+}
+body.native-mobile .frame {
+  width: 100%; height: 100%; border: 0; border-radius: 0; box-shadow: none;
+}
+body.native-mobile .app { border-radius: 0; }
+body.native-mobile .statusbar { display: none; }
+
 /* ---------- top bar ---------- */
 .topbar {
   flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
@@ -719,6 +730,10 @@ const SUPABASE_URL = PUBLIC_SUPABASE_CONFIG.SUPABASE_URL || PUBLIC_SUPABASE_CONF
 const SUPABASE_PUBLISHABLE_KEY = PUBLIC_SUPABASE_CONFIG.SUPABASE_PUBLISHABLE_KEY || PUBLIC_SUPABASE_CONFIG.publishableKey || '';
 const DEMO_MODE = PUBLIC_SUPABASE_CONFIG.DEMO_MODE === true;
 const isSupabaseMode = () => !DEMO_MODE;
+const RESPONSIVE_VIEW_MODE_KEY = 'dailyops.viewMode';
+const LEGACY_MOBILE_VIEW_KEY = 'dailyops.mobile';
+const MOBILE_DEVICE_QUERY = '(hover: none) and (pointer: coarse)';
+const MOBILE_VIEWPORT_QUERY = '(max-width: 720px)';
 let DB = null;
 let AUTH = {
   session: null,
@@ -766,6 +781,65 @@ let SUPABASE_ACCESS = {
   requestId: 0
 };
 const SUPABASE_ACCESS_REFRESH_MS = 45000;
+
+function responsiveViewMode() {
+  try {
+    const stored = localStorage.getItem(RESPONSIVE_VIEW_MODE_KEY);
+    if (stored === 'auto' || stored === 'mobile' || stored === 'desktop') return stored;
+    const legacy = localStorage.getItem(LEGACY_MOBILE_VIEW_KEY);
+    if (legacy === '1') return 'mobile';
+    if (legacy === '0') return 'desktop';
+  } catch (e) {}
+  return 'auto';
+}
+
+function isMobileBrowser() {
+  const userAgentMobile = navigator.userAgentData && navigator.userAgentData.mobile === true;
+  const coarsePointer = window.matchMedia && window.matchMedia(MOBILE_DEVICE_QUERY).matches;
+  const touch = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
+  const narrowTouch = touch && ((window.matchMedia && window.matchMedia(MOBILE_VIEWPORT_QUERY).matches) || window.innerWidth <= 720);
+  return !!(userAgentMobile || coarsePointer || narrowTouch);
+}
+
+function applyResponsiveViewMode() {
+  const mode = responsiveViewMode();
+  const mobile = mode === 'mobile' || (mode === 'auto' && isMobileBrowser());
+  document.body.classList.toggle('mobile-view', mobile);
+  document.body.classList.toggle('native-mobile', isMobileBrowser());
+  document.body.dataset.viewMode = mode;
+}
+
+function renderResponsiveViewButton() {
+  const button = $('#btn-mobile');
+  if (!button) return;
+  const mode = responsiveViewMode();
+  const mobile = document.body.classList.contains('mobile-view');
+  const preview = mobile ? 'desktop' : 'mobile';
+  button.innerHTML = ic(mobile ? 'desktop' : 'phone', 18);
+  button.classList.toggle('is-on', mobile);
+  button.title = mode === 'auto'
+    ? `Automatic ${mobile ? 'mobile' : 'desktop'} view · click to preview ${preview}`
+    : `${mobile ? 'Mobile' : 'Desktop'} preview · click to return to automatic view`;
+  button.setAttribute('aria-label', button.title);
+}
+
+let responsiveViewTimer = null;
+function scheduleResponsiveViewRefresh() {
+  if (responsiveViewMode() !== 'auto') return;
+  clearTimeout(responsiveViewTimer);
+  responsiveViewTimer = setTimeout(() => {
+    applyResponsiveViewMode();
+    renderResponsiveViewButton();
+  }, 80);
+}
+
+window.addEventListener('resize', scheduleResponsiveViewRefresh);
+window.addEventListener('orientationchange', scheduleResponsiveViewRefresh);
+if (window.matchMedia) {
+  const mobileDeviceMedia = window.matchMedia(MOBILE_DEVICE_QUERY);
+  if (mobileDeviceMedia.addEventListener) mobileDeviceMedia.addEventListener('change', scheduleResponsiveViewRefresh);
+  else if (mobileDeviceMedia.addListener) mobileDeviceMedia.addListener(scheduleResponsiveViewRefresh);
+}
 
 /* ------------------------------------------------------------------ icons */
 const P = {
@@ -3796,10 +3870,7 @@ function renderChrome() {
   bell.classList.toggle('is-on', R.tab === 'alerts');
 
   $('#btn-theme').innerHTML = ic(document.documentElement.dataset.theme === 'dark' ? 'sun' : 'moon', 18);
-  const mob = document.body.classList.contains('mobile-view');
-  $('#btn-mobile').innerHTML = ic(mob ? 'desktop' : 'phone', 18);
-  $('#btn-mobile').classList.toggle('is-on', mob);
-  $('#btn-mobile').title = mob ? 'Back to desktop view' : 'Switch to mobile view';
+  renderResponsiveViewButton();
 
   const items = isMgr() ? NAV_MGR : [];
   const day = today();
@@ -7391,9 +7462,14 @@ $('#btn-theme').addEventListener('click', () => {
 });
 
 $('#btn-mobile').addEventListener('click', () => {
-  document.body.classList.toggle('mobile-view');
-  try { localStorage.setItem('dailyops.mobile', document.body.classList.contains('mobile-view') ? '1' : '0'); } catch (e) {}
-  renderChrome();
+  const current = responsiveViewMode();
+  const next = current === 'auto' ? (isMobileBrowser() ? 'desktop' : 'mobile') : 'auto';
+  try {
+    localStorage.setItem(RESPONSIVE_VIEW_MODE_KEY, next);
+    localStorage.removeItem(LEGACY_MOBILE_VIEW_KEY);
+  } catch (e) {}
+  applyResponsiveViewMode();
+  renderResponsiveViewButton();
 });
 
 $('#btn-alerts').addEventListener('click', () => {
@@ -7613,8 +7689,8 @@ async function startApp() {
     const th = localStorage.getItem('dailyops.theme');
     if (th) document.documentElement.dataset.theme = th;
     else if (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches) document.documentElement.dataset.theme = 'dark';
-    if (localStorage.getItem('dailyops.mobile') === '1') document.body.classList.add('mobile-view');
   } catch (e) {}
+  applyResponsiveViewMode();
 
   if (isSupabaseMode()) {
     showAuthLoading();

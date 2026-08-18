@@ -257,6 +257,12 @@ http://127.0.0.1:5500/
 
 Make sure the exact local origin is included in Supabase **Authentication > URL Configuration**. Do not open `index.html` directly with a `file://` URL.
 
+### Responsive browser view
+
+DailyOps defaults to **Automatic** view. The browser uses its device pointer/touch characteristics and viewport to choose the responsive mobile or desktop layout. On a real phone, the app uses the full browser viewport rather than rendering a phone-shaped frame inside the page. The view choice is local to the browser and does not affect Supabase data.
+
+The phone/desktop button in the top bar remains available for testing: on automatic mode it previews the opposite layout, and clicking it again returns to automatic detection. Existing `dailyops.mobile` preferences are migrated to the new local view preference automatically.
+
 ### Test login and logout
 
 1. Open the local URL. With no session, only the DailyOps login screen should be visible.
