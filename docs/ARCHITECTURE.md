@@ -110,7 +110,7 @@ Access is live-revalidated separately from operational data. The browser subscri
 
 ## Snapshot invariant
 
-`ensure_daily_checklists(venue_id, work_date)` is a legacy-named database helper. It creates an open and/or close daily operation instance only when an active Supabase template exists and copies template tasks, including their stable IDs, only when the instance is first created. Later template edits do not change existing daily tasks. The frontend's explicit re-apply action only adds missing routine snapshots and never resets existing state or one-off tasks.
+`ensure_daily_checklists(venue_id, work_date)` is a legacy-named database helper. It creates an open and/or close daily operation instance only when an active Supabase template exists and copies template tasks, including their stable IDs, only when the instance is first created. An active employee with venue access can invoke it only for the venue's current local date; managers retain their existing date permissions. The unique daily checklist key makes concurrent first loads idempotent. Later template edits do not change existing daily tasks. The frontend's explicit re-apply action only adds missing routine snapshots and never resets existing state or one-off tasks.
 
 Reset Today is intentionally different from re-apply: the manager-only reset RPC discards the current task snapshots and rebuilds both shifts from the current active templates. It preserves each daily operation ID, advances `notification_revision`, and retains `notification_events` so a later submission has a new idempotency identity.
 

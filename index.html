@@ -929,6 +929,16 @@ function profileLoginLabel(email) {
 }
 
 const dayKey = d => { const x = d || new Date(); return `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,'0')}-${String(x.getDate()).padStart(2,'0')}`; };
+function venueDayKey(context, date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-AU', {
+    timeZone: context.timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
 const parseKey = k => { const [y,m,d] = k.split('-').map(Number); return new Date(y, m-1, d); };
 const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate()+n); return x; };
 const fmtDate = k => parseKey(k).toLocaleDateString(undefined, { weekday:'long', day:'numeric', month:'long' });
@@ -2887,10 +2897,6 @@ async function loadSupabaseTodayForVenue(context, date, options = {}) {
 
   let checklists = initialChecklists || [];
   const missingTypes = ['open', 'close'].filter(type => !checklists.some(row => row.list_type === type));
-  const canBootstrap = context.organisationRole === 'manager';
-  if (missingTypes.length && !canBootstrap) {
-    throw accessError('today-not-initialized', `Today's operations for ${context.name} have not been initialised by a venue manager yet.`);
-  }
   if (missingTypes.length && !allowBootstrap) {
     throw accessError('today-load', `Today's operations for ${context.name} changed while this screen was synchronising.`);
   }
@@ -2917,7 +2923,7 @@ async function loadSupabaseTodayForVenue(context, date, options = {}) {
   }
 
   if (['open', 'close'].some(type => !checklists.some(row => row.list_type === type))) {
-    throw accessError('today-load', `Today's Opening and Closing Shifts could not be loaded for ${context.name}.`);
+    throw accessError('today-load', `${context.name} needs active Opening and Closing templates before today's operations can start. Ask a venue manager to check Templates.`);
   }
 
   let checklistIds = checklists.map(row => row.id);
@@ -2950,11 +2956,13 @@ async function loadSupabaseTodayForVenue(context, date, options = {}) {
 }
 
 async function loadSupabaseToday() {
-  const date = dayKey();
-  const loaded = await Promise.all(venueCatalog().map(context => loadSupabaseTodayForVenue(context, date)));
+  const contexts = venueCatalog();
+  const loaded = await Promise.all(contexts.map(context => (
+    loadSupabaseTodayForVenue(context, venueDayKey(context))
+  )));
   SUPABASE_TODAY = {
-    date,
-    byVenue: Object.fromEntries(venueCatalog().map((context, index) => [context.realId, loaded[index]]))
+    date: dayKey(),
+    byVenue: Object.fromEntries(contexts.map((context, index) => [context.realId, loaded[index]]))
   };
 }
 
@@ -3048,12 +3056,11 @@ async function subscribeSupabaseRealtime() {
     return;
   }
   const context = V();
-  const date = dayKey();
+  const date = venueDayKey(context);
   const venueId = context && context.realId;
-  const remoteDay = venueId && SUPABASE_TODAY.date === date
-    ? SUPABASE_TODAY.byVenue[venueId]
-    : null;
+  const remoteDay = venueId ? SUPABASE_TODAY.byVenue[venueId] : null;
   const checklistIds = remoteDay
+    && remoteDay.date === date
     ? ['open', 'close'].map(listType => remoteDay.lists[listType].id).filter(Boolean)
     : [];
   if (!venueId || !checklistIds.length) {
@@ -3390,15 +3397,16 @@ async function persistRemoteChecklist(list) {
 }
 
 function today(vid) {
-  const v = vid || V().id, k = dayKey();
+  const v = vid || V().id;
   if (isSupabaseMode()) {
     const context = supabaseVenueContext(v);
     const remoteDay = context && SUPABASE_TODAY.byVenue[context.realId];
-    if (!remoteDay || SUPABASE_TODAY.date !== k) {
+    if (!remoteDay || remoteDay.date !== venueDayKey(context)) {
       throw new Error(`Today's Supabase operations are not loaded for ${context ? context.name : 'this venue'}.`);
     }
     return remoteDay;
   }
+  const k = dayKey();
   S.days[v] = S.days[v] || {};
   if (!S.days[v][k]) {
     S.days[v][k] = makeDay(k, { open: [], close: [] }, v);
