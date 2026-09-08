@@ -26,6 +26,31 @@ Supabase currently supplies authentication, organisation/venue identity, team me
 
 Submit-gated shift-complete, reopen, shift-cover, and scheduled end-of-day Telegram delivery now run through Supabase Edge Functions and Supabase Cron. The old simulated notification inbox remains localStorage-backed only when `DEMO_MODE: true`; production defaults to Supabase mode.
 
+## Venue administration and UI cleanup (feature branch)
+
+Apply migrations [025](supabase/migrations/025_venue_organisation_administration.sql) and [026](supabase/migrations/026_preserve_completion_and_atomic_submission.sql), in order after 024, **before publishing this frontend**. These changes do not require a build step, another host, or Edge Function changes. The migrations have not been applied to production by this implementation.
+
+- Managers can add venues and edit name, tagline, colour, timezone, report cutoff, and notification rules within their own organisations. Platform admins can also create organisations. Organisation role assignment stays in the existing admin-only Team workflow.
+- Venue creation is transactional and retry-safe, with two empty active shift-template headers. New venues never inherit demo routines. Add or copy routine tasks, then use **Add new routine tasks to today** to populate today's snapshots. Existing snapshot titles, progress and one-off tasks are unchanged.
+- Admins with no organisations and managers with no venues can reach setup. One venue's unavailable daily operations no longer block Settings or other venues.
+- Shift submission uses an atomic, revision-checked RPC. Note edits and submissions preserve existing completion attribution; a submitted review is read-only until explicitly reopened. Migration 026 also records the authenticated `can_access_task` helper permission required by existing task policies.
+- Venue-day rollover refreshes on focus and a 30-second check. History boundaries and roster editing use venue dates. The operational date changes at local midnight, independently of the report cutoff.
+- **View report delivery** opens Alerts; it does not manually send EOD. Live venue deletion/demo-wipe controls are hidden. Cover success is separate from Telegram delivery status.
+
+### Local regression checks
+
+Tests use a temporary PostgreSQL-compatible PGlite database and headless Chrome with mocked Supabase responses. They never contact the live project. PGlite runs the complete migration chain with synthetic Auth identities and authenticated database roles; it does not simulate the Supabase Auth service, Edge Functions or realtime transport. A deployed two-session smoke test remains necessary after migration.
+
+With Node.js and Google Chrome installed:
+
+```sh
+test_deps=$(mktemp -d)
+npm install --prefix "$test_deps" --no-audit --no-fund @electric-sql/pglite@0.5.8 playwright@1.63.0
+NODE_PATH="$test_deps/node_modules" node --test tests/*.test.cjs
+```
+
+Set `DAILYOPS_SCREENSHOT_DIR` to an existing temporary directory to capture the desktop/phone Today and Settings screens. Test dependencies are separate from the static app.
+
 ## Supabase frontend auth setup
 
 ### Configuration
@@ -215,7 +240,7 @@ If the job already exists, run `select cron.unschedule('dailyops-end-of-day');` 
 3. Complete the final task in one shift. Confirm no Telegram is sent and the UI says the shift is ready to submit. Submit the shift, then confirm one concise `list-complete` row per enabled recipient becomes `sent` and exactly one Telegram message arrives per recipient.
 4. Reopen the submitted shift. Confirm one `list-reopened` event/message. Submit with at least one incomplete task and a reason/note; confirm one `list-incomplete` event/message per recipient with Incomplete Submissions enabled. Change or complete the task and submit again; confirm one new completion event/message labelled as a resubmission. Repeat browser actions or use two clients; revision/recipient idempotency must prevent duplicates.
 5. Confirm Shift Cover is enabled for a recipient, have an employee cover a shift for a rostered person, and confirm one `shift-cover` event/message identifies both people. Disable the preference and confirm no new Telegram is sent.
-6. As an active platform admin, change a venue cutoff under Settings and refresh. Confirm the database value changes. A manager/employee direct update of `cutoff_time` must be rejected by the database trigger.
+6. After migration 025, change a venue's timezone/cutoff as its manager and as a platform admin, then refresh. Confirm both persist. Employee and cross-organisation manager writes must fail; ordinary edits must not move venue ownership.
 7. Set a temporary venue `cutoff_time` a few minutes ahead, wait for the 15-minute schedule, and confirm one `end-of-day` row/message per enabled recipient. Restore the normal cutoff (Braddon's production value is `23:30`) and re-run Cron; successful events must not send again.
 8. Temporarily use an invalid Chat ID or disabled/unstarted recipient. Confirm that recipient has a `failed` event while valid recipients still receive their messages. Fix the recipient and retry before the five-attempt cap.
 9. Open Alerts in the manager UI to see Telegram sent, pending, and failed delivery status. Employees cannot query manager notification events or recipient Chat IDs through the existing RLS policies.

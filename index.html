@@ -388,6 +388,9 @@ html[data-theme="dark"] .segmented button.is-active .seg-count { background: var
   cursor: pointer; text-align: left; width: 100%;
 }
 .task:last-child { border-bottom: 0; }
+.task-toggle { display: flex; align-items: flex-start; gap: 13px; flex: 1; min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; font: inherit; }
+button.task-toggle { cursor: pointer; min-height: 36px; }
+button.task-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 4px; }
 .task:hover { background: var(--surface-2); }
 .task.is-locked { cursor: default; }
 .task.is-locked:hover { background: transparent; }
@@ -746,6 +749,9 @@ let AUTH = {
   ephemeralDemoVenueIds: []
 };
 let SUPABASE_TODAY = { date: null, byVenue: {} };
+let SUPABASE_TODAY_ERRORS = {};
+let SUPABASE_TODAY_LOAD_ID = 0;
+let SUPABASE_RECIPIENT_LOAD_ID = 0;
 let SUPABASE_TEMPLATES = { byVenue: {} };
 let SUPABASE_TEAM = { members: [], profilesById: {}, venueIdsByUser: {}, protectedProfileIds: [] };
 let SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows: [], loading: false, error: null };
@@ -1307,9 +1313,9 @@ function loadSupabaseVenueContexts(rows) {
   const savedOrganisationId = savedOrganisation && savedOrganisation !== 'all' ? savedOrganisation : null;
   AUTH.selectedOrganisationId = savedOrganisationId
     && organisationIds.includes(savedOrganisationId)
-    && venueOrganisationIds.has(savedOrganisationId)
+    && (venueOrganisationIds.has(savedOrganisationId) || organisationRoleForId(savedOrganisationId) === 'manager')
     ? savedOrganisationId
-    : organisationIds.length > 1 ? null : ([...venueOrganisationIds][0] || null);
+    : organisationIds.length > 1 ? null : (organisationIds[0] || null);
   try {
     localStorage.setItem(organisationSelectionKey, AUTH.selectedOrganisationId || 'all');
   } catch (error) { console.warn('[store] could not save organisation selection', error); }
@@ -1399,7 +1405,7 @@ async function loadOrganisationAccess(session) {
     }
   }
 
-  if (!organisationRows || !organisationRows.length) {
+  if (!platformAdmin && (!organisationRows || !organisationRows.length)) {
     throw accessError('no-membership', 'Your account is signed in, but no DailyOps organisations exist yet. Contact an administrator.');
   }
 
@@ -1412,15 +1418,15 @@ async function loadOrganisationAccess(session) {
     organisation: organisationById[row.organisation_id]
   }));
 
-  const { data: venueRows, error: venueError } = await DB.from('venues')
+  const { data: venueRows, error: venueError } = organisationIds.length ? await DB.from('venues')
     .select('id,organisation_id,name,subtitle,accent_key,cutoff_time,timezone,manager_email,manager_phone,notify_complete,notify_end_of_day,email_enabled,sms_enabled')
     .in('organisation_id', organisationIds)
-    .order('name');
+    .order('name') : { data: [], error: null };
   if (venueError) {
     console.error('[supabase] venue load failed', venueError);
     throw accessError('venue-load', 'We could not load the venues available to your account.');
   }
-  if (!venueRows || !venueRows.length) {
+  if (!venueRows?.length && !platformAdmin && !membershipRows.some(row => row.role === 'manager')) {
     throw accessError('no-venues', 'Your organisation access is loaded, but you do not have access to any venues yet. Contact an administrator.');
   }
   loadSupabaseVenueContexts(venueRows);
@@ -1442,6 +1448,7 @@ function blankSupabaseAccessState() {
 }
 
 function clearSupabaseManagerState() {
+  SUPABASE_RECIPIENT_LOAD_ID++;
   SUPABASE_ROSTER_WEEK = { organisationId: null, start: null, end: null, rows: [], loading: false, error: null };
   SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
   SUPABASE_NOTIFICATIONS = { rows: [], loading: false, error: null };
@@ -1451,6 +1458,8 @@ function clearSupabaseManagerState() {
 }
 
 function clearSupabaseAccessRuntime(keepProfile = true) {
+  SUPABASE_TODAY_LOAD_ID++;
+  SUPABASE_TODAY_ERRORS = {};
   AUTH.organisationMemberships = [];
   AUTH.organisations = [];
   AUTH.selectedOrganisationId = null;
@@ -1494,9 +1503,10 @@ function preserveSupabaseSelection(previousSelection) {
   const previousOrganisationId = previousSelection.organisationId;
   const previousVenueId = previousSelection.venueId;
   const previousOrganisationStillLegal = previousOrganisationId === null
-    ? contexts.length > 0
+    ? true
     : accessibleOrganisationIds().includes(previousOrganisationId)
-      && contexts.some(context => context.organisationId === previousOrganisationId);
+      && (organisationRoleForId(previousOrganisationId) === 'manager'
+        || contexts.some(context => context.organisationId === previousOrganisationId));
   if (!previousOrganisationStillLegal) return;
 
   AUTH.selectedOrganisationId = previousOrganisationId;
@@ -1592,7 +1602,7 @@ async function refreshSupabaseAccess(reason) {
     const changed = previousSnapshot !== supabaseAccessSnapshot();
     const needsRebuild = changed || wasUnverified || !S || !AUTH.venueContexts.length;
     SUPABASE_ACCESS.verified = true;
-    if (!needsRebuild) return;
+    if (!needsRebuild) { await refreshOperatingDays(); return; }
 
     load();
     await loadSupabaseTeam();
@@ -1611,7 +1621,7 @@ async function refreshSupabaseAccess(reason) {
       if (R.tab === 'history') loadSupabaseHistory(true);
       if (R.tab === 'roster') loadSupabaseRosterWeek(R.rosterWeekStart, true);
     } else {
-      loadSupabaseMyRosterWeek(rosterWeekStartKey(dayKey()), true);
+      loadSupabaseMyRosterWeek(rosterWeekStartKey(operatingDayKey()), true);
     }
     console.info('[supabase] access revalidated', { reason, changed });
   } catch (error) {
@@ -1952,6 +1962,7 @@ async function bootstrapMissingSupabaseTemplates(contexts, existingHeaders) {
 async function loadSupabaseTemplates() {
   const contexts = venueCatalog();
   const venueIds = contexts.map(context => context.realId);
+  if (!venueIds.length) { SUPABASE_TEMPLATES = { byVenue: {} }; return; }
   const headerResult = await DB.from('checklist_templates')
     .select('id,venue_id,list_type,name,active')
     .in('venue_id', venueIds);
@@ -2102,7 +2113,7 @@ async function selectOrganisation(id) {
   const targetContexts = nextOrganisationId
     ? availableContexts.filter(context => context.organisationId === nextOrganisationId)
     : availableContexts;
-  if (!targetContexts.length) {
+  if (!targetContexts.length && nextOrganisationId && organisationRoleForId(nextOrganisationId) !== 'manager') {
     toast(`${organisationName(nextOrganisationId)} has no accessible venues yet.`, 'warn');
     return;
   }
@@ -2123,7 +2134,7 @@ async function selectOrganisation(id) {
     ? previousVenueId
     : targetContexts.some(context => context.realId === savedVenueId)
       ? savedVenueId
-      : targetContexts[0].realId;
+      : targetContexts[0]?.realId || null;
   R.rosterVenueId = '';
   R.rosterEditor = null;
   R.rosterCopyPrompt = false;
@@ -2202,7 +2213,10 @@ function user(id) {
 const me = () => authUserForLocalUi() || user(S.session.userId) || S.users[0];
 const isMgr = () => isSupabaseMode()
   ? SUPABASE_ACCESS.verified !== false
-    && organisationRoleForVenue(currentVenueContext()) === 'manager'
+    && (isPlatformAdmin() || (currentVenueContext()
+      ? organisationRoleForVenue(currentVenueContext()) === 'manager'
+      : AUTH.selectedOrganisationId ? organisationRoleForId(AUTH.selectedOrganisationId) === 'manager'
+        : managedOrganisationIds().length > 0))
   : (me() || {}).role === 'manager';
 const isPlatformAdmin = () => isSupabaseMode()
   && !!AUTH.profile?.active
@@ -2340,14 +2354,14 @@ async function loadSupabaseRosterForVenue(context, date) {
 }
 
 function rosterWeekStartKey(date) {
-  const value = parseKey(date || dayKey());
+  const value = parseKey(date || operatingDayKey());
   const mondayOffset = (value.getDay() + 6) % 7;
   value.setDate(value.getDate() - mondayOffset);
   return dayKey(value);
 }
 
 function rosterWeekDates(start) {
-  const first = parseKey(start || rosterWeekStartKey(dayKey()));
+  const first = parseKey(start || rosterWeekStartKey(operatingDayKey()));
   return Array.from({ length: 7 }, (_, index) => dayKey(addDays(first, index)));
 }
 
@@ -2373,7 +2387,7 @@ function rosterShiftLabel(shiftType) {
 async function loadSupabaseRosterWeek(start, force = false) {
   if (!isSupabaseMode() || !isMgr()) return;
   const organisationId = currentSupabaseRosterScopeKey();
-  const weekStart = start || rosterWeekStartKey(dayKey());
+  const weekStart = start || rosterWeekStartKey(operatingDayKey());
   const dates = rosterWeekDates(weekStart);
   const weekEnd = dates[dates.length - 1];
   if (!force
@@ -2436,9 +2450,9 @@ async function loadSupabaseRosterWeek(start, force = false) {
 
 async function copyPreviousSupabaseRosterWeek() {
   if (!isSupabaseMode() || !isMgr() || R.rosterCopyPrompt === 'saving') return;
-  const targetStart = R.rosterWeekStart || rosterWeekStartKey(dayKey());
+  const targetStart = R.rosterWeekStart || rosterWeekStartKey(operatingDayKey());
   const targetDates = rosterWeekDates(targetStart);
-  if (targetDates[6] < dayKey()) {
+  if (targetDates[6] < operatingDayKey()) {
     toast('Past roster dates are read-only.', 'warn');
     return;
   }
@@ -2458,7 +2472,7 @@ async function copyPreviousSupabaseRosterWeek() {
     let copied = 0, already = 0, skipped = 0;
     for (const row of sourceResult.data || []) {
       const destinationDate = dayKey(addDays(parseKey(row.work_date), 7));
-      if (destinationDate < dayKey()) { skipped++; continue; }
+      if (destinationDate < operatingDayKey(contextsById[row.venue_id])) { skipped++; continue; }
       const key = `${row.venue_id}:${row.user_id}:${destinationDate}:${row.shift_type}`;
       if (existing.has(key)) { already++; continue; }
       const context = contextsById[row.venue_id];
@@ -2481,15 +2495,19 @@ async function copyPreviousSupabaseRosterWeek() {
   } catch (error) {
     console.error('[supabase] previous roster week copy failed', { targetStart, error });
     refreshSupabaseAccessAfterDeniedOperation(error, 'roster-copy');
+    await loadSupabaseRosterWeek(targetStart, true);
+    await loadSupabaseToday();
     R.rosterCopyPrompt = false;
     render();
-    toast('Could not copy the previous roster week. No further assignments were copied.', 'warn');
+    toast(SUPABASE_ROSTER_WEEK.error
+      ? 'Copy stopped and the roster could not reload. Some assignments may have saved; refresh before retrying.'
+      : 'Copy stopped. Earlier assignments may have saved; the roster has been reloaded. Check it before retrying.', 'warn');
   }
 }
 
 async function loadSupabaseMyRosterWeek(start, force = false) {
   if (!isSupabaseMode() || isMgr()) return;
-  const weekStart = start || rosterWeekStartKey(dayKey());
+  const weekStart = start || rosterWeekStartKey(operatingDayKey());
   const dates = rosterWeekDates(weekStart);
   const weekEnd = dates[dates.length - 1];
   if (!force
@@ -2662,6 +2680,9 @@ function maskTelegramChatId(value) {
 async function loadSupabaseNotificationRecipients() {
   if (!isSupabaseMode() || !isMgr() || !V()?.realId) return;
   const venueId = V().realId;
+  const requestId = ++SUPABASE_RECIPIENT_LOAD_ID;
+  const sessionUserId = AUTH.profile.id;
+  const isCurrent = () => requestId === SUPABASE_RECIPIENT_LOAD_ID && AUTH.profile?.id === sessionUserId && V()?.realId === venueId && isMgr();
   SUPABASE_NOTIFICATION_RECIPIENTS = { venueId, rows: [], eligibleProfiles: [], loading: true, error: null };
   render();
   try {
@@ -2678,6 +2699,7 @@ async function loadSupabaseNotificationRecipients() {
     const eligibleResult = await DB.from('profiles').select('id,display_name,email,active,platform_role').eq('active', true);
     if (eligibleResult.error) console.warn('[supabase] eligible Telegram recipient profile load failed', eligibleResult.error);
     const profilesById = Object.fromEntries((profileResult.data || []).map(profile => [profile.id, profile]));
+    if (!isCurrent()) return;
     SUPABASE_NOTIFICATION_RECIPIENTS = {
       venueId,
       rows: (result.data || []).map(row => ({ ...row, profile: profilesById[row.profile_id] || null })),
@@ -2686,6 +2708,7 @@ async function loadSupabaseNotificationRecipients() {
       error: null
     };
   } catch (error) {
+    if (!isCurrent()) return;
     console.error('[supabase] Telegram notification recipient load failed', { venueId, error });
     refreshSupabaseAccessAfterDeniedOperation(error, 'notification-recipient-load');
     SUPABASE_NOTIFICATION_RECIPIENTS = {
@@ -2841,13 +2864,13 @@ async function markSupabaseCoverRequests(ids) {
 }
 
 function navigateSupabaseMyRosterWeek(offsetDays) {
-  const current = SUPABASE_MY_ROSTER_WEEK.start || rosterWeekStartKey(dayKey());
+  const current = SUPABASE_MY_ROSTER_WEEK.start || rosterWeekStartKey(operatingDayKey());
   const next = dayKey(addDays(parseKey(current), offsetDays));
   loadSupabaseMyRosterWeek(next, true);
 }
 
 function resetSupabaseMyRosterWeek() {
-  loadSupabaseMyRosterWeek(rosterWeekStartKey(dayKey()), true);
+  loadSupabaseMyRosterWeek(rosterWeekStartKey(operatingDayKey()), true);
 }
 
 function mapRemoteDay(context, date, checklists, tasks, rosterData) {
@@ -2956,14 +2979,52 @@ async function loadSupabaseTodayForVenue(context, date, options = {}) {
 }
 
 async function loadSupabaseToday() {
+  const requestId = ++SUPABASE_TODAY_LOAD_ID;
+  const sessionUserId = AUTH.profile?.id;
   const contexts = venueCatalog();
-  const loaded = await Promise.all(contexts.map(context => (
+  const loaded = await Promise.allSettled(contexts.map(context => (
     loadSupabaseTodayForVenue(context, venueDayKey(context))
   )));
+  if (requestId !== SUPABASE_TODAY_LOAD_ID || AUTH.profile?.id !== sessionUserId) return;
+  SUPABASE_TODAY_ERRORS = {};
+  loaded.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      console.error('[supabase] daily operations load failed', { venueId: contexts[index].realId, error: result.reason });
+      SUPABASE_TODAY_ERRORS[contexts[index].realId] = result.reason.message || 'Could not load daily operations.';
+    }
+  });
   SUPABASE_TODAY = {
     date: dayKey(),
-    byVenue: Object.fromEntries(contexts.map((context, index) => [context.realId, loaded[index]]))
+    byVenue: Object.fromEntries(contexts.flatMap((context, index) => loaded[index].status === 'fulfilled'
+      ? [[context.realId, loaded[index].value]] : []))
   };
+}
+
+function operatingDayKey(context = V()) {
+  return isSupabaseMode() && context ? venueDayKey(context) : dayKey();
+}
+
+function loadedSupabaseDay(context = V()) {
+  const day = context && SUPABASE_TODAY.byVenue[context.realId];
+  return day?.date === operatingDayKey(context) ? day : null;
+}
+
+async function refreshOperatingDays(force = false) {
+  if (!isSupabaseMode() || !AUTH.profile || !S || SUPABASE_ACCESS.verified === false) return;
+  if (REMOTE_MUTATIONS.has('day-refresh')) return;
+  if (!force && !venueCatalog().some(context => {
+    const day = SUPABASE_TODAY.byVenue[context.realId];
+    return day && day.date !== venueDayKey(context);
+  })) return;
+  REMOTE_MUTATIONS.add('day-refresh');
+  try {
+    await loadSupabaseToday();
+    render();
+    syncSupabaseRealtimeForCurrentView();
+    if (R.tab === 'history' && isMgr() && V()) loadSupabaseHistory(true);
+  } finally {
+    REMOTE_MUTATIONS.delete('day-refresh');
+  }
 }
 
 function blankSupabaseRealtimeState() {
@@ -3056,7 +3117,7 @@ async function subscribeSupabaseRealtime() {
     return;
   }
   const context = V();
-  const date = venueDayKey(context);
+  const date = operatingDayKey(context);
   const venueId = context && context.realId;
   const remoteDay = venueId ? SUPABASE_TODAY.byVenue[venueId] : null;
   const checklistIds = remoteDay
@@ -3199,7 +3260,7 @@ async function loadSupabaseHistory(force = false) {
     const checklistResult = await DB.from('daily_checklists')
       .select(REMOTE_CHECKLIST_SELECT)
       .eq('venue_id', venueId)
-      .lt('work_date', dayKey())
+      .lt('work_date', venueDayKey(context))
       .order('work_date', { ascending: false })
       .order('list_type')
       .limit(SUPABASE_HISTORY_CHECKLIST_LIMIT);
@@ -3265,14 +3326,24 @@ async function loadSupabaseHistory(force = false) {
   if (isCurrentRequest()) render();
 }
 
-async function persistRemoteTask(task) {
-  const payload = {
+async function persistRemoteTask(task, previous) {
+  let payload = {
     status: task.status,
     completed_by: task.status === 'done' ? task.doneBy : null,
     completed_at: task.status === 'done' ? task.doneAt : null,
     note: task.note ? task.note : null,
     reason: task.reason ? task.reason : null
   };
+  if (previous) {
+    payload = Object.fromEntries(Object.entries({ note: task.note || null, reason: task.reason || null })
+      .filter(([key, value]) => value !== (previous[key] || null)));
+    if (task.status !== previous.status) Object.assign(payload, {
+      status: task.status,
+      completed_by: task.status === 'done' ? task.doneBy : null,
+      completed_at: task.status === 'done' ? task.doneAt : null
+    });
+    if (!Object.keys(payload).length) return;
+  }
   const { data, error } = await DB.from('daily_tasks')
     .update(payload)
     .eq('id', task.id)
@@ -3293,7 +3364,7 @@ async function requestSupabaseListComplete(checklistId) {
     });
     if (result.error) throw result.error;
     if (result.data && result.data.failed) {
-      toast(`${result.data.failed} Telegram notification${result.data.failed === 1 ? '' : 's'} failed. Check Alerts.`, 'warn');
+      toast(`${result.data.failed} Telegram notification${result.data.failed === 1 ? '' : 's'} failed. ${notificationFollowup()}`, 'warn');
     }
     if (R.tab === 'alerts' && isMgr()) loadSupabaseNotifications();
   } catch (error) {
@@ -3301,7 +3372,7 @@ async function requestSupabaseListComplete(checklistId) {
     // the server, so an unavailable function must not roll back the task UI.
     console.warn('[supabase] list-complete notification request failed', { checklistId, error });
     refreshSupabaseAccessAfterDeniedOperation(error, 'list-complete-notification');
-    toast('Shift submitted, but the Telegram notification could not be sent. Check Alerts.', 'warn');
+    toast(`Shift submitted, but the Telegram notification could not be sent. ${notificationFollowup()}`, 'warn');
   }
 }
 
@@ -3323,6 +3394,10 @@ async function requestSupabaseListReopened(checklistId) {
   }
 }
 
+function notificationFollowup() {
+  return isMgr() ? 'Check Alerts for delivery details.' : 'Contact your manager directly if needed.';
+}
+
 async function requestSupabaseShiftCoverNotification(coverRequestId) {
   if (!isSupabaseMode() || !coverRequestId || !DB) return null;
   try {
@@ -3330,15 +3405,11 @@ async function requestSupabaseShiftCoverNotification(coverRequestId) {
       body: { kind: 'shift-cover', cover_request_id: coverRequestId }
     });
     if (result.error) throw result.error;
-    if (result.data && result.data.failed) {
-      toast(result.data.failed + ' shift-cover Telegram notification' + (result.data.failed === 1 ? '' : 's') + ' failed. Check Alerts.', 'warn');
-    }
     if (R.tab === 'alerts' && isMgr()) loadSupabaseNotifications();
     return result.data;
   } catch (error) {
     console.warn('[supabase] shift-cover notification request failed', { coverRequestId, error });
     refreshSupabaseAccessAfterDeniedOperation(error, 'shift-cover-notification');
-    toast('Cover saved, but the Telegram notification could not be sent. Check Alerts.', 'warn');
     return null;
   }
 }
@@ -3617,7 +3688,21 @@ function openModal(html, opts) {
   modalOnRequestClose = o.onRequestClose || null;
   root.querySelector('.scrim').addEventListener('click', () => { if (!o.locked) requestModalClose(); });
   if (o.after) o.after(root);
+  syncSwitchAccessibility();
 }
+
+function syncSwitchAccessibility() {
+  document.querySelectorAll('button.switch').forEach(button => {
+    button.setAttribute('role', 'switch');
+    button.setAttribute('aria-checked', String(button.classList.contains('is-on')));
+    if (!button.hasAttribute('aria-label') && !button.hasAttribute('aria-labelledby')) {
+      const label = button.parentElement.querySelector('.label, .h3, div');
+      if (label) button.setAttribute('aria-label', label.textContent.trim());
+    }
+  });
+}
+
+document.addEventListener('click', () => queueMicrotask(syncSwitchAccessibility));
 function closeModal() {
   const root = $('#modal-root');
   root.classList.remove('is-open');
@@ -3775,11 +3860,11 @@ function taskRowHtml(t, o) {
   const canEditMeta = !opt.locked && me().active;
   const hasMeta = !!(t.note || t.reason);
   const metaAction = canEditMeta
-    ? `<span class="btn btn-sm btn-ghost task-meta-action" data-act="task-meta" data-list="${opt.listKey}" data-id="${t.id}" role="button" tabindex="0" title="${hasMeta ? 'Edit note or reason' : 'Add note or reason'}" aria-label="${hasMeta ? 'Edit note or reason' : 'Add note or reason'}">${ic('note', 14)}<span>${hasMeta ? 'Edit note' : 'Note'}</span></span>`
+    ? `<button type="button" class="btn btn-sm btn-ghost task-meta-action" data-act="task-meta" data-list="${opt.listKey}" data-id="${t.id}" title="${hasMeta ? 'Edit note or reason' : 'Add note or reason'}" aria-label="${hasMeta ? 'Edit note or reason' : 'Add note or reason'} for ${esc(t.title)}">${ic('note', 14)}<span>${hasMeta ? 'Edit note' : 'Note'}</span></button>`
     : '';
   const side = [metaAction, opt.side || ''].filter(Boolean).join('');
 
-  return `<${tag} class="${cls}" ${opt.locked ? '' : `data-task="${t.id}" data-list="${opt.listKey}" type="button"`}>
+  return `<div class="${cls}"><${tag} class="task-toggle" ${opt.locked ? '' : `data-task="${t.id}" data-list="${opt.listKey}" type="button" aria-pressed="${done}"`}>
     ${t.critical ? '<span class="task-critical-mark"></span>' : ''}
     <span class="tick">${ic(flag ? 'minus' : 'check', 15, 3)}</span>
     <span class="task-main">
@@ -3789,15 +3874,14 @@ function taskRowHtml(t, o) {
       ${t.reason ? `<span class="task-note" style="display:block"><b>Reason:</b> ${esc(t.reason)}</span>` : ''}
       ${t.note ? `<span class="task-note" style="display:block"><b>Note:</b> ${esc(t.note)}</span>` : ''}
     </span>
-    ${side}
-  </${tag}>`;
+  </${tag}>${side}</div>`;
 }
 
 /* ------------------------------------------------------------- chrome */
 /* The venue's colour is the one thing that tells you at a glance which site
    you're looking at, so it drives --accent and everything derived from it. */
 function applyVenueAccent() {
-  const a = accentOf(V().accent);
+  const a = accentOf(V()?.accent);
   const [c, hi, ink] = document.documentElement.dataset.theme === 'dark' ? a.dark : a.light;
   const st = document.documentElement.style;
   st.setProperty('--accent', c);
@@ -3815,7 +3899,7 @@ function renderChrome() {
 
   const m = me();
   const mine = venuesFor(m);
-  const v = V();
+  const v = V() || { name: 'DailyOps', sub: 'Organisation setup', accent: 'indigo' };
   const accessibleOrgs = isSupabaseMode() ? accessibleOrganisations() : [];
   const orgPicker = $('#organisation-pick');
   if (isSupabaseMode() && accessibleOrgs.length) {
@@ -3836,7 +3920,7 @@ function renderChrome() {
         const role = organisationRoleForId(organisation.id);
         const hasVenueAccess = AUTH.venueContexts.some(context => context.organisationId === organisation.id);
         const label = `${organisation.name} · ${role === 'manager' ? 'Manager' : 'Employee'}${hasVenueAccess ? '' : ' · No venue access'}`;
-        return `<option value="${organisation.id}" ${organisation.id === AUTH.selectedOrganisationId ? 'selected' : ''}${hasVenueAccess ? '' : ' disabled'}>${esc(label)}</option>`;
+        return `<option value="${organisation.id}" ${organisation.id === AUTH.selectedOrganisationId ? 'selected' : ''}${hasVenueAccess || role === 'manager' ? '' : ' disabled'}>${esc(label)}</option>`;
       }).join('')}`;
     $('#organisation-switch').value = AUTH.selectedOrganisationId || '';
   } else {
@@ -3881,8 +3965,8 @@ function renderChrome() {
   renderResponsiveViewButton();
 
   const items = isMgr() ? NAV_MGR : [];
-  const day = today();
-  const counts = { today: listStats(day.lists.open).pending + listStats(day.lists.close).pending };
+  const day = isSupabaseMode() ? loadedSupabaseDay() : today();
+  const counts = { today: day ? listStats(day.lists.open).pending + listStats(day.lists.close).pending : 0 };
 
   $('#sidebar').style.display = items.length ? '' : 'none';
   $('#sidebar').innerHTML = items.length ? `
@@ -3910,7 +3994,9 @@ function render() {
   const page = $('#page');
   page.classList.toggle('is-roster-page', R.tab === 'roster');
   let html = '';
-  if (!isMgr())                     html = pageEmployee();
+  if (isSupabaseMode() && !V() && R.tab !== 'team') html = pageVenueSetup();
+  else if (isSupabaseMode() && !loadedSupabaseDay() && (!isMgr() || R.tab === 'today')) html = pageTodayUnavailable();
+  else if (!isMgr())                html = pageEmployee();
   else if (R.tab === 'today')       html = pageManagerToday();
   else if (R.tab === 'templates')   html = pageTemplates();
   else if (R.tab === 'team')        html = pageTeam();
@@ -3919,6 +4005,7 @@ function render() {
   else if (R.tab === 'alerts')      html = pageAlerts();
   else if (R.tab === 'settings')    html = pageSettings();
   page.innerHTML = html;
+  syncSwitchAccessibility();
   if (content && previousScrollTop !== null) {
     const previousBehavior = content.style.scrollBehavior;
     content.style.scrollBehavior = 'auto';
@@ -3933,7 +4020,7 @@ function render() {
 function personalRosterHtml() {
   if (!isSupabaseMode()) return '';
   const state = SUPABASE_MY_ROSTER_WEEK;
-  const weekStart = state.start || rosterWeekStartKey(dayKey());
+  const weekStart = state.start || rosterWeekStartKey(operatingDayKey());
   const weekDates = rosterWeekDates(weekStart);
   const accessibleVenues = venueCatalog();
   const body = state.loading
@@ -4072,10 +4159,12 @@ function venueStripHtml() {
     <div class="card-head"><div class="h3">Across the group</div>
       <span class="tiny mut" style="margin-left:auto">${plural(venues.length, 'venue')} · ${showOrganisation && !AUTH.selectedOrganisationId ? 'all organisations' : 'today'}</span></div>
     <div class="vstrip">${venues.map((v, index) => {
-      const d = dayStats(today(v.id));
+      const venueDay = isSupabaseMode() ? loadedSupabaseDay(v) : today(v.id);
+      if (!venueDay) return `<button class="vcard" data-act="goto-venue" data-id="${v.id}"><span class="vcard-name">${esc(v.name)}</span><span class="tiny mut">Operations unavailable · open to retry</span></button>`;
+      const d = dayStats(venueDay);
       const col = venueDotColor(v);
       const cur = v.id === V().id;
-      const crit = [...today(v.id).lists.open.tasks, ...today(v.id).lists.close.tasks].filter(t => t.critical && t.status !== 'done').length;
+      const crit = [...venueDay.lists.open.tasks, ...venueDay.lists.close.tasks].filter(t => t.critical && t.status !== 'done').length;
       const groupLabel = showOrganisation && (index === 0 || venues[index - 1].organisationId !== v.organisationId)
         ? `<div class="vstrip-group-label">${esc(organisationName(v.organisationId))}</div>`
         : '';
@@ -4130,7 +4219,7 @@ function pageManagerToday() {
 
   const rows = L.tasks.map(t => taskRowHtml(t, {
     listKey: lk, locked: L.submitted,
-    side: t.source === 'adhoc' && !L.submitted ? `<span class="task-side"><span class="btn btn-sm btn-icon btn-ghost" data-act="del-task" data-list="${lk}" data-id="${t.id}" title="Remove this one-off task">${ic('trash', 14)}</span></span>` : ''
+    side: t.source === 'adhoc' && !L.submitted ? `<button type="button" class="btn btn-sm btn-icon btn-ghost task-side" data-act="del-task" data-list="${lk}" data-id="${t.id}" aria-label="Remove ${esc(t.title)}" title="Remove this one-off task">${ic('trash', 14)}</button>` : ''
   })).join('');
 
   return `
@@ -4140,8 +4229,8 @@ function pageManagerToday() {
         <div class="page-sub">${esc(fmtDate(day.date))} · ${esc(V().name)}</div>
       </div>
       <div class="row wrap" style="gap:8px">
-        <button class="btn btn-sm" data-act="eod">${ic('send', 15)} Run end of day</button>
-        <button class="btn btn-sm btn-primary" data-act="add-task" data-list="${lk}">${ic('plus', 15)} One-off task</button>
+        <button class="btn btn-sm" data-act="eod">${ic('send', 15)} ${isSupabaseMode() ? 'View report delivery' : 'Run end of day'}</button>
+        <button class="btn btn-sm btn-primary" data-act="add-task" data-list="${lk}" ${L.submitted ? 'disabled' : ''}>${ic('plus', 15)} One-off task</button>
       </div>
     </div>
 
@@ -4171,10 +4260,10 @@ function pageManagerToday() {
           <span class="chip ${st.complete ? 'chip-ok' : ''}">${st.pct}%</span>
         </div>
       <div class="tasklist">${rows || `<div class="empty">No tasks on this shift.</div>`}</div>
-        <div class="card-foot row" style="gap:8px">
+        <div class="card-foot row wrap" style="gap:8px">
           <button class="btn btn-sm" data-act="review" data-list="${lk}">${ic('note', 15)} Review notes &amp; reasons</button>
-          <button class="btn btn-sm" data-act="add-task" data-list="${lk}">${ic('plus', 15)} Add a one-off task</button>
-          <button class="btn btn-sm btn-ghost" data-act="sync-tpl" data-list="${lk}">${ic('reset', 15)} Re-apply routine tasks</button>
+          <button class="btn btn-sm" data-act="add-task" data-list="${lk}" ${L.submitted ? 'disabled' : ''}>${ic('plus', 15)} Add a one-off task</button>
+          <button class="btn btn-sm btn-ghost" data-act="sync-tpl" data-list="${lk}" ${L.submitted ? 'disabled' : ''}>${ic('plus', 15)} Add new routine tasks to today</button>
           ${L.submitted ? `<button class="btn btn-sm btn-ghost" data-act="reopen" data-list="${lk}">Reopen</button>` : ''}
         </div>
       </div>
@@ -4195,10 +4284,10 @@ function pageManagerToday() {
       <div class="card">
         <div class="card-head"><div class="h3">Operation controls</div></div>
         <div class="card-body row wrap" style="gap:8px">
-          <button class="btn btn-sm" data-act="eod">${ic('send', 15)} Force end-of-day report</button>
-          <button class="btn btn-sm" data-act="tick-all" data-list="${lk}">${ic('check', 15)} Tick everything on ${esc(m.full)}</button>
+          ${isSupabaseMode() ? `<span class="tiny mut">Scheduled report after ${esc(V().cutoff)} (${esc(V().timezone)})</span>` : `<button class="btn btn-sm" data-act="eod">${ic('send', 15)} Force end-of-day report</button>`}
+          <button class="btn btn-sm" data-act="tick-all" data-list="${lk}" ${L.submitted ? 'disabled' : ''}>${ic('check', 15)} Tick everything on ${esc(m.full)}</button>
           <button class="btn btn-sm btn-danger" data-act="reset-day">${ic('reset', 15)} Reset today</button>
-          <button class="btn btn-sm btn-danger" data-act="reset-all">${ic('trash', 15)} Wipe all demo data</button>
+          ${!isSupabaseMode() ? `<button class="btn btn-sm btn-danger" data-act="reset-all">${ic('trash', 15)} Wipe all demo data</button>` : ''}
         </div>
       </div>
     </div>`;
@@ -4239,9 +4328,9 @@ function pageTemplates() {
           </div>`).join('')
         : `<div class="empty">No routine tasks yet.</div>`}
       </div>
-      <div class="card-foot row" style="gap:8px">
+      <div class="card-foot row wrap" style="gap:8px">
         <button class="btn btn-sm btn-primary" data-act="tpl-add" data-list="${k}">${ic('plus', 15)} Add routine task</button>
-        <button class="btn btn-sm btn-ghost" data-act="sync-tpl" data-list="${k}">${ic('reset', 15)} Apply to today</button>
+        <button class="btn btn-sm btn-ghost" data-act="sync-tpl" data-list="${k}" ${isSupabaseMode() && (!loadedSupabaseDay() || loadedSupabaseDay().lists[k].submitted) ? 'disabled' : ''}>${ic('plus', 15)} Add new routine tasks to today</button>
       </div>
     </div>`;
   };
@@ -4251,11 +4340,11 @@ function pageTemplates() {
         <div class="page-title">Templates</div>
         <div class="page-sub">The recurring shift tasks published every day at <b>${esc(V().name)}</b>. One-off extras are added from Today's Operations.</div>
       </div>
-      ${venueCatalog().length > 1 ? `<button class="btn btn-sm" data-act="copy-tpl">${ic('list', 15)} Copy from another venue</button>` : ''}
+      ${templateCopySources().length ? `<button class="btn btn-sm" data-act="copy-tpl">${ic('list', 15)} Copy from another venue</button>` : ''}
     </div>
     <div class="stack">
       <div class="banner banner-info">${ic('info', 17)}<div>
-        Template edits apply to <b>tomorrow onwards</b>. Hit <b>Apply to today</b> to push changes into today's live list — already-ticked tasks keep their state.</div></div>
+        Template edits apply to <b>new daily shifts</b>. <b>Add new routine tasks to today</b> adds missing tasks only; it does not rename, remove or reset existing tasks. Submitted shifts must be reopened first.</div></div>
       <div class="grid grid-2">${card('open')}${card('close')}</div>
     </div>`;
 }
@@ -4270,7 +4359,7 @@ function rosterPlanningContexts() {
 
 function rosterWeekRows() {
   const scope = currentSupabaseRosterScopeKey();
-  const weekStart = R.rosterWeekStart || rosterWeekStartKey(dayKey());
+  const weekStart = R.rosterWeekStart || rosterWeekStartKey(operatingDayKey());
   return SUPABASE_ROSTER_WEEK.organisationId === scope && SUPABASE_ROSTER_WEEK.start === weekStart
     ? (SUPABASE_ROSTER_WEEK.rows || []) : [];
 }
@@ -4388,7 +4477,7 @@ function rosterEditorDraft(row, date, userId, venueId, shiftType) {
     id: row?.id || null,
     venueId: row?.venue_id || venueId || R.rosterVenueId || '',
     userId: row?.user_id || userId || '',
-    workDate: row?.work_date || date || R.rosterDay || dayKey(),
+    workDate: row?.work_date || date || R.rosterDay || operatingDayKey(),
     shiftType: row?.shift_type || shiftType || rosterOperationTypes()[0],
     startTime: row?.start_time ? String(row.start_time).slice(0, 5) : '',
     endTime: row?.end_time ? String(row.end_time).slice(0, 5) : ''
@@ -4414,7 +4503,7 @@ async function saveSupabaseRosterEditor() {
   const editor = R.rosterEditor;
   if (!editor || editor.saving) return;
   const draft = editor.draft;
-  if (draft.workDate < dayKey()) {
+  if (draft.workDate < operatingDayKey(supabaseVenueContext(draft.venueId))) {
     editor.error = 'Past roster dates are read-only.';
     render();
     return;
@@ -4463,7 +4552,7 @@ async function saveSupabaseRosterEditor() {
     R.rosterWeekStart = rosterWeekStartKey(draft.workDate);
     if (R.rosterView === 'day') R.rosterDay = draft.workDate;
     await loadSupabaseRosterWeek(R.rosterWeekStart, true);
-    if (draft.workDate === dayKey()) await loadSupabaseToday();
+    if (draft.workDate === operatingDayKey(context)) await loadSupabaseToday();
     R.rosterEditor = null;
     render();
     toast(draft.id ? 'Roster assignment updated' : 'Roster assignment added', 'ok');
@@ -4479,7 +4568,7 @@ async function saveSupabaseRosterEditor() {
 async function removeSupabaseRosterAssignment() {
   const editor = R.rosterEditor;
   if (!editor || !editor.draft.id || editor.saving) return;
-  if (editor.draft.workDate < dayKey()) {
+  if (editor.draft.workDate < operatingDayKey(supabaseVenueContext(editor.draft.venueId))) {
     editor.error = 'Past roster dates are read-only.';
     render();
     return;
@@ -4493,7 +4582,7 @@ async function removeSupabaseRosterAssignment() {
     R.rosterWeekStart = rosterWeekStartKey(editor.draft.workDate);
     if (R.rosterView === 'day') R.rosterDay = editor.draft.workDate;
     await loadSupabaseRosterWeek(R.rosterWeekStart, true);
-    if (editor.draft.workDate === dayKey()) await loadSupabaseToday();
+    if (editor.draft.workDate === operatingDayKey(supabaseVenueContext(editor.draft.venueId))) await loadSupabaseToday();
     R.rosterEditor = null;
     render();
     toast('Roster assignment removed', 'ok');
@@ -4510,7 +4599,7 @@ function rosterEditorHtml() {
   const editor = R.rosterEditor;
   if (!editor) return '';
   const draft = editor.draft;
-  const readOnly = draft.workDate < dayKey();
+  const readOnly = draft.workDate < operatingDayKey(supabaseVenueContext(draft.venueId));
   const contexts = managerVenueCatalog();
   const context = contexts.find(item => item.realId === draft.venueId);
   const eligible = context ? rosterEligibleMembersForVenue(context) : [];
@@ -4542,7 +4631,7 @@ function rosterFiltersHtml(contexts, filterContexts = managerVenueCatalog()) {
 }
 
 function rosterWeekViewHtml() {
-  const weekStart = R.rosterWeekStart || rosterWeekStartKey(dayKey());
+  const weekStart = R.rosterWeekStart || rosterWeekStartKey(operatingDayKey());
   const dates = rosterWeekDates(weekStart);
   const contexts = rosterPlanningContexts();
   const rows = rosterWeekRows().filter(row => !R.rosterVenueId || row.venue_id === R.rosterVenueId);
@@ -4553,23 +4642,23 @@ function rosterWeekViewHtml() {
     ? '<div class="empty" style="padding:30px">Loading the roster…</div>'
     : weekState.error
       ? `<div class="banner banner-warn" style="margin:14px">${ic('warn', 17)}<div>${esc(weekState.error)}<br><button class="btn btn-sm" data-act="roster-week-reload" style="margin-top:9px">Try again</button></div></div>`
-      : `<div class="roster-week-wrap"><div class="roster-week-board"><div class="roster-week-head roster-sticky">Employee</div>${dates.map(date => `<div class="roster-week-head"><div>${esc(new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(parseKey(date)))}</div><div class="tiny mut" style="margin-top:2px">${esc(fmtDateShort(date))}</div></div>`).join('')}${people.map(member => `<div class="roster-week-cell roster-person roster-sticky"><div>${avatarHtml(member.id, 'sm')}</div><div style="min-width:0"><div class="roster-person-name">${esc(member.displayName)}</div><div class="roster-person-meta">${rows.filter(row => row.user_id === member.id).length} assignment${rows.filter(row => row.user_id === member.id).length === 1 ? '' : 's'}</div></div></div>${dates.map(date => { const assignments = rows.filter(row => row.user_id === member.id && row.work_date === date); return `<div class="roster-week-cell">${assignments.map(row => rosterAssignmentCard(row)).join('')}${date >= dayKey() ? `<button class="roster-add" data-act="roster-add" data-date="${date}" data-user="${esc(member.id)}">+ Add</button>` : assignments.length ? '<span class="tiny mut">Past</span>' : ''}</div>`; }).join('')}`).join('') || '<div class="empty" style="grid-column:1/-1;padding:28px">No active employees are available in the selected scope.</div>'}</div></div>`;
-  return `<div class="roster-toolbar"><div class="segmented" role="tablist" aria-label="Roster view"><button data-act="roster-view" data-view="week" class="${R.rosterView === 'week' ? 'is-active' : ''}" role="tab" aria-selected="${R.rosterView === 'week'}">Week</button><button data-act="roster-view" data-view="day" class="${R.rosterView === 'day' ? 'is-active' : ''}" role="tab" aria-selected="${R.rosterView === 'day'}">Day</button></div><div class="row wrap" style="gap:6px"><button class="btn btn-sm btn-icon" data-act="roster-week-prev" title="Previous week">${ic('left', 14)}</button><button class="btn btn-sm" data-act="roster-week-today">This week</button><button class="btn btn-sm btn-icon" data-act="roster-week-next" title="Next week">${ic('right', 14)}</button><button class="btn btn-sm" data-act="roster-copy-open" ${R.rosterCopyPrompt === 'saving' ? 'disabled' : ''}>Copy previous week</button></div></div>${R.rosterCopyPrompt ? `<div class="roster-copy-panel" role="alert"><div class="row"><div><b>${R.rosterCopyPrompt === 'saving' ? 'Copying roster…' : `Copy roster from ${esc(rosterWeekLabel(dayKey(addDays(parseKey(weekStart), -7))))} into ${esc(rosterWeekLabel(weekStart))}?`}</b><div class="tiny mut" style="margin-top:3px">Existing assignments in the destination week will be kept.</div></div><div class="row wrap" style="gap:7px"><button class="btn btn-sm" data-act="roster-copy-cancel" ${R.rosterCopyPrompt === 'saving' ? 'disabled' : ''}>Cancel</button><button class="btn btn-sm btn-primary" data-act="roster-copy-confirm" ${R.rosterCopyPrompt === 'saving' ? 'disabled' : ''}>${R.rosterCopyPrompt === 'saving' ? 'Copying…' : 'Copy'}</button></div></div></div>` : ''}${rosterCoverageHtml(dates, rows, contexts)}<div class="card"><div class="card-head"><div style="flex:1"><div class="h3">Weekly plan</div><div class="tiny mut">Only existing assignments are shown. Add or edit people without leaving the week visible.</div></div>${rosterFiltersHtml(contexts, managerVenueCatalog())}</div>${planner}</div>`;
+      : `<div class="roster-week-wrap"><div class="roster-week-board"><div class="roster-week-head roster-sticky">Employee</div>${dates.map(date => `<div class="roster-week-head"><div>${esc(new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(parseKey(date)))}</div><div class="tiny mut" style="margin-top:2px">${esc(fmtDateShort(date))}</div></div>`).join('')}${people.map(member => `<div class="roster-week-cell roster-person roster-sticky"><div>${avatarHtml(member.id, 'sm')}</div><div style="min-width:0"><div class="roster-person-name">${esc(member.displayName)}</div><div class="roster-person-meta">${rows.filter(row => row.user_id === member.id).length} assignment${rows.filter(row => row.user_id === member.id).length === 1 ? '' : 's'}</div></div></div>${dates.map(date => { const assignments = rows.filter(row => row.user_id === member.id && row.work_date === date); return `<div class="roster-week-cell">${assignments.map(row => rosterAssignmentCard(row)).join('')}${date >= operatingDayKey() ? `<button class="roster-add" data-act="roster-add" data-date="${date}" data-user="${esc(member.id)}">+ Add</button>` : assignments.length ? '<span class="tiny mut">Past</span>' : ''}</div>`; }).join('')}`).join('') || '<div class="empty" style="grid-column:1/-1;padding:28px">No active employees are available in the selected scope.</div>'}</div></div>`;
+  return `<div class="roster-toolbar"><div class="segmented" role="tablist" aria-label="Roster view"><button data-act="roster-view" data-view="week" class="${R.rosterView === 'week' ? 'is-active' : ''}" role="tab" aria-selected="${R.rosterView === 'week'}">Week</button><button data-act="roster-view" data-view="day" class="${R.rosterView === 'day' ? 'is-active' : ''}" role="tab" aria-selected="${R.rosterView === 'day'}">Day</button></div><div class="row wrap" style="gap:6px"><button class="btn btn-sm btn-icon" data-act="roster-week-prev" title="Previous week">${ic('left', 14)}</button><button class="btn btn-sm" data-act="roster-week-today">This week</button><button class="btn btn-sm btn-icon" data-act="roster-week-next" title="Next week">${ic('right', 14)}</button><button class="btn btn-sm" data-act="roster-copy-open" ${R.rosterCopyPrompt === 'saving' ? 'disabled' : ''}>Copy previous week</button></div></div>${R.rosterCopyPrompt ? `<div class="roster-copy-panel" role="alert"><div class="row"><div><b>${R.rosterCopyPrompt === 'saving' ? 'Copying roster…' : `Copy roster from ${esc(rosterWeekLabel(dayKey(addDays(parseKey(weekStart), -7))))} into ${esc(rosterWeekLabel(weekStart))}?`}</b><div class="tiny mut" style="margin-top:3px">Copies across all managed venues in the selected organisation scope, regardless of the venue or people filter. Existing assignments are kept.</div></div><div class="row wrap" style="gap:7px"><button class="btn btn-sm" data-act="roster-copy-cancel" ${R.rosterCopyPrompt === 'saving' ? 'disabled' : ''}>Cancel</button><button class="btn btn-sm btn-primary" data-act="roster-copy-confirm" ${R.rosterCopyPrompt === 'saving' ? 'disabled' : ''}>${R.rosterCopyPrompt === 'saving' ? 'Copying…' : 'Copy'}</button></div></div></div>` : ''}${rosterCoverageHtml(dates, rows, contexts)}<div class="card"><div class="card-head"><div style="flex:1"><div class="h3">Weekly plan</div><div class="tiny mut">Only existing assignments are shown. Add or edit people without leaving the week visible.</div></div>${rosterFiltersHtml(contexts, managerVenueCatalog())}</div>${planner}</div>`;
 }
 
 function rosterDayViewHtml() {
-  const date = R.rosterDay || dayKey();
+  const date = R.rosterDay || operatingDayKey();
   const contexts = rosterPlanningContexts();
   const rows = rosterWeekRows().filter(row => row.work_date === date && (!R.rosterVenueId || row.venue_id === R.rosterVenueId));
   const gaps = rosterCoverageGaps([date], rosterWeekRows(), contexts);
-  const past = date < dayKey();
+  const past = date < operatingDayKey();
   const groups = contexts.map(context => `<div class="roster-day-group"><div class="row" style="gap:7px"><span class="venue-dot" style="background:${venueDotColor(context)}"></span><div><div class="h3">${esc(venueDisplayLabel(context))}</div><div class="tiny mut">${esc(organisationName(context.organisationId))}</div></div></div>${rosterOperationTypes().map(operation => { const assignments = rows.filter(row => row.venue_id === context.realId && row.shift_type === operation); return `<div class="roster-day-operation"><div class="row-b"><div style="font-weight:650">${esc(rosterOperationFullLabel(operation))}</div>${!past ? `<button class="roster-add" data-act="roster-add" data-date="${date}" data-venue="${esc(context.realId)}" data-shift="${operation}">+ Add person</button>` : '<span class="tiny mut">Read-only</span>'}</div><div style="margin-top:3px">${assignments.length ? assignments.map(row => `<button class="roster-person-chip" data-act="roster-edit" data-id="${esc(row.id)}">${avatarHtml(row.user_id, 'sm')}<span>${esc(rosterProfileName(row.user_id))}${rosterTimeLabel(row.start_time, row.end_time) ? ` · ${esc(rosterTimeLabel(row.start_time, row.end_time))}` : ''}</span></button>`).join('') : '<span class="tiny mut">Nobody assigned</span>'}</div></div>`; }).join('')}</div>`).join('');
   return `<div class="roster-toolbar"><div class="segmented" role="tablist" aria-label="Roster view"><button data-act="roster-view" data-view="week" class="${R.rosterView === 'week' ? 'is-active' : ''}" role="tab" aria-selected="${R.rosterView === 'week'}">Week</button><button data-act="roster-view" data-view="day" class="${R.rosterView === 'day' ? 'is-active' : ''}" role="tab" aria-selected="${R.rosterView === 'day'}">Day</button></div><div class="row wrap" style="gap:6px"><button class="btn btn-sm btn-icon" data-act="roster-day-prev" title="Previous day">${ic('left', 14)}</button><button class="btn btn-sm" data-act="roster-day-today">Today</button><button class="btn btn-sm btn-icon" data-act="roster-day-next" title="Next day">${ic('right', 14)}</button></div></div><div class="row-b wrap" style="gap:10px"><div><div class="page-title" style="font-size:20px">${esc(fmtDateShort(date))}</div><div class="page-sub">Quick staffing changes for the selected operating day.</div></div>${rosterFiltersHtml(contexts, managerVenueCatalog())}</div>${gaps.length ? `<div class="banner banner-warn">${ic('warn', 17)}<div><b>${gaps.length} coverage gap${gaps.length === 1 ? '' : 's'}</b><div class="tiny" style="margin-top:3px">${gaps.map(gap => `${esc(venueDisplayLabel(AUTH.venueContexts.find(context => context.realId === gap.venueId) || {}))} · ${esc(rosterOperationLabel(gap.operation))}`).join('<br>')}</div></div></div>` : ''}<div class="stack" style="gap:12px">${groups || '<div class="empty">No managed venues match the current filter.</div>'}</div>`;
 }
 
 function pageSupabaseRoster() {
-  const weekStart = R.rosterWeekStart || rosterWeekStartKey(dayKey());
-  const expectedWeek = R.rosterView === 'day' ? rosterWeekStartKey(R.rosterDay || dayKey()) : weekStart;
+  const weekStart = R.rosterWeekStart || rosterWeekStartKey(operatingDayKey());
+  const expectedWeek = R.rosterView === 'day' ? rosterWeekStartKey(R.rosterDay || operatingDayKey()) : weekStart;
   if (expectedWeek !== weekStart) {
     R.rosterWeekStart = expectedWeek;
     setTimeout(() => loadSupabaseRosterWeek(expectedWeek, true), 0);
@@ -5087,7 +5176,7 @@ function pageAlerts() {
       </div>` : ''}
       <div class="card">
         <div class="card-head"><div class="h3">Inbox</div>
-          <span class="tiny mut" style="margin-left:auto">${plural(list.length, 'message')} · ${unreadCount()} unread</span></div>
+          <span class="tiny mut" style="margin-left:auto">${plural(list.length, 'message')} · ${isSupabaseMode() ? remoteUnreadNotificationCount() + ' needs attention' : unreadCount() + ' unread'}</span></div>
         <div>${list.length ? list.map(n => {
           const isEod = n.kind === 'end-of-day';
           const isReopened = n.kind === 'list-reopened';
@@ -5121,11 +5210,38 @@ function pageAlerts() {
 /* ==========================================================================
    MANAGER · SETTINGS
    ========================================================================== */
+function organisationCardsHtml() {
+  const organisations = managedOrganisations();
+  return `<div class="card">
+    <div class="card-head"><div class="h3">Organisations</div>
+      ${isPlatformAdmin() ? '<button class="btn btn-sm btn-primary" style="margin-left:auto" data-act="add-organisation">Add organisation</button>' : ''}</div>
+    <div class="card-body">${organisations.map(org => {
+      const venues = AUTH.venueContexts.filter(context => context.organisationId === org.id);
+      return `<div class="venue-row"><div style="flex:1"><b>${esc(org.name)}</b><div class="tiny mut">${plural(venues.length, 'venue')}</div></div>
+        <button class="btn btn-sm" data-act="add-venue" data-organisation="${org.id}">${venues.length ? 'Add venue' : 'Add first venue'}</button>
+        <button class="btn btn-sm btn-ghost" data-act="organisation-team" data-organisation="${org.id}">Team</button></div>`;
+    }).join('') || '<div class="empty">Create your first organisation to start setting up venues.</div>'}</div></div>`;
+}
+
+function pageVenueSetup() {
+  return `<div class="page-head"><div class="page-title">Set up DailyOps</div>
+    <div class="page-sub">Add a venue, build its routine tasks, then assign your team. Daily shifts are created automatically when someone opens the app.</div></div>
+    ${organisationCardsHtml()}`;
+}
+
+function pageTodayUnavailable() {
+  return `<div class="page-head"><div class="page-title">Today's operations</div><div class="page-sub">${esc(V().name)} · ${esc(operatingDayKey())}</div></div>
+    <div class="card"><div class="card-body stack"><div>Today's operations could not be loaded.</div>
+      <div class="tiny mut">${esc(SUPABASE_TODAY_ERRORS[V().realId] || 'The venue date has changed. Refresh to load the current shifts.')}</div>
+      <div class="row wrap"><button class="btn btn-primary" data-act="today-reload">Try again</button>
+      ${isMgr() ? '<button class="btn" data-tab="templates">Routine tasks</button><button class="btn" data-tab="settings">Settings</button>' : ''}</div></div></div>${isMgr() ? venueStripHtml() : ''}`;
+}
+
 function pageSettings() {
   const s = V();
-  const canEditCutoff = !isSupabaseMode() || isPlatformAdmin();
+  const canEditCutoff = isMgr();
   const dataTools = isSupabaseMode()
-    ? `<div class="tiny mut">Historical operations, CSV export and Telegram delivery status now read from Supabase. Open History for operations or Alerts for sent/failed Edge Function and scheduled EOD events. The bot token, Cron and venue notification switches are configured in Supabase, not this browser.</div>`
+    ? `<div class="tiny mut">Open History for operations and CSV export, or Alerts for Telegram delivery status. Venue rules are saved here; bot credentials and the scheduled job remain in Supabase.</div>`
     : `<div class="tiny mut">History, CSV export and notifications remain in this browser's localStorage under <code>${STORE_KEY}</code>.</div>
        <div class="row wrap" style="gap:8px">
          <button class="btn btn-sm" data-act="csv-all">${ic('dl', 15)} Export ${esc(s.name)}</button>
@@ -5135,35 +5251,40 @@ function pageSettings() {
   const tog = (key, title, sub) => `
     <div class="row-b" style="padding:11px 0;border-bottom:1px solid var(--line)">
       <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:14px">${title}</div><div class="tiny mut">${sub}</div></div>
-      <button class="switch ${s[key] ? 'is-on' : ''}" data-act="setting-toggle" data-key="${key}" aria-label="${title}" ${isSupabaseMode() ? 'disabled' : ''}></button>
+      <button class="switch ${s[key] ? 'is-on' : ''}" data-act="setting-toggle" data-key="${key}" aria-label="${title}" ${REMOTE_MUTATIONS.has('venue-settings:' + s.realId) ? 'disabled' : ''}></button>
     </div>`;
 
-  const venueRows = venueCatalog().map(v => {
+  const settingsVenues = isSupabaseMode() ? managerVenueCatalog().sort((a, b) =>
+    organisationName(a.organisationId).localeCompare(organisationName(b.organisationId)) || a.name.localeCompare(b.name)) : venueCatalog();
+  const venueRows = settingsVenues.map((v, index) => {
     const staff = isSupabaseMode()
       ? supabaseMembersForOrganisation(v.organisationId).filter(member =>
           member.role === 'employee' && member.active && member.venueIds.includes(v.realId)
         ).length
       : S.users.filter(u => u.role === 'employee' && u.active && u.venues.includes(v.id)).length;
     const cur = v.id === V().id;
-    return `<div class="venue-row">
+    const group = isSupabaseMode() && (index === 0 || settingsVenues[index - 1].organisationId !== v.organisationId)
+      ? `<div class="sec-title" style="padding-top:12px">${esc(organisationName(v.organisationId))}</div>` : '';
+    return `${group}<div class="venue-row">
       <span class="venue-dot" style="background:${venueDotColor(v)}"></span>
       <div style="flex:1;min-width:0">
         <div class="row" style="gap:7px"><span style="font-weight:620;font-size:14px">${esc(v.name)}</span>
           ${cur ? '<span class="chip chip-accent">Viewing</span>' : ''}</div>
-        <div class="tiny mut">${esc(v.sub)} · cutoff ${esc(v.cutoff)} · ${plural(staff, 'active employee')}</div>
+        <div class="tiny mut">${isSupabaseMode() ? esc(organisationName(v.organisationId)) + ' · ' : ''}${esc(v.sub)} · cutoff ${esc(v.cutoff)} · ${plural(staff, 'active employee')}</div>
       </div>
       ${cur ? '' : `<button class="btn btn-sm btn-ghost" data-act="goto-venue" data-id="${v.id}">Open</button>`}
       <button class="btn btn-sm btn-icon btn-ghost" data-act="edit-venue" data-id="${v.id}" title="Edit venue">${ic('pencil', 14)}</button>
-      <button class="btn btn-sm btn-icon btn-ghost" data-act="del-venue" data-id="${v.id}" title="Remove venue" ${venueCatalog().length < 2 ? 'disabled' : ''}>${ic('trash', 14)}</button>
+      ${!isSupabaseMode() ? `<button class="btn btn-sm btn-icon btn-ghost" data-act="del-venue" data-id="${v.id}" title="Remove venue" ${venueCatalog().length < 2 ? 'disabled' : ''}>${ic('trash', 14)}</button>` : ''}
     </div>`;
   }).join('');
 
   return `
     <div class="page-head">
       <div class="page-title">Settings</div>
-      <div class="page-sub">Everything below the Venues card applies to <b>${esc(s.name)}</b> only — each venue keeps its own recipients, cutoff and rules.</div>
+      <div class="page-sub">Venue settings apply to <b>${esc(s.name)}</b> only — each venue keeps its own recipients, cutoff and rules.</div>
     </div>
     <div class="stack">
+      ${isSupabaseMode() ? organisationCardsHtml() : ''}
       <div class="card">
         <div class="card-head"><div style="flex:1"><div class="h3">Venues</div>
           <div class="tiny mut">Each venue has its own shift tasks, roster, history and reports.</div></div>
@@ -5176,6 +5297,8 @@ function pageSettings() {
           <div class="card-head"><div class="row" style="gap:8px"><span class="venue-dot" style="background:${venueDotColor(s)}"></span>
             <div class="h3">${esc(s.name)}</div></div></div>
           <div class="card-body stack" style="gap:13px">
+            ${isSupabaseMode() ? `<div>${esc(s.sub || 'No tagline')}</div><div class="tiny mut">${esc(organisationName(s.organisationId))} · ${esc(accentOf(s.accent).label)}</div>
+              <button class="btn" data-act="edit-venue" data-id="${s.id}">Edit venue details and timing</button>` : `
             <div class="field"><label class="label" for="s-venue">Venue name</label>
               <input class="input" id="s-venue" data-set="name" value="${esc(s.name)}" ${isSupabaseMode() ? 'disabled' : ''}></div>
             <div class="field"><label class="label" for="s-sub">Tagline</label>
@@ -5185,7 +5308,7 @@ function pageSettings() {
                 `<button class="swatch ${s.accent === k ? 'is-sel' : ''}" data-act="venue-accent" data-key="${k}"
                   style="background:${document.documentElement.dataset.theme === 'dark' ? a.dark[0] : a.light[0]}"
                   title="${a.label}" aria-label="${a.label}"></button>`).join('')}</div>
-              <span class="hint">Tints the whole app so you can tell at a glance which venue you're in.</span></div>
+              <span class="hint">Tints the whole app so you can tell at a glance which venue you're in.</span></div>`}
           </div>
         </div>
 
@@ -5197,15 +5320,15 @@ function pageSettings() {
             <div class="field"><label class="label" for="s-phone">Manager mobile</label>
               <input class="input" id="s-phone" data-set="managerPhone" value="${esc(s.managerPhone)}"></div>`}
             <div class="field"><label class="label" for="s-cut">End-of-day cutoff</label>
-              <input class="input" id="s-cut" type="time" data-set="cutoff" value="${esc(s.cutoff)}" ${canEditCutoff ? '' : 'disabled'}>
-              <span class="hint">If ${esc(s.name)} hasn't submitted its Closing Shift by this time, the Telegram summary is sent anyway. ${isSupabaseMode() ? 'Only active platform admins can change this value.' : ''}</span></div>
+              ${isSupabaseMode() ? `<div>${esc(s.cutoff)} · ${esc(s.timezone)}</div>` : `<input class="input" id="s-cut" type="time" data-set="cutoff" value="${esc(s.cutoff)}" ${canEditCutoff ? '' : 'disabled'}>`}
+              <span class="hint">The scheduled job sends the enabled end-of-day summary after this venue-local cutoff. ${isSupabaseMode() ? 'Change timing in Edit venue. The operational date rolls over at local midnight, not at the report cutoff.' : ''}</span></div>
           </div>
         </div>
 
         <div class="card">
           <div class="card-head"><div class="h3">Notification rules</div></div>
           <div class="card-body" style="padding-top:4px">
-            ${tog('notifyComplete', 'When a shift is submitted', 'Sends after all required tasks are complete and the shift is submitted')}
+            ${tog('notifyComplete', 'Complete-shift submission', 'Enables messages for fully completed submissions; incomplete submissions use recipient preferences')}
             ${tog('notifyEndOfDay', 'End-of-day summary', 'Done vs left undone, across both shifts')}
             ${isSupabaseMode() ? `<div class="tiny mut" style="padding-top:10px">These venue-wide switches are read by the server. Each Telegram recipient has separate Shift Complete, Incomplete Submissions, Shift Reopened, Shift Cover and End of Day preferences.</div>` : `${tog('channelEmail', 'Send by email', esc(s.managerEmail))}
             ${tog('channelSms', 'Send by SMS', esc(s.managerPhone))}`}
@@ -5236,7 +5359,7 @@ function pageSettings() {
         </div>` : ''}
 
         <div class="card">
-          <div class="card-head"><div class="h3">Demo &amp; data</div></div>
+          <div class="card-head"><div class="h3">${isSupabaseMode() ? 'Data &amp; delivery' : 'Demo &amp; data'}</div></div>
           <div class="card-body stack" style="gap:11px">
             ${dataTools}
           </div>
@@ -5310,6 +5433,9 @@ function openTaskMeta(lk, taskId) {
         syncReasonControls();
       });
       root.querySelector('[data-x="save"]').onclick = async () => {
+        if (isSupabaseMode() && (!loadedSupabaseDay() || loadedSupabaseDay().lists[lk].id !== L.id)) {
+          closeModal(); await refreshOperatingDays(true); toast('The venue day changed. Reopen the current task to edit it.', 'warn'); return;
+        }
         const note = (root.querySelector('[data-task-note]') || {}).value || '';
         const reason = reasonInput ? reasonInput.value : '';
         if (draftStatus === 'blocked' && !reason.trim()) {
@@ -5334,7 +5460,7 @@ function openTaskMeta(lk, taskId) {
         }
 
         try {
-          if (isSupabaseMode()) await persistRemoteTask(task);
+          if (isSupabaseMode()) await persistRemoteTask(task, previous);
           else { save(); runTriggers(); }
           closeModal();
           render();
@@ -5354,6 +5480,21 @@ function openTaskMeta(lk, taskId) {
 /* ---- end-of-shift review: this remains a bulk submit/review option -------- */
 function openReview(lk) {
   const day = today(), L = day.lists[lk], m = LIST_META[lk];
+  if (L.submitted) {
+    openModal(`<div class="modal-head"><div><div class="modal-title">${esc(m.full)} — submitted</div><div class="modal-sub">Read-only. Reopen the shift before changing tasks or notes.</div></div></div>
+      <div class="modal-body tasklist">${L.tasks.map(task => taskRowHtml(task, { locked: true, listKey: lk })).join('')}</div>
+      <div class="modal-foot"><button class="btn" data-x="close">Close</button>${isMgr() ? '<button class="btn btn-primary" data-x="reopen">Reopen shift</button>' : ''}</div>`, {
+      wide: true, after(root) {
+        root.querySelector('[data-x=close]').onclick = closeModal;
+        const reopen = root.querySelector('[data-x=reopen]');
+        if (reopen) reopen.onclick = () => { closeModal(); handleAct('reopen', { list: lk }); };
+      }
+    });
+    return;
+  }
+  const originalTasks = new Map(L.tasks.map(task => [task.id, { ...task }]));
+  const revision = L.notificationRevision;
+  let submitting = false;
   const st = listStats(L);
   const pending = L.tasks.filter(t => t.status !== 'done');
   const done = L.tasks.filter(t => t.status === 'done');
@@ -5407,8 +5548,9 @@ function openReview(lk) {
       <button class="btn btn-primary" data-x="submit">${ic('send', 16)} ${isMgr() ? (L.submitted ? 'Save changes' : 'Submit shift') : 'Send to manager'}</button>
     </div>`, {
     wide: true,
+    onRequestClose() { if (!submitting) closeModal(); },
     after(root) {
-      root.querySelectorAll('[data-x=close]').forEach(b => b.onclick = closeModal);
+      root.querySelectorAll('[data-x=close]').forEach(b => b.onclick = requestModalClose);
       root.querySelectorAll('[data-reason]').forEach(b => b.onclick = () => {
         const id = b.dataset.for;
         draft[id].status = b.dataset.reason;
@@ -5418,45 +5560,54 @@ function openReview(lk) {
         ta.placeholder = REASONS[b.dataset.reason].needsDetail ? 'What blocked it? (required)' : 'Add detail (optional)…';
       });
       root.querySelector('[data-x=submit]').onclick = async () => {
+        if (submitting) return;
+        if (isSupabaseMode() && (!loadedSupabaseDay() || loadedSupabaseDay().date !== day.date || loadedSupabaseDay().lists[lk].id !== L.id)) {
+          closeModal(); await refreshOperatingDays(true); toast('The venue day changed. Review the current shift.', 'warn'); return;
+        }
         for (const t of pending) {
           const d = draft[t.id];
           d.reason = (root.querySelector(`[data-detail="${t.id}"]`) || {}).value || '';
           if (!d.status) { toast(`Pick a reason for "${t.title.slice(0, 34)}…"`, 'warn'); root.querySelector(`[data-item="${t.id}"]`).scrollIntoView({ block: 'center' }); return; }
           if (REASONS[d.status].needsDetail && !d.reason.trim()) { toast('A blocked task needs a short explanation', 'warn'); root.querySelector(`[data-detail="${t.id}"]`).focus(); return; }
         }
-        const previousTasks = pending.concat(done).map(t => ({
-          task: t,
-          values: {
-            status: t.status, doneBy: t.doneBy, doneAt: t.doneAt,
-            note: t.note, reason: t.reason
+        if (isSupabaseMode()) {
+          const changes = L.tasks.flatMap(task => {
+            const original = originalTasks.get(task.id);
+            const values = task.status === 'done'
+              ? { note: root.querySelector(`[data-note="${task.id}"]`).value.trim() }
+              : { status: draft[task.id].status, reason: draft[task.id].reason.trim() };
+            const changed = Object.fromEntries(Object.entries(values).filter(([key, value]) => value !== (original[key] || '')));
+            return Object.keys(changed).length ? [{ id: task.id, expected_status: original.status,
+              expected_note: original.note || '', expected_reason: original.reason || '', ...changed }] : [];
+          });
+          submitting = true;
+          root.querySelectorAll('button,input,textarea').forEach(el => { el.disabled = true; });
+          try {
+            const result = await DB.rpc('submit_daily_checklist', {
+              p_checklist_id: L.id, p_notification_revision: revision, p_changes: changes
+            });
+            if (result.error) throw result.error;
+            await loadSupabaseToday();
+            closeModal(); render();
+            requestSupabaseListComplete(L.id);
+            toast(`${m.full} submitted`, 'ok');
+          } catch (error) {
+            console.error('[supabase] shift submission failed', { checklistId: L.id, error });
+            refreshSupabaseAccessAfterDeniedOperation(error, 'shift-submit');
+            await loadSupabaseToday();
+            render();
+            toast('Submission was not confirmed. Your draft is still open. If a teammate changed tasks, close and review again. Check migration 026 is applied.', 'warn');
+          } finally {
+            submitting = false;
+            root.querySelectorAll('button,input,textarea').forEach(el => { el.disabled = false; });
           }
-        }));
-        const previousList = {
-          submitted: L.submitted, submittedBy: L.submittedBy, submittedAt: L.submittedAt
-        };
+          return;
+        }
         pending.forEach(t => { t.status = draft[t.id].status; t.reason = draft[t.id].reason.trim(); });
         done.forEach(t => { const el = root.querySelector(`[data-note="${t.id}"]`); if (el) t.note = el.value.trim(); });
         L.submitted = true; L.submittedBy = me().id; L.submittedAt = new Date().toISOString();
-        if (isSupabaseMode()) {
-          try {
-            await Promise.all(pending.concat(done).map(t => persistRemoteTask(t)));
-            await persistRemoteChecklist(L);
-          } catch (error) {
-            previousTasks.forEach(({ task, values }) => Object.assign(task, values));
-            Object.assign(L, previousList);
-            console.error('[supabase] checklist submission failed', { checklistId: L.id, error });
-            refreshSupabaseAccessAfterDeniedOperation(error, 'shift-submit');
-            try { await loadSupabaseToday(); }
-            catch (reloadError) { console.error('[supabase] checklist resync after submission failure failed', reloadError); }
-            render();
-            toast(`Could not save the ${m.full.toLowerCase()}. Please try again.`, 'warn');
-            return;
-          }
-        } else {
-          save(); runTriggers();
-        }
+        save(); runTriggers();
         closeModal(); render();
-        if (isSupabaseMode()) requestSupabaseListComplete(L.id);
         toast(`${m.full} submitted`, 'ok');
       };
     }
@@ -5504,6 +5655,7 @@ function openAddTask(lk) {
       let saving = false;
       saveButton.onclick = async () => {
         if (saving) return;
+        if (isSupabaseMode() && !loadedSupabaseDay()) { closeModal(); await refreshOperatingDays(true); return; }
         const title = root.querySelector('#nt-title').value.trim();
         if (!title) { toast('Give the task a name', 'warn'); return; }
         const detail = root.querySelector('#nt-detail').value.trim();
@@ -5591,7 +5743,9 @@ function mutateRemoteTemplate(lockKey, details, action, successMessage) {
     } catch (error) {
       console.error('[supabase] template mutation failed', { ...details, error });
       refreshSupabaseAccessAfterDeniedOperation(error, 'template-mutation');
-      toast('Could not save the template change. Please try again.', 'warn');
+      try { await refreshRemoteTemplates(); }
+      catch (reloadError) { console.error('[supabase] template resync failed', reloadError); }
+      toast('The template change was not fully confirmed. Review the saved order before retrying.', 'warn');
     } finally {
       REMOTE_MUTATIONS.delete(lockKey);
     }
@@ -6117,14 +6271,28 @@ async function clearSupabaseFutureRoster(userId, venueIds) {
       .delete()
       .eq('venue_id', venueId)
       .eq('user_id', userId)
-      .gte('work_date', dayKey());
+      .gte('work_date', operatingDayKey(AUTH.venueContexts.find(context => context.realId === venueId)));
     if (error) throw error;
   }
 }
 
 function openSupabaseUserEditor(id, organisationId) {
-  const member = supabaseMemberForUser(id, organisationId || currentSupabaseOrganisationId());
+  const memberships = SUPABASE_TEAM.members.filter(member => member.id === id
+    && currentSupabaseOrganisationIds().includes(member.organisationId));
+  if (!organisationId && memberships.length > 1) {
+    openModal(`<div class="modal-head"><div class="modal-title">Choose organisation access to manage</div></div>
+      <div class="modal-body stack">${memberships.map(member => `<button class="btn" data-org="${member.organisationId}">${esc(organisationName(member.organisationId))} · ${esc(member.role)}</button>`).join('')}</div>
+      <div class="modal-foot"><button class="btn" data-x="close">Cancel</button></div>`, {
+      after(root) {
+        root.querySelector('[data-x=close]').onclick = closeModal;
+        root.querySelectorAll('[data-org]').forEach(button => { button.onclick = () => openSupabaseUserEditor(id, button.dataset.org); });
+      }
+    });
+    return;
+  }
+  const member = supabaseMemberForUser(id, organisationId || memberships[0]?.organisationId);
   if (!member) { toast('That organisation member is no longer available.', 'warn'); return; }
+  if (organisationRoleForId(member.organisationId) !== 'manager') return;
   const protectedAccount = isProtectedProfile(member.id);
   const protectedLocked = protectedAccount && member.id !== AUTH.profile.id;
   const isEmployee = member.role === 'employee';
@@ -6140,7 +6308,7 @@ function openSupabaseUserEditor(id, organisationId) {
   openModal(`
     <div class="modal-head"><div style="flex:1">
       <div class="modal-title">Edit ${isEmployee ? 'employee' : 'manager'}</div>
-      <div class="modal-sub">Update the app profile, active state, and venue memberships.</div>
+      <div class="modal-sub">${esc(organisationName(member.organisationId))} · Update the app profile, active state, and venue memberships. Organisation roles are managed by platform admins.</div>
     </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
     <div class="modal-body stack" style="gap:13px">
       <div class="field"><label class="label" for="us-name">Display name</label>
@@ -6289,23 +6457,107 @@ function openUserEditor(id, organisationId) {
 }
 
 /* ---- venue add / edit --------------------------------------------------- */
-function openVenueEditor(id) {
+async function refreshVenueAdministration(organisationId, venueId, tab) {
+  await loadOrganisationAccess(AUTH.session);
+  preserveSupabaseSelection({ organisationId, venueId });
+  await loadSupabaseTeam();
+  await loadSupabaseTemplates();
+  await loadSupabaseToday();
+  R.tab = tab;
+  R.rosterEditor = null;
+  R.rosterVenueId = '';
+  render();
+  syncSupabaseRealtimeForCurrentView();
+  if (isMgr() && V()) loadSupabaseNotificationRecipients();
+}
+
+function openOrganisationEditor() {
+  if (!isPlatformAdmin()) return;
+  const id = crypto.randomUUID();
+  let created = false, saving = false;
+  openModal(`<div class="modal-head"><div class="modal-title">Add organisation</div></div>
+    <div class="modal-body"><label class="label" for="org-name">Organisation name</label>
+      <input class="input" id="org-name" maxlength="200"><div class="tiny mut" style="margin-top:10px">Next, add its first venue and use Team to assign access.</div></div>
+    <div class="modal-foot"><button class="btn" data-x="close">Cancel</button><button class="btn btn-primary" data-x="save">Create organisation</button></div>`, {
+    onRequestClose() { if (!saving) closeModal(); },
+    after(root) {
+      root.querySelector('[data-x=close]').onclick = requestModalClose;
+      root.querySelector('#org-name').focus();
+      const button = root.querySelector('[data-x=save]');
+      button.onclick = async () => {
+        if (saving) return;
+        const name = root.querySelector('#org-name').value.trim();
+        if (!name) { toast('Enter an organisation name.', 'warn'); return; }
+        saving = true;
+        button.disabled = true;
+        button.textContent = 'Saving…';
+        try {
+          if (!created) {
+            const result = await DB.from('organisations').insert({ id, name });
+            if (result.error) {
+              if (result.error.code !== '23505') throw result.error;
+              const existing = await DB.from('organisations').select('id').eq('id', id).single();
+              if (existing.error) throw result.error;
+            }
+            created = true;
+          }
+          await refreshVenueAdministration(id, null, 'settings');
+          closeModal();
+          toast('Organisation created — add its first venue next.', 'ok');
+        } catch (error) {
+          console.error('[supabase] organisation creation failed', error);
+          toast(created ? 'Organisation saved, but refresh failed. Retry to reload it.' : 'Could not create the organisation. Check admin access and migration 025.', 'warn');
+        } finally { saving = false; button.disabled = false; button.textContent = created ? 'Reload organisation' : 'Create organisation'; }
+      };
+    }
+  });
+}
+
+async function saveVenueSettings(context, changes) {
+  if (!isSupabaseMode() || !context || organisationRoleForId(context.organisationId) !== 'manager') return false;
+  const key = 'venue-settings:' + context.realId;
+  if (REMOTE_MUTATIONS.has(key)) return false;
+  REMOTE_MUTATIONS.add(key);
+  render();
+  try {
+    const result = await DB.from('venues').update(changes).eq('id', context.realId).select('id').single();
+    if (result.error) throw result.error;
+    await refreshVenueAdministration(AUTH.selectedOrganisationId, AUTH.selectedVenueId, R.tab);
+    toast('Venue settings saved', 'ok');
+    return true;
+  } catch (error) {
+    console.error('[supabase] venue settings save failed', { venueId: context.realId, error });
+    refreshSupabaseAccessAfterDeniedOperation(error, 'venue-settings');
+    toast('Could not save or refresh venue settings. Retry to confirm the saved values.', 'warn');
+    return false;
+  } finally { REMOTE_MUTATIONS.delete(key); render(); }
+}
+
+function openVenueEditor(id, organisationId) {
   const v = id ? venue(id) : null;
+  const live = isSupabaseMode();
+  const organisations = live ? managedOrganisations() : [];
+  if (live && (v ? organisationRoleForId(v.organisationId) !== 'manager' : !organisations.length)) return;
+  const newVenueId = live ? crypto.randomUUID() : null;
+  let saving = false, created = false;
+  const selectedOrg = v?.organisationId || organisationId || AUTH.selectedOrganisationId || organisations[0]?.id;
   let accent = v ? v.accent : Object.keys(ACCENTS)[venueCatalog().length % Object.keys(ACCENTS).length];
   const dark = document.documentElement.dataset.theme === 'dark';
 
   openModal(`
     <div class="modal-head"><div style="flex:1">
       <div class="modal-title">${v ? 'Edit venue' : 'Add a venue'}</div>
-      <div class="modal-sub">${v ? 'Name, tagline and colour.' : 'It starts with empty shift tasks — build them, or copy another venue across.'}</div>
+      <div class="modal-sub">${v ? 'Venue details and report timing.' : 'It starts with empty shift tasks — build them, or copy another venue across.'}</div>
     </div><button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
     <div class="modal-body stack" style="gap:13px">
+      ${live ? `<div class="field"><label class="label" for="vn-org">Organisation</label><select class="select" id="vn-org" ${v ? 'disabled' : ''}>${organisations.map(org => `<option value="${org.id}" ${selectedOrg === org.id ? 'selected' : ''}>${esc(org.name)}</option>`).join('')}</select></div>` : ''}
       <div class="field"><label class="label" for="vn-name">Venue name</label>
         <input class="input" id="vn-name" value="${esc(v ? v.name : '')}" placeholder="e.g. Peachy Newtown"></div>
       <div class="field"><label class="label" for="vn-sub">Tagline</label>
         <input class="input" id="vn-sub" value="${esc(v ? v.sub : '')}" placeholder="e.g. Wine Bar"></div>
       <div class="field"><label class="label" for="vn-cut">End-of-day cutoff</label>
         <input class="input" id="vn-cut" type="time" value="${esc(v ? v.cutoff : '23:30')}"></div>
+      ${live ? `<div class="field"><label class="label" for="vn-timezone">Venue timezone</label><input class="input" id="vn-timezone" value="${esc(v?.timezone || 'Australia/Sydney')}" placeholder="Australia/Sydney"><span class="hint">Use an IANA timezone. This controls the venue's date and report cutoff. Changing it can change which day is shown immediately; existing history is retained.</span></div>` : ''}
       <div class="field"><label class="label">Colour</label>
         <div class="swatches" id="vn-accent">${Object.entries(ACCENTS).map(([k, a]) =>
           `<button class="swatch ${accent === k ? 'is-sel' : ''}" data-key="${k}" title="${a.label}" aria-label="${a.label}"
@@ -6313,19 +6565,60 @@ function openVenueEditor(id) {
     </div>
     <div class="modal-foot"><button class="btn" data-x="close">Cancel</button>
       <button class="btn btn-primary" data-x="save">${v ? 'Save venue' : 'Add venue'}</button></div>`, {
+    onRequestClose() { if (!saving) closeModal(); },
     after(root) {
-      root.querySelectorAll('[data-x=close]').forEach(b => b.onclick = closeModal);
+      root.querySelectorAll('[data-x=close]').forEach(b => b.onclick = requestModalClose);
       root.querySelector('#vn-accent').addEventListener('click', e => {
         const b = e.target.closest('[data-key]'); if (!b) return;
         accent = b.dataset.key;
         root.querySelectorAll('#vn-accent .swatch').forEach(x => x.classList.toggle('is-sel', x === b));
       });
       root.querySelector('#vn-name').focus();
-      root.querySelector('[data-x=save]').onclick = () => {
+      root.querySelector('[data-x=save]').onclick = async () => {
+        if (saving) return;
         const name = root.querySelector('#vn-name').value.trim();
         const sub = root.querySelector('#vn-sub').value.trim();
         const cutoff = root.querySelector('#vn-cut').value || '23:30';
         if (!name) { toast('Give the venue a name', 'warn'); return; }
+        if (live) {
+          const orgSelect = root.querySelector('#vn-org');
+          const orgId = orgSelect.value;
+          const timezone = root.querySelector('#vn-timezone').value.trim();
+          try { new Intl.DateTimeFormat('en-AU', { timeZone: timezone }).format(); }
+          catch (error) { toast('Enter a valid IANA timezone, such as Australia/Sydney.', 'warn'); return; }
+          if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(cutoff)) { toast('Enter a valid cutoff time.', 'warn'); return; }
+          saving = true;
+          const saveButton = root.querySelector('[data-x=save]');
+          saveButton.textContent = 'Saving…';
+          root.querySelectorAll('button,input,select').forEach(el => { el.disabled = true; });
+          try {
+            if (v) {
+              const saved = await saveVenueSettings(v, { name, subtitle: sub, accent_key: accent, cutoff_time: cutoff, timezone });
+              if (saved) closeModal();
+            } else {
+              if (!created) {
+                const result = await DB.rpc('create_venue', {
+                  p_venue_id: newVenueId, p_organisation_id: orgId, p_name: name, p_subtitle: sub,
+                  p_accent_key: accent, p_timezone: timezone, p_cutoff_time: cutoff
+                });
+                if (result.error) throw result.error;
+                created = true;
+              }
+              await refreshVenueAdministration(orgId, newVenueId, 'templates');
+              closeModal();
+              toast('Venue created — build or copy its routine tasks, then add them to today.', 'ok');
+            }
+          } catch (error) {
+            console.error('[supabase] venue creation failed', error);
+            toast(created ? 'Venue saved, but refresh failed. Retry to open it.' : 'Could not create the venue. Check organisation access and migration 025.', 'warn');
+          } finally {
+            saving = false;
+            root.querySelectorAll('button,input,select').forEach(el => { el.disabled = false; });
+            orgSelect.disabled = !!v || created;
+            saveButton.textContent = v ? 'Save venue' : created ? 'Open saved venue' : 'Add venue';
+          }
+          return;
+        }
         if (v) { Object.assign(v, { name, sub, cutoff, accent }); }
         else {
           const nv = newVenue(name, sub, accent);
@@ -6341,9 +6634,12 @@ function openVenueEditor(id) {
 }
 
 /* ---- copy recurring shift tasks from another venue ----------------------- */
-function openCopyTemplate() {
-  const others = venueCatalog().filter(v => v.id !== V().id &&
+function templateCopySources() {
+  return venueCatalog().filter(v => v.id !== V()?.id &&
     (!isSupabaseMode() || v.organisationRole === 'manager'));
+}
+function openCopyTemplate() {
+  const others = templateCopySources();
   if (!others.length) { toast('There is only one venue', 'warn'); return; }
   let src = others[0].id, lists = { open: true, close: true };
 
@@ -6402,8 +6698,11 @@ function openCopyTemplate() {
           } catch (error) {
             console.error('[supabase] template copy failed', { sourceVenueId: src, error });
             refreshSupabaseAccessAfterDeniedOperation(error, 'template-copy');
-            toast('Could not copy those routine tasks. Please try again.', 'warn');
-            saveButton.disabled = false;
+            let refreshed = false;
+            try { await refreshRemoteTemplates(); refreshed = true; }
+            catch (reloadError) { console.error('[supabase] template copy resync failed', reloadError); }
+            toast(`Copy stopped after ${copied} confirmed task(s). Some changes may have saved. ${refreshed ? 'Review the templates before retrying.' : 'Refresh the app before copying again; saved templates could not be loaded.'}`, 'warn');
+            saveButton.disabled = !refreshed;
           }
           return;
         }
@@ -6674,8 +6973,8 @@ async function toggleRemoteRoster(lk, userId, workDate, venueId) {
     toast('That employee is not an active employee of this organisation.', 'warn');
     return;
   }
-  const date = workDate || dayKey();
-  const currentDay = date === dayKey() ? today() : null;
+  const date = workDate || operatingDayKey(context);
+  const currentDay = date === operatingDayKey(context) ? loadedSupabaseDay(context) : null;
   const existingId = currentDay && currentDay.rosterAssignmentIds && currentDay.rosterAssignmentIds[lk]
     ? currentDay.rosterAssignmentIds[lk][userId]
     : (SUPABASE_ROSTER_WEEK.rows || []).find(row =>
@@ -6695,7 +6994,7 @@ async function toggleRemoteRoster(lk, userId, workDate, venueId) {
       });
       if (result.error && result.error.code !== '23505') throw result.error;
     }
-    if (date === dayKey()) await loadSupabaseToday();
+    if (date === operatingDayKey(context)) await loadSupabaseToday();
     if (SUPABASE_ROSTER_WEEK.start === R.rosterWeekStart) {
       await loadSupabaseRosterWeek(R.rosterWeekStart, true);
     }
@@ -6784,17 +7083,17 @@ async function toggleRemoteVenueMembership(userId, venueId) {
 }
 
 function navigateSupabaseRosterWeek(offsetDays) {
-  R.rosterWeekStart = dayKey(addDays(parseKey(R.rosterWeekStart || rosterWeekStartKey(dayKey())), offsetDays));
+  R.rosterWeekStart = dayKey(addDays(parseKey(R.rosterWeekStart || rosterWeekStartKey(operatingDayKey())), offsetDays));
   loadSupabaseRosterWeek(R.rosterWeekStart, true);
 }
 
 function resetSupabaseRosterWeek() {
-  R.rosterWeekStart = rosterWeekStartKey(dayKey());
+  R.rosterWeekStart = rosterWeekStartKey(operatingDayKey());
   loadSupabaseRosterWeek(R.rosterWeekStart, true);
 }
 
 function navigateSupabaseRosterDay(offsetDays) {
-  const current = parseKey(R.rosterDay || dayKey());
+  const current = parseKey(R.rosterDay || operatingDayKey());
   R.rosterDay = dayKey(addDays(current, offsetDays));
   R.rosterView = 'day';
   R.rosterWeekStart = rosterWeekStartKey(R.rosterDay);
@@ -6802,7 +7101,7 @@ function navigateSupabaseRosterDay(offsetDays) {
 }
 
 function resetSupabaseRosterDay() {
-  R.rosterDay = dayKey();
+  R.rosterDay = operatingDayKey();
   R.rosterView = 'day';
   R.rosterWeekStart = rosterWeekStartKey(R.rosterDay);
   loadSupabaseRosterWeek(R.rosterWeekStart, true);
@@ -6935,10 +7234,13 @@ async function saveSupabaseCoverRequest(lk, coveredForUserId) {
     if (!coverRequestId) throw new Error('Cover request was not returned by Supabase');
 
     await loadSupabaseToday();
-    await loadSupabaseMyRosterWeek(SUPABASE_MY_ROSTER_WEEK.start || rosterWeekStartKey(dayKey()), true);
+    await loadSupabaseMyRosterWeek(SUPABASE_MY_ROSTER_WEEK.start || rosterWeekStartKey(operatingDayKey()), true);
     render();
-    await requestSupabaseShiftCoverNotification(coverRequestId);
-    toast(`You're on the ${LIST_META[lk].label.toLowerCase()} shift — manager notified`, 'ok');
+    const delivery = await requestSupabaseShiftCoverNotification(coverRequestId);
+    const saved = `You're on the ${LIST_META[lk].label.toLowerCase()} shift.`;
+    if (delivery?.sent > 0 && !delivery.failed) toast(`${saved} Manager notification delivered.`, 'ok');
+    else if (delivery?.failed) toast(`${saved} ${delivery.sent || 0} notification(s) delivered; ${delivery.failed} failed. ${notificationFollowup()}`, 'warn');
+    else toast(`${saved} Telegram delivery was not confirmed${delivery?.skipped === 'no-recipients' ? ' — no recipients configured' : ''}. ${notificationFollowup()}`, 'warn');
   } catch (error) {
     console.error('[supabase] self-cover request failed', { venueId: context.realId, listType: lk, error });
     refreshSupabaseAccessAfterDeniedOperation(error, 'cover-request');
@@ -6982,9 +7284,20 @@ async function tickAll(lk) {
   save(); runTriggers(); render();
 }
 
-function handleAct(act, ds) {
-  const day = today();
+async function handleAct(act, ds) {
+  const dailyActions = ['review', 'task-meta', 'add-task', 'del-task', 'cover', 'reopen', 'tick-all', 'sync-tpl', 'roster', 'reset-day'];
+  if (isSupabaseMode() && dailyActions.includes(act) && !loadedSupabaseDay()) {
+    await refreshOperatingDays(true);
+    toast('Daily operations refreshed. Check the current shift before trying again.', 'info');
+    return;
+  }
+  const day = isSupabaseMode() ? loadedSupabaseDay() : today();
   switch (act) {
+    case 'today-reload': await refreshOperatingDays(true); break;
+    case 'add-organisation': openOrganisationEditor(); break;
+    case 'organisation-team':
+      await selectOrganisation(ds.organisation);
+      R.tab = 'team'; render(); break;
     case 'review':    openReview(ds.list); break;
     case 'task-meta': openTaskMeta(ds.list, ds.id); break;
     case 'add-task':  openAddTask(ds.list || R.list); break;
@@ -7044,10 +7357,10 @@ function handleAct(act, ds) {
       if (isSupabaseMode() && isMgr()) {
         R.rosterView = ds.view === 'day' ? 'day' : 'week';
         if (R.rosterView === 'day') {
-          const weekDates = rosterWeekDates(R.rosterWeekStart || rosterWeekStartKey(dayKey()));
+          const weekDates = rosterWeekDates(R.rosterWeekStart || rosterWeekStartKey(operatingDayKey()));
           R.rosterDay = weekDates.includes(R.rosterDay)
             ? R.rosterDay
-            : (weekDates.includes(dayKey()) ? dayKey() : weekDates[0]);
+            : (weekDates.includes(operatingDayKey()) ? operatingDayKey() : weekDates[0]);
           R.rosterWeekStart = rosterWeekStartKey(R.rosterDay);
         }
         R.rosterEditor = null;
@@ -7090,7 +7403,7 @@ function handleAct(act, ds) {
       break;
     case 'roster-copy-open':
       if (isSupabaseMode() && isMgr()) {
-        if ((R.rosterWeekStart || rosterWeekStartKey(dayKey())) < rosterWeekStartKey(dayKey())) {
+        if ((R.rosterWeekStart || rosterWeekStartKey(operatingDayKey())) < rosterWeekStartKey(operatingDayKey())) {
           toast('Past roster dates are read-only.', 'warn');
           break;
         }
@@ -7176,7 +7489,11 @@ function handleAct(act, ds) {
         const reordered = arr.slice();
         [reordered[i], reordered[j]] = [reordered[j], reordered[i]];
         mutateRemoteTemplate(`template-reorder:${ds.list}`, { listType: ds.list },
-          () => Promise.all(reordered.map((task, index) => updateRemoteTemplateTask(task.id, { sort_order: index }))),
+          async () => {
+            const results = await Promise.allSettled(reordered.map((task, index) => updateRemoteTemplateTask(task.id, { sort_order: index })));
+            const failed = results.find(result => result.status === 'rejected');
+            if (failed) throw failed.reason;
+          },
           `${LIST_META[ds.list].full} routine tasks reordered`);
       } else {
         [arr[i], arr[j]] = [arr[j], arr[i]]; save(); render();
@@ -7237,23 +7554,24 @@ function handleAct(act, ds) {
       Notifier.push('end-of-day', built, { dayKey: day.date });
       render(); toast('Test notification composed — open it to preview', 'ok'); break;
     }
-    case 'setting-toggle': V()[ds.key] = !V()[ds.key]; save(); render(); break;
-    case 'venue-accent':   V().accent = ds.key; save(); render(); break;
+    case 'setting-toggle':
+      if (isSupabaseMode()) {
+        const fields = { notifyComplete: 'notify_complete', notifyEndOfDay: 'notify_end_of_day' };
+        if (fields[ds.key]) await saveVenueSettings(V(), { [fields[ds.key]]: !V()[ds.key] });
+      } else { V()[ds.key] = !V()[ds.key]; save(); render(); }
+      break;
+    case 'venue-accent':
+      if (isSupabaseMode()) await saveVenueSettings(V(), { accent_key: ds.key });
+      else { V().accent = ds.key; save(); render(); }
+      break;
     case 'goto-venue': {
-      if (!selectVenue(ds.id)) break;
-      R.list = 'open';
-      if (!isSupabaseMode()) save();
-      render(); scrollTop();
-      syncSupabaseRealtimeForCurrentView();
-      if (isSupabaseMode() && R.tab === 'roster' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
-      if (isSupabaseMode() && R.tab === 'history' && isMgr()) loadSupabaseHistory(true);
-      toast(`Switched to ${V().name}`); break;
+      await switchVenue(ds.id); break;
     }
     case 'add-venue':
     case 'edit-venue':
     case 'del-venue': {
-      if (isSupabaseMode()) { toast('Venue administration is deferred; this screen is read-only in Supabase mode.', 'warn'); break; }
-      if (act === 'add-venue') openVenueEditor(null);
+      if (isSupabaseMode() && act === 'del-venue') break;
+      if (act === 'add-venue') openVenueEditor(null, ds.organisation);
       else if (act === 'edit-venue') openVenueEditor(ds.id);
       else {
         if (S.venues.length < 2) { toast('You need at least one venue', 'warn'); break; }
@@ -7275,8 +7593,8 @@ function handleAct(act, ds) {
     case 'reset-day': {
       if (isSupabaseMode()) { openSupabaseResetConfirmation(); break; }
       confirmModal(`Reset today at ${V().name}?`, 'Both lists go back to the template with nothing ticked. Other venues and all history are untouched.', 'Reset today', () => {
-        const roster = DAYS()[dayKey()].roster;
-        DAYS()[dayKey()] = makeDay(dayKey(), roster, V().id);
+        const roster = DAYS()[operatingDayKey()].roster;
+        DAYS()[operatingDayKey()] = makeDay(operatingDayKey(), roster, V().id);
         save(); render(); toast(`Today reset for ${V().name}`, 'ok');
       }, true); break;
     }
@@ -7284,7 +7602,7 @@ function handleAct(act, ds) {
       if (isSupabaseMode()) { toast('Demo reset is unavailable while using real Supabase venue identity.', 'warn'); break; }
       confirmModal('Wipe all demo data?', 'Everything goes back to the seeded demo — staff, templates, history and alerts.', 'Wipe and reseed', () => {
         localStorage.removeItem(STORE_KEY); S = defaultState(); save();
-        R = { tab: 'today', list: 'open', historyKey: null, rosterWeekStart: rosterWeekStartKey(dayKey()), rosterView: 'week', rosterDay: dayKey(), rosterVenueId: '', rosterPeopleSearch: '', rosterEditor: null, rosterCopyPrompt: false, teamView: 'people' };
+        R = { tab: 'today', list: 'open', historyKey: null, rosterWeekStart: rosterWeekStartKey(operatingDayKey()), rosterView: 'week', rosterDay: operatingDayKey(), rosterVenueId: '', rosterPeopleSearch: '', rosterEditor: null, rosterCopyPrompt: false, teamView: 'people' };
         render(); toast('Demo data reset', 'ok');
       }, true); break;
     }
@@ -7297,9 +7615,9 @@ function handleAct(act, ds) {
 function scrollTop() { const c = $('#content'); if (c) c.scrollTop = 0; }
 
 async function saveSupabaseVenueCutoff(value) {
-  if (!isPlatformAdmin()) {
+  if (!isMgr()) {
     render();
-    toast('Only an active platform admin can change the venue cutoff.', 'warn');
+    toast('Only an authorised venue manager can change the cutoff.', 'warn');
     return;
   }
   if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value)) {
@@ -7406,11 +7724,14 @@ function openSupabaseResetConfirmation() {
   });
 }
 
-$('#app').addEventListener('click', e => {
+$('#app').addEventListener('click', async e => {
   const a = e.target.closest('[data-act]');
   if (a && $('#app').contains(a) && !e.target.closest('#modal-root')) { e.preventDefault(); handleAct(a.dataset.act, a.dataset); return; }
   const t = e.target.closest('[data-task]');
-  if (t && !e.target.closest('#modal-root')) { toggleTask(t.dataset.list, t.dataset.task); return; }
+  if (t && !e.target.closest('#modal-root')) {
+    if (isSupabaseMode() && !loadedSupabaseDay()) { await refreshOperatingDays(true); return; }
+    toggleTask(t.dataset.list, t.dataset.task); return;
+  }
   const tab = e.target.closest('[data-tab]');
   if (tab) {
     R.tab = tab.dataset.tab;
@@ -7446,17 +7767,21 @@ $('#user-switch').addEventListener('change', e => {
   toast(`Now viewing as ${me().name}${isMgr() ? ' (manager)' : ` · ${n === 1 ? V().name : plural(n, 'venue')}`}`);
 });
 
-$('#venue-switch').addEventListener('change', e => {
-  if (!selectVenue(e.target.value)) return;
+async function switchVenue(id) {
+  if (!selectVenue(id)) return;
   R.list = 'open';
+  R.rosterEditor = null;
+  SUPABASE_RECIPIENT_LOAD_ID++;
   if (!isSupabaseMode()) save();
+  else if (!loadedSupabaseDay()) await refreshOperatingDays(true);
   render(); scrollTop();
   syncSupabaseRealtimeForCurrentView();
   if (isSupabaseMode() && R.tab === 'roster' && isMgr()) loadSupabaseRosterWeek(R.rosterWeekStart);
   if (isSupabaseMode() && R.tab === 'history' && isMgr()) loadSupabaseHistory(true);
   if (isSupabaseMode() && isMgr()) loadSupabaseNotificationRecipients();
   toast(`Switched to ${V().name}`);
-});
+}
+$('#venue-switch').addEventListener('change', e => switchVenue(e.target.value));
 
 $('#organisation-switch').addEventListener('change', e => {
   if (isSupabaseMode()) selectOrganisation(e.target.value);
@@ -7486,6 +7811,17 @@ $('#btn-alerts').addEventListener('click', () => {
   scrollTop();
   syncSupabaseRealtimeForCurrentView();
   if (isSupabaseMode() && isMgr()) loadSupabaseNotifications();
+});
+
+$('#page').addEventListener('input', e => {
+  const search = e.target.closest('[data-roster-filter="people"]');
+  if (!search || !isSupabaseMode() || R.tab !== 'roster') return;
+  const caret = search.selectionStart;
+  R.rosterPeopleSearch = search.value;
+  render();
+  const replacement = $('#page').querySelector('[data-roster-filter="people"]');
+  replacement?.focus();
+  replacement?.setSelectionRange(caret, caret);
 });
 
 $('#page').addEventListener('change', e => {
@@ -7526,10 +7862,10 @@ document.addEventListener('keydown', e => {
 });
 
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') queueSupabaseAccessRefresh('visibility');
+  if (document.visibilityState === 'visible') { queueSupabaseAccessRefresh('visibility'); refreshOperatingDays(); }
 });
 
-window.addEventListener('focus', () => queueSupabaseAccessRefresh('focus'));
+window.addEventListener('focus', () => { queueSupabaseAccessRefresh('focus'); refreshOperatingDays(); });
 
 /* ------------------------------------------------------------------- init */
 function tickClock() {
@@ -7638,6 +7974,8 @@ async function restoreAuthenticatedApp(session) {
     return;
   }
   if (restoreId !== AUTH_RESTORE_ID) return;
+  R.rosterDay = operatingDayKey();
+  R.rosterWeekStart = rosterWeekStartKey(R.rosterDay);
   showApp();
   render();
   syncSupabaseRealtimeForCurrentView();
@@ -7648,7 +7986,7 @@ async function restoreAuthenticatedApp(session) {
     loadSupabaseNotificationRecipients();
     if (R.tab === 'history') loadSupabaseHistory();
   }
-  else loadSupabaseMyRosterWeek(rosterWeekStartKey(dayKey()), true);
+  else loadSupabaseMyRosterWeek(rosterWeekStartKey(operatingDayKey()), true);
 }
 
 async function signIn(event) {
@@ -7760,7 +8098,7 @@ async function startApp() {
     if (!AUTH.session) showLogin();
     else await restoreAuthenticatedApp(AUTH.session);
     tickClock();
-    setInterval(tickClock, 30000);
+    setInterval(() => { tickClock(); refreshOperatingDays(); }, 30000);
     console.info('%cDailyOps — Supabase Auth + venue + today operations', 'font-weight:700;font-size:13px');
     return;
   }

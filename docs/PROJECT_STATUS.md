@@ -2,6 +2,16 @@
 
 This is the canonical project status and architecture reference for DailyOps. It records the terminology, deployed schema boundary, current implementation, deferred work, roadmap, and development workflow.
 
+### Feature branch: venue administration and UI cleanup — 2026-09-08
+
+Implemented on `feature/venue-admin-ui-cleanup`; not committed, pushed or deployed by this change. The user reports migration 024 applied. Preserve that file unchanged in the next commit. New migrations `025_venue_organisation_administration.sql` and `026_preserve_completion_and_atomic_submission.sql` must be applied after 024 and before publishing this frontend.
+
+This branch adds manager-scoped venue creation/editing (including timezone/cutoff), admin organisation creation, empty-organisation setup, persisted colour/notification flags, and atomic shared-shift submission that preserves completion attribution. Venue creation includes two empty active template headers in one transaction with a stable retry ID; no demo routines are copied into newly created venues. Existing organisation-role provisioning remains admin-only. The frontend remains a single static HTML page on GitHub Pages.
+
+The cleanup also fixes submitted-review controls, independent keyboard task actions, recipient-switch races, Team organisation selection, venue-local date rollover/history/roster comparisons, partial-copy resynchronisation, live roster search and notification-result messages. Unavailable Today data is isolated per venue. Report delivery navigation and additive template application are labelled explicitly. Live demo wipe and venue deletion are hidden; venue archive/restore, true manual EOD sending and overnight roster end dates remain separate work.
+
+Local verification uses the full migration chain in PGlite with authenticated role/RLS checks, plus headless Chrome workflows with mocked Supabase responses and desktop/phone screenshots. The tests are in `tests/`; commands are in the README. These checks do not establish production deployment, live Telegram delivery or two-client Supabase realtime behavior.
+
 ## 1. Project overview
 
 DailyOps is a static browser application for managing a venue's Daily Operations. It helps managers and employees work through recurring and one-off operational tasks across Opening and Closing Shifts, record task outcomes, and retain operational history.
@@ -108,6 +118,10 @@ Migration `023_relax_roster_venue_eligibility.sql` updates manager roster INSERT
 
 Migration `024_allow_employee_daily_initialisation.sql` updates `ensure_daily_checklists(uuid, date)` so active employees with venue access can lazily initialise missing snapshots only for the venue's current local date. Managers retain their existing date permissions, and the existing unique key keeps concurrent first loads idempotent.
 
+Pending migration `025_venue_organisation_administration.sql` adds admin-only organisation INSERT access and an authenticated SECURITY INVOKER `create_venue(...)` transaction. It replaces the timing guard with target-venue manager authorisation, validates IANA timezones and prevents changing venue ID/organisation through ordinary edits.
+
+Pending migration `026_preserve_completion_and_atomic_submission.sql` preserves attribution when an already-completed task is updated, grants authenticated EXECUTE on the existing RLS helper `can_access_task(uuid)`, and adds the SECURITY INVOKER `submit_daily_checklist(...)` RPC. Submission locks/checks the stored revision and tasks, rejects stale draft values, saves only edited task fields, and commits task changes and submission together. Retrying an already-submitted revision preserves its original submitter/time.
+
 ## 6. What is live/real today
 
 **REAL NOW**
@@ -173,7 +187,7 @@ Migration `024_allow_employee_daily_initialisation.sql` updates `ensure_daily_ch
 - Server-validated employee Shift Cover Telegram delivery with optional covered-person attribution and independent per-recipient idempotency.
 - Idempotent notification event claiming/finalization/failure recording per recipient in `notification_events`, with a bounded retry path and Telegram message IDs.
 - Supabase Cron-compatible `end-of-day` Edge Function that evaluates each venue in its configured IANA timezone after its cutoff and sends a stored-operation Telegram summary to each enabled recipient.
-- Active platform admins can edit a venue's EOD cutoff in Settings; the database trigger rejects cutoff/timezone changes from ordinary managers and employees.
+- With migration 025, managers can edit timezone and EOD cutoff for their own venues; platform admins can edit all venues. Employee and cross-organisation writes remain denied.
 - Manager Alerts delivery status for server-sent, pending, and failed Telegram events. The browser no longer treats the local notification stub as production data.
 - Telegram test notifications, employee Shift Complete delivery, pg_cron invocation, pg_net request delivery, Vault project URL/Cron secret usage, timezone/cutoff evaluation, and End-of-Day Telegram delivery have been successfully verified in production.
 
@@ -241,12 +255,12 @@ The repository does not use a separate generated milestone registry; this list r
 - Edge Functions and Cron must be deployed/configured separately from GitHub Pages. The repository cannot prove Telegram bot secrets or Cron health until the manual Supabase setup is completed.
 - Submit/reopen and shift-cover notifications are initiated by successful frontend writes and then revalidated server-side. A direct external database write that bypasses the frontend will not create the corresponding notification event until a database webhook/outbox integration is added.
 - The `notification_revision` trigger is server-managed. Service-role notification finalization is explicitly allowed to update the legacy `complete_notified` field, while browser callers cannot choose lifecycle revisions or reopen timestamps.
-- The venue cutoff editor is UI-gated for active platform admins and database-enforced by `enforce_venue_admin_settings_update`; ordinary managers retain other permitted venue updates but cannot change cutoff/timezone.
+- The venue editor is manager/admin-gated and database-enforced by target-venue RLS and `enforce_venue_admin_settings_update`. Migration 025 deliberately permits own-venue manager timing changes; organisation ownership cannot be edited.
 - The first EOD processor reports existing daily operation rows. It does not create an empty operation solely to send a Telegram report when nobody has opened that venue/date yet.
 - Automated notifications are capped at five attempts per event. A permanently failed event requires operator review/repair before another retry path is introduced.
 - Shift-cover requests currently use two client writes: the employee roster assignment and the notification row. If the first write succeeds and the second fails, the UI reports the failure and the manager should verify the assignment before retrying.
 - RLS helper EXECUTE grants were initially missing in the live project and were corrected in migrations `003_grant_helper_function_execute.sql` and `004_grant_can_update_task_execute.sql`. The one-off delete capability is isolated in `005_allow_managers_delete_adhoc_daily_tasks.sql`. Keep these grants/policies and verify them when provisioning another Supabase project.
-- The frontend has been validated through repository/static checks and the existing development workflow; a full authenticated browser regression suite is still follow-up work.
+- Focused local browser and database regression tests are tracked under `tests/`. They isolate production services; a live authenticated two-client regression pass remains a deployment check.
 - A real two-browser downgrade test and direct stale-session write probes must be run against the deployed project after migrations 021/022 and the updated Edge Function are deployed. Static inspection confirms the current RLS helpers and manager-only RPCs resolve authorization from current database rows rather than cached frontend role state.
 
 ## 10. Next milestones
@@ -303,7 +317,7 @@ The exact local origin must be allowed in Supabase Authentication URL Configurat
 5. Use the recipient Test button. Confirm one `test` event/message. Complete the final task in a test shift and confirm no Telegram is sent until Submit Shift is pressed; then confirm one concise `list-complete` event/message per enabled recipient.
 6. Reopen the submitted shift and confirm one `list-reopened` event/message. Submit it with an incomplete task and a reason/note; confirm one `list-incomplete` event/message per recipient with Incomplete Submissions enabled. Resubmit a complete shift and confirm one new completion event/message labelled as a resubmission. Repeat from two browser clients and confirm revision/recipient idempotency prevents duplicates.
 7. Enable Shift Cover, have an employee cover for a rostered person, and confirm one `shift-cover` event/message containing the venue, shift/date, covering person, and covered person. Disable the preference and confirm no new cover message is sent.
-8. As an active platform admin, change a venue cutoff in Settings and confirm it persists. Confirm a direct manager/employee cutoff update is rejected by the database trigger. Braddon's production cutoff is `23:30`.
+8. After migration 025, change a venue's timezone/cutoff as an authorised manager and platform admin and confirm persistence. Confirm employee and cross-organisation manager writes fail. Do not change production timing just to run this check; use a test venue.
 9. Set a temporary cutoff shortly ahead, wait for Cron, and confirm one `end-of-day` event/message per enabled recipient. Run Cron again and confirm it does not send again.
 10. Break a test Chat ID or use a recipient who has not started the bot. Confirm `failed` plus `error_message`, while valid recipients continue receiving messages. Fix the recipient and retry before the five-attempt cap.
 11. Confirm an employee cannot invoke the test path, read recipient Chat IDs, or choose an arbitrary destination, and confirm no bot/service key appears in browser source or network requests.
