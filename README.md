@@ -37,9 +37,39 @@ Apply migrations [025](supabase/migrations/025_venue_organisation_administration
 - Venue-day rollover refreshes on focus and a 30-second check. History boundaries and roster editing use venue dates. The operational date changes at local midnight, independently of the report cutoff.
 - **View report delivery** opens Alerts; it does not manually send EOD. Live venue deletion/demo-wipe controls are hidden. Cover success is separate from Telegram delivery status.
 
+## Photo evidence — phase 1: database and permissions
+
+Branch: `feature/task-photo-evidence`. Apply [027_task_photo_evidence.sql](supabase/migrations/027_task_photo_evidence.sql) **after migrations 001–026** in the Supabase SQL Editor. This migration has not been applied to the live project by this implementation. It runs transactionally and requests a PostgREST schema-cache reload.
+
+The migration can precede the frontend release: existing photo requirements default to off and existing three-argument submission calls continue to work. **Do not enable photo requirements in production yet.** Upload validation, physical file cleanup, frontend controls and notification links are later phases and have not been implemented here. No bucket, Edge Function or Cron job is created in this phase.
+
+- Managers/admins configure `template_tasks.requires_photo` using existing scoped template permissions. A task-insert trigger snapshots that value during employee initialisation, Reset Today and template-linked daily inserts, including inserts from the old frontend. Daily requirements are immutable after creation; an exception requires an audited approval rather than disabling an existing requirement. One-off tasks accept the requirement at creation.
+- `organisations.photo_retention_days` defaults to 30 and accepts 1–365 days under the existing manager/admin organisation permissions. Each finalized upload gets its own expiry; later setting changes do not rewrite existing expiries.
+- `task_evidence` tracks reserved uploads, verified photos and the deletion queue. `task_evidence_exemptions` records scoped manager approvals/revocations. `task_evidence_submissions` preserves immutable per-task evidence/exemption snapshots for each submission revision, including after expiry and Reset Today. Authenticated users can read these records only for accessible venues; neither browser users nor the service role can directly write them.
+- Required tasks need an unexpired, verified private Storage object or a current-revision manager exemption before Done. Submission checks again, including direct checklist updates. Blocked/NA/Skipped tasks do not require photos. Ordinary task/evidence changes are blocked after submission; routine-template deletion can still unlink its foreign key without changing the daily snapshot.
+- Removing the last photo or revoking the only exemption returns an unsubmitted required Done task to Pending. Reopening rechecks requirements under the new revision: still-valid photos can be reused, but old exemptions cannot. Expiry never rewrites an already-submitted task or its audit snapshot.
+- Private-bucket RLS policies target `task-evidence`, including restrictive boundaries against pre-existing broad Storage policies. Uploads are limited to the uploader's live reservation; downloads require venue access and unexpired verified evidence. Browser overwrites/deletes are denied. These policies remain dormant until phase 2 provisions the private bucket through the Storage API.
+
+### Database contracts for subsequent phases
+
+| Caller | RPC | Contract |
+|---|---|---|
+| Signed-in venue user | `reserve_task_evidence(task_id, evidence_id)` | Client-generated UUID gives retry identity; server derives venue/organisation/path/owner. At most three live reservations/photos per task. Reservations expire after one hour. |
+| Venue manager/admin | `approve_task_photo_exemption(task_id, reason)` | Non-empty reason, 1–1000 characters; approver/time recorded by the database. Revoke before replacing an approval. |
+| Venue manager/admin | `revoke_task_photo_exemption(exemption_id)` | Open current revision only; preserves the original approval and records revocation. |
+| Uploader or venue manager/admin | `remove_task_evidence(evidence_id)` | Open shift only; queues file removal and rechecks completion. Does not delete bytes. |
+| Signed-in venue user | `submit_daily_checklist(checklist_id, notification_revision, changes, exemption_ids)` | Last argument is optional for old clients. Supply exactly the approved exemption IDs needed by Done tasks without valid photos. Guards apply even to direct table submission. |
+| Trusted validator only | `finalize_task_evidence(evidence_id, uploaded_by, byte_size, mime_type, sha256)` | Service-role-only. Future Edge Function must authenticate the uploader and validate actual image bytes **before** calling. DB rechecks live access, revision, private Storage metadata, size (up to 5 MiB), image MIME type and digest format. Storage metadata is not image validation. |
+| Cleanup worker only | `queue_expired_task_evidence(limit)` | Service-role-only; queues expired photos/abandoned uploads in batches of 1–500 and rechecks open-task completion. |
+| Cleanup worker only | `confirm_task_evidence_deleted(evidence_id)` | Call only after the Storage API removes the object. DB requires queued state and absence of Storage metadata, then stamps deletion. Retry-safe. |
+
+RPC parameter names use the `p_` prefix shown in the migration. The worker reads `state = 'delete_pending'` and calls the Storage API; it must not SQL-delete Storage objects. Audit identifiers deliberately do not cascade with task/checklist deletion, so reset/deletion cannot lose the paths needed for cleanup. No signed URLs or image bytes are stored in audit snapshots. The image validator and cleanup worker still need implementation in phase 2.
+
 ### Local regression checks
 
-Tests use a temporary PostgreSQL-compatible PGlite database and headless Chrome with mocked Supabase responses. They never contact the live project. PGlite runs the complete migration chain with synthetic Auth identities and authenticated database roles; it does not simulate the Supabase Auth service, Edge Functions or realtime transport. A deployed two-session smoke test remains necessary after migration.
+Tests use a temporary PostgreSQL-compatible PGlite database and headless Chrome with mocked Supabase responses. They never contact the live project. PGlite runs the complete migration chain with synthetic Auth identities, authenticated/service roles and minimal Storage metadata tables for policy checks. It does not simulate real image bytes, the Storage API, Supabase Auth, Edge Functions, realtime transport or multi-session PostgreSQL concurrency. A deployed two-session smoke test remains necessary after migration.
+
+Photo evidence tests cover defaults/snapshots, completion and direct-submission bypasses, exemption acknowledgement, cross-organisation/inactive/revoked access, upload reservations, immutable audit, expiry/reopen/reset/removal and restrictive Storage policies alongside a deliberately broad existing policy. Before production enablement, also test actual uploads/downloads/deletion and simultaneous submit-versus-remove/finalize/reset operations against an isolated Supabase test venue. Mutations lock the parent shift; conflicting direct SQL edits can be aborted by PostgreSQL and must be refreshed/retried rather than reported as saved.
 
 With Node.js and Google Chrome installed:
 

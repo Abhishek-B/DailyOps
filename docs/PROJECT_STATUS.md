@@ -2,6 +2,16 @@
 
 This is the canonical project status and architecture reference for DailyOps. It records the terminology, deployed schema boundary, current implementation, deferred work, roadmap, and development workflow.
 
+### Feature branch: task photo evidence, phase 1 — 2026-09-22
+
+Implemented locally on `feature/task-photo-evidence`, based on refreshed `origin/development` at `d39b884`. Migration `027_task_photo_evidence.sql` follows 001–026; it has not been applied to Supabase by this implementation. No frontend, Edge Function or notification changes are included in phase 1. See the [README database contracts](../README.md#photo-evidence--phase-1-database-and-permissions) for deployment and next-phase integration.
+
+The database now supports photo-required routine/daily snapshots, organisation retention (30 days by default, configurable from 1–365), three-photo upload reservations, manager-only reasoned exemptions, Done/submission enforcement, explicit exemption acknowledgement, immutable submission evidence, and private Storage policies. Verified uploads and cleanup transitions use narrowly granted service-role RPCs; browsers cannot forge metadata or exemptions. Reset/task removal queues object deletion without cascading away audit records. Expiry preserves historical submissions; reopening revalidates evidence and requires new exemption approval where applicable. Template removal still preserves submitted daily snapshots.
+
+All existing requirements default off. Do not enable them in production before the upload/UI phases are ready. Phase 2 must provision the private `task-evidence` bucket, validate actual images, call the finalisation RPC, and physically delete queued objects via the Storage API on a schedule. Phase 3 adds controls and viewing; phase 4 adds photo-count notifications and authenticated links. Static GitHub Pages hosting and the existing demo frontend remain unchanged. The earlier sections below are historical deployment notes, not evidence that migration 027 or its dependent services are live.
+
+Phase-1 tests extend the existing isolated PGlite suite with synthetic Storage metadata/RLS; actual Storage operations, image decoding, and multi-session concurrency require Supabase integration verification in the later storage phase. No production database tests were run.
+
 ### Feature branch: venue administration and UI cleanup — 2026-09-08
 
 Implemented on `feature/venue-admin-ui-cleanup`; not committed, pushed or deployed by this change. The user reports migration 024 applied. Preserve that file unchanged in the next commit. New migrations `025_venue_organisation_administration.sql` and `026_preserve_completion_and_atomic_submission.sql` must be applied after 024 and before publishing this frontend.
