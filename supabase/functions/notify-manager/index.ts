@@ -6,6 +6,8 @@ import {
   requireUser,
 } from "../_shared/supabase.ts";
 import {
+  appendEvidenceSummary,
+  checklistEvidenceSummary,
   claimNotification,
   completeNotification,
   failNotification,
@@ -549,6 +551,18 @@ async function handleListNotification(
     built = reopenedMessage(venue, checklist, profileResult.data);
   }
 
+  try {
+    built.text = appendEvidenceSummary(built.text, [
+      await checklistEvidenceSummary(db, checklist),
+    ]);
+  } catch (error) {
+    logDatabaseError("photo evidence summary failed", error);
+    return json(
+      { error: "Could not prepare the photo evidence notification" },
+      500,
+    );
+  }
+
   const results = [];
   const eventName = notificationKind === "list-complete"
     ? "complete"
@@ -727,7 +741,7 @@ async function handleShiftCover(
   return json({ ok: failed === 0, sent, failed, results });
 }
 
-Deno.serve(async (req) => {
+export async function handleNotificationRequest(req: Request) {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
@@ -761,4 +775,6 @@ Deno.serve(async (req) => {
     error:
       "A valid list-complete, list-reopened, shift-cover, or test request is required",
   }, 400);
-});
+}
+
+if (import.meta.main) Deno.serve(handleNotificationRequest);

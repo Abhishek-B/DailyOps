@@ -11,3 +11,10 @@ verify_jwt = true
 
 [functions.manage-user-access]
 verify_jwt = true
+
+[functions.upload-task-evidence]
+verify_jwt = false
+static_files = ["./functions/_shared/photo-decoder/magick.wasm.gz", "./functions/_shared/photo-decoder/NOTICE", "./functions/_shared/photo-decoder/LICENSE"]
+
+[functions.cleanup-task-evidence]
+verify_jwt = false

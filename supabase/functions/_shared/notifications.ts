@@ -1,5 +1,97 @@
 import type { AdminDb } from "./supabase.ts";
 
+export type EvidenceChecklist = {
+  id: string;
+  venue_id: string;
+  work_date: string;
+  list_type: "open" | "close";
+  submitted: boolean;
+  notification_revision: number;
+};
+
+export function evidenceAppLink(checklist: EvidenceChecklist) {
+  const configured = Deno.env.get("DAILYOPS_APP_URL") || "";
+  let url: URL;
+  try {
+    url = new URL(configured);
+  } catch (_) {
+    throw new Error("DAILYOPS_APP_URL must be the HTTPS DailyOps page URL");
+  }
+  if (
+    url.protocol !== "https:" || url.username || url.password || url.search ||
+    url.hash || url.href.length > 500
+  ) {
+    throw new Error(
+      "DAILYOPS_APP_URL must be an HTTPS page URL without credentials, query or fragment",
+    );
+  }
+  const params = new URLSearchParams({
+    venue: checklist.venue_id,
+    date: checklist.work_date,
+    shift: checklist.list_type,
+    checklist: checklist.id,
+  });
+  if (checklist.submitted) {
+    params.set("revision", String(checklist.notification_revision || 0));
+  }
+  url.hash = "evidence?" + params;
+  return url.href;
+}
+
+export async function checklistEvidenceSummary(
+  db: AdminDb,
+  checklist: EvidenceChecklist,
+) {
+  const link = evidenceAppLink(checklist);
+  let photos = 0, exemptions = 0, records = 0;
+  const now = new Date().toISOString();
+  for (let offset = 0;; offset += 500) {
+    let query = checklist.submitted
+      ? db.from("task_evidence_submissions").select(
+        "task_id,evidence,exemption_id",
+      )
+        .eq("notification_revision", checklist.notification_revision || 0)
+        .order("task_id")
+      : db.from("task_evidence").select("id").eq("state", "ready").gt(
+        "expires_at",
+        now,
+      ).order("id");
+    query = query.eq("checklist_id", checklist.id).eq(
+      "venue_id",
+      checklist.venue_id,
+    )
+      .eq("work_date", checklist.work_date).range(offset, offset + 499);
+    const { data, error } = await query;
+    if (error) throw error;
+    const rows = data || [];
+    records += rows.length;
+    for (const row of rows) {
+      photos += "evidence" in row
+        ? (Array.isArray(row.evidence) ? row.evidence.length : 0)
+        : 1;
+      if ("exemption_id" in row && row.exemption_id) exemptions++;
+    }
+    if (rows.length < 500) break;
+  }
+  const summary = checklist.submitted
+    ? records
+      ? `At submission: ${photos} photo(s), ${exemptions} manager exemption(s).`
+      : "Photo evidence was not recorded for this submission."
+    : `Currently available: ${photos} photo(s). Shift not submitted.`;
+  return `${
+    listLabel(checklist.list_type)
+  } evidence\n${summary}\nView in DailyOps (sign-in required):\n${link}`;
+}
+
+export function appendEvidenceSummary(text: string, summaries: string[]) {
+  const footer = "\n\n" + summaries.join("\n\n");
+  const budget = 3900 - footer.length;
+  const body = text.length > budget
+    ? text.slice(0, budget - 22) + "\n… message truncated"
+    : text;
+  return body + footer;
+}
+
 export type NotificationClaim = {
   idempotencyKey: string;
   venueId: string | null;
@@ -90,7 +182,7 @@ export async function sendTelegramMessage(input: {
       body: JSON.stringify({
         chat_id: input.chatId,
         text,
-        disable_web_page_preview: true,
+        link_preview_options: { is_disabled: true },
       }),
     },
   );

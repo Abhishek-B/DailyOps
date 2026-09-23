@@ -1,5 +1,7 @@
 # DailyOps Starter v2
 
+**Photo-evidence handoff (2026-09-23):** the feature passed 89 local regression checks and read-only hosted configuration checks. The notification functions are deployed and match this source; the production GitHub Pages frontend is still the older version. Publish/test the updated page before enabling operational photo requirements. See [the current verification status](docs/PROJECT_STATUS.md#photo-evidence-pre-merge-verification--2026-09-23); phase-by-phase status notes below describe their original completion point.
+
 DailyOps is a framework-free, multi-venue daily-operations app for opening and closing shifts. It remains a single static `index.html` suitable for GitHub Pages.
 
 ## Project status
@@ -39,16 +41,16 @@ Apply migrations [025](supabase/migrations/025_venue_organisation_administration
 
 ## Photo evidence — phase 1: database and permissions
 
-Branch: `feature/task-photo-evidence`. Apply [027_task_photo_evidence.sql](supabase/migrations/027_task_photo_evidence.sql) **after migrations 001–026** in the Supabase SQL Editor. This migration has not been applied to the live project by this implementation. It runs transactionally and requests a PostgREST schema-cache reload.
+Branch: `feature/task-photo-evidence`. The user reports [027_task_photo_evidence.sql](supabase/migrations/027_task_photo_evidence.sql) applied after migrations 001–026. It remains unchanged in phase 2; live migration state was not independently checked.
 
-The migration can precede the frontend release: existing photo requirements default to off and existing three-argument submission calls continue to work. **Do not enable photo requirements in production yet.** Upload validation, physical file cleanup, frontend controls and notification links are later phases and have not been implemented here. No bucket, Edge Function or Cron job is created in this phase.
+The migration can precede the frontend release: existing photo requirements default to off and existing three-argument submission calls continue to work. **Do not enable photo requirements in production yet.** Phase 2 implements upload validation and physical cleanup below. Phases 3 and 4 add frontend controls and notification links locally. Hosted smoke tests remain pending deployment of the completed implementation, at the user's request.
 
 - Managers/admins configure `template_tasks.requires_photo` using existing scoped template permissions. A task-insert trigger snapshots that value during employee initialisation, Reset Today and template-linked daily inserts, including inserts from the old frontend. Daily requirements are immutable after creation; an exception requires an audited approval rather than disabling an existing requirement. One-off tasks accept the requirement at creation.
 - `organisations.photo_retention_days` defaults to 30 and accepts 1–365 days under the existing manager/admin organisation permissions. Each finalized upload gets its own expiry; later setting changes do not rewrite existing expiries.
 - `task_evidence` tracks reserved uploads, verified photos and the deletion queue. `task_evidence_exemptions` records scoped manager approvals/revocations. `task_evidence_submissions` preserves immutable per-task evidence/exemption snapshots for each submission revision, including after expiry and Reset Today. Authenticated users can read these records only for accessible venues; neither browser users nor the service role can directly write them.
 - Required tasks need an unexpired, verified private Storage object or a current-revision manager exemption before Done. Submission checks again, including direct checklist updates. Blocked/NA/Skipped tasks do not require photos. Ordinary task/evidence changes are blocked after submission; routine-template deletion can still unlink its foreign key without changing the daily snapshot.
 - Removing the last photo or revoking the only exemption returns an unsubmitted required Done task to Pending. Reopening rechecks requirements under the new revision: still-valid photos can be reused, but old exemptions cannot. Expiry never rewrites an already-submitted task or its audit snapshot.
-- Private-bucket RLS policies target `task-evidence`, including restrictive boundaries against pre-existing broad Storage policies. Uploads are limited to the uploader's live reservation; downloads require venue access and unexpired verified evidence. Browser overwrites/deletes are denied. These policies remain dormant until phase 2 provisions the private bucket through the Storage API.
+- Private-bucket RLS policies target `task-evidence`, including restrictive boundaries against pre-existing broad Storage policies. Uploads are limited to the uploader's live reservation; downloads require venue access and unexpired verified evidence. Browser overwrites/deletes are denied. These policies remain dormant until the private bucket is provisioned through the phase-2 setup script or dashboard.
 
 ### Database contracts for subsequent phases
 
@@ -59,11 +61,70 @@ The migration can precede the frontend release: existing photo requirements defa
 | Venue manager/admin | `revoke_task_photo_exemption(exemption_id)` | Open current revision only; preserves the original approval and records revocation. |
 | Uploader or venue manager/admin | `remove_task_evidence(evidence_id)` | Open shift only; queues file removal and rechecks completion. Does not delete bytes. |
 | Signed-in venue user | `submit_daily_checklist(checklist_id, notification_revision, changes, exemption_ids)` | Last argument is optional for old clients. Supply exactly the approved exemption IDs needed by Done tasks without valid photos. Guards apply even to direct table submission. |
-| Trusted validator only | `finalize_task_evidence(evidence_id, uploaded_by, byte_size, mime_type, sha256)` | Service-role-only. Future Edge Function must authenticate the uploader and validate actual image bytes **before** calling. DB rechecks live access, revision, private Storage metadata, size (up to 5 MiB), image MIME type and digest format. Storage metadata is not image validation. |
+| Trusted validator only | `finalize_task_evidence(evidence_id, uploaded_by, byte_size, mime_type, sha256)` | Service-role-only. Upload Edge Function authenticates the uploader and validates actual image bytes **before** calling. DB rechecks live access, revision, private Storage metadata, size (up to 5 MiB), image MIME type and digest format. Storage metadata is not image validation. |
 | Cleanup worker only | `queue_expired_task_evidence(limit)` | Service-role-only; queues expired photos/abandoned uploads in batches of 1–500 and rechecks open-task completion. |
 | Cleanup worker only | `confirm_task_evidence_deleted(evidence_id)` | Call only after the Storage API removes the object. DB requires queued state and absence of Storage metadata, then stamps deletion. Retry-safe. |
 
-RPC parameter names use the `p_` prefix shown in the migration. The worker reads `state = 'delete_pending'` and calls the Storage API; it must not SQL-delete Storage objects. Audit identifiers deliberately do not cascade with task/checklist deletion, so reset/deletion cannot lose the paths needed for cleanup. No signed URLs or image bytes are stored in audit snapshots. The image validator and cleanup worker still need implementation in phase 2.
+RPC parameter names use the `p_` prefix shown in the migration. The worker reads `state = 'delete_pending'` and calls the Storage API; it must not SQL-delete Storage objects. Audit identifiers deliberately do not cascade with task/checklist deletion, so reset/deletion cannot lose the paths needed for cleanup. No signed URLs or image bytes are stored in audit snapshots.
+
+## Photo evidence — phase 2: private uploads and retention cleanup
+
+Both functions were deployed on **2026-09-23** and read back as active version 1. Read-only preflight confirmed the migration-028 cleanup columns and the correctly restricted private bucket. The hosted scheduler-secret digest matches the local configuration; existing functions and secrets were unchanged. Unauthenticated requests to both new endpoints correctly return 401, and upload CORS preflight succeeds. The user reports running the cleanup schedule SQL in [deployment-guide step 4](supabase/functions/upload-task-evidence/README.md#4-add-the-separate-cleanup-schedule); a successful scheduled HTTP response has not yet been checked. Actual authenticated upload/deletion smoke tests remain outstanding.
+
+- `upload-task-evidence` authenticates the user, reserves through RLS, decodes JPEG/PNG/WebP, auto-orients, strips metadata, resizes to at most 1600 pixels and stores a JPEG using the caller's Storage permissions. Only successful validation/finalisation counts as evidence; retries never overwrite an existing object.
+- Input is limited to 5 MiB, 4 megapixels and 4096 pixels per side. Phase 3 must prepare camera/gallery photos on the device before calling this endpoint, including conversion where the browser supports it; raw HEIC and animated images are not accepted.
+- `cleanup-task-evidence` uses the existing scheduler secret, removes database-queued objects through the Storage API, and retains audit rows. Migration 028 adds persistent retry/backoff fields, rejected-upload cleanup, and reconciliation of uploads that arrive after deletion. Expired photos become inaccessible immediately at expiry; physical removal follows the next successful scheduled cleanup.
+- A generated, ignored decoder asset is prepared only for the upload Edge Function. The GitHub Pages frontend still needs no build step. Existing functions and Telegram behaviour are unchanged. UI toggles, upload/viewing controls and notification links are not part of phase 2.
+
+Local Deno tests exercise real image bytes with injected caller identities and mocked Supabase HTTP responses. They cover format/size limits, EXIF removal/orientation, authentication boundaries, retry conflicts, private bucket setup and cleanup failures. The PGlite suite also covers migration 028. These checks do **not** prove hosted deployment, Storage byte deletion or multi-session concurrency; complete the deployment guide's isolated smoke test before enabling photo requirements.
+
+With Deno installed, prepare the pinned decoder and run the phase-2 checks from the repository root:
+
+```sh
+deno run --no-lock --allow-read --allow-write=supabase/functions/_shared/photo-decoder scripts/prepare-photo-decoder.ts
+deno check --no-lock supabase/functions/upload-task-evidence/index.ts supabase/functions/cleanup-task-evidence/index.ts scripts/setup-task-evidence-storage.ts
+deno test --no-lock --allow-read tests/photo-evidence.test.ts
+```
+
+The preparation command downloads a pinned public dependency when uncached; it does not contact the DailyOps project. Decoder files are generated rather than committed. Run it again on a fresh checkout before testing or deploying.
+
+## Photo evidence — phase 3: frontend controls
+
+Implemented locally on `feature/task-photo-evidence`; **not committed, pushed or published**. This phase changes the static `index.html` and local tests only, plus documentation. **No new migration or Edge Function deployment is required** beyond 027/028 and the phase-2 functions. Photo settings remain off until a manager explicitly enables them. Leave production requirements off pending the final hosted smoke test.
+
+- In **Templates → Add/Edit routine task**, managers/admins can switch **Photo required** on or off. It applies to new daily snapshots, not existing tasks. Copying templates preserves the setting. **One-off task** creation has the same switch; an existing daily requirement cannot be disabled as a workaround.
+- Every live task has a **Photos** control, including read-only submitted tasks and History. Missing evidence opens the panel before individual or bulk Done actions. Photo evidence is optional on tasks without a requirement; Blocked/N/A/Skipped remain available without a photo.
+- **Take photo** requests camera capture where supported; **Choose photos** uses the device's picker. Up to three live photos/reservations are allowed per task. The browser handles files up to 30 MiB, resizes to a maximum 1600-pixel side, preserves EXIF orientation and converts to JPEG before the server validates it. HEIC works only where the browser can decode it; otherwise a conversion message is shown. Animated PNG/WebP are rejected.
+- Uploads show preparation/verification status. Unconfirmed uploads keep the same ID and bytes in memory for retry and can be discarded. A task is not marked Done automatically after uploading. Closing the panel discards the local retry copy; a server-side reservation/file may still finish and can be refreshed or removed later. No photo bytes or private URLs are saved to localStorage.
+- Private images are downloaded through the signed-in Storage client only when **View photo** is pressed. Blob previews are released on close, venue/organisation switch, sign-out/access loss, removal or expiry. Metadata displays uploader, timestamp, expiry and unavailable/deleted states. Refresh failures disable evidence editing until recovered.
+- Managers can approve an exemption with a reason or revoke it on an open shift. Submission requires explicitly checking every exemption being used instead of a photo. A reopened revision needs a new exemption approval. Only the uploader or a venue manager can remove an open-shift photo; database rules remain authoritative.
+- **Evidence audit** in manager Today and History exposes immutable submission records, including prior revisions/reset tasks and expired-photo metadata. Historical evidence is read-only. **Settings → Organisations → Photo retention** accepts 1–365 whole days (default 30) and changes expiry for new uploads only.
+
+The existing 15-second Today refresh also reloads evidence metadata; the photo panel has an explicit **Refresh evidence** action. Evidence reads are paginated. Local browser tests cover real canvas conversion/orientation, retry identity, limits, exemptions/acknowledgement, removal, expired previews, access changes, history, retention and phone layouts. The demo remains localStorage-backed with its existing behaviour; production-only photo controls are hidden there. Phase 4 below adds photo counts and sign-in-required links to Telegram, without sending image copies.
+
+## Photo evidence — phase 4: notifications and private app links
+
+Implemented locally on `feature/task-photo-evidence`, **not committed, pushed or deployed**. No new database migration, bucket policy or Cron SQL is needed. This phase changes the two notification functions, their shared message helper, and the static frontend.
+
+- Complete/incomplete submission messages include the photo and manager-exemption counts recorded in the immutable **submitted revision**. Expiry or a later reset/reopen does not change that historical count. Legacy submissions without an evidence snapshot say that evidence was not recorded rather than claiming an audited zero.
+- Reopen messages show the current unexpired ready-photo count. End-of-day reports include a count and link for each existing shift: a submitted snapshot when submitted, otherwise current evidence. Current counts describe the time the notification was prepared, not an immutable submission.
+- Links use the configured app URL plus `#evidence?venue=…&date=…&shift=…&checklist=…&revision=…`. Only submitted links carry a revision. The fragment contains record identifiers, not tokens, image URLs or exemption reasons. The static GitHub Pages path is unchanged.
+- A signed-out recipient signs in first; the same link then opens a read-only evidence list for the authorised venue/date/shift. Submitted links stay pinned to that revision, including reset tasks and dates beyond the normal History list. Existing RLS controls all metadata and image reads; a forwarded link grants no access. Invalid/unavailable links show an error, not another shift. Photos still load only on **View photo**. **Back to shift evidence** returns to the linked list.
+- Telegram receives text only. No image attachments, public/signed Storage URLs or image bytes are sent. Link previews are disabled using Telegram's [documented preview option](https://core.telegram.org/bots/api#linkpreviewoptions). Evidence summaries/links are retained when long task details are truncated. Recipient preferences and existing idempotency keys are unchanged; database errors are not reported as zero photos.
+
+### Phase-4 rollout (not performed)
+
+1. Publish the phase-3/4 static page to the intended app URL before sending links. Keep photo requirements off until the final hosted checks. Do not deploy these notification changes until migrations 027/028 and the phase-2 services are ready.
+2. Set **`DAILYOPS_APP_URL`** under Supabase Edge Function secrets to the full HTTPS page URL, including the GitHub Pages repository path. It must have no credentials, query or fragment, and at most 500 encoded characters. This is a public destination setting, not a privileged credential. The backend never derives it from a request header/body. An absent/invalid setting causes affected notification requests to fail rather than send a broken link.
+3. Redeploy the two notification functions sequentially. Existing bot/cron secrets and schedules remain unchanged; there is no need to redeploy upload/cleanup for this phase.
+
+```sh
+supabase secrets set DAILYOPS_APP_URL=https://abhishek-b.github.io/DailyOps/ --project-ref zwebxycbrfwtlmqwxwwe
+supabase functions deploy notify-manager --project-ref zwebxycbrfwtlmqwxwwe
+supabase functions deploy end-of-day --project-ref zwebxycbrfwtlmqwxwwe
+```
+
+4. Run the [holistic hosted smoke checklist](supabase/functions/upload-task-evidence/README.md#verification-before-production-enablement) against isolated test data. Include actual Telegram delivery, signed-out and already-signed-in links, another-organisation/revoked-access denial, old/reset revisions and expired photos. Confirm submission/exemption counts and both EOD links, no previews/images, existing recipient preferences, delivery audit and retry idempotency. Do not send these tests to operational staff chats. Then enable requirements for the intended production templates.
 
 ### Local regression checks
 
@@ -80,6 +141,13 @@ NODE_PATH="$test_deps/node_modules" node --test tests/*.test.cjs
 ```
 
 Set `DAILYOPS_SCREENSHOT_DIR` to an existing temporary directory to capture the desktop/phone Today and Settings screens. Test dependencies are separate from the static app.
+
+Notification handler tests use fake credentials and mocked Supabase/Telegram HTTP; they send no real messages. Run them with Deno:
+
+```sh
+deno test --no-lock --allow-env=SUPABASE_URL,SUPABASE_ANON_KEY,SUPABASE_PUBLISHABLE_KEY,SUPABASE_SERVICE_ROLE_KEY,TELEGRAM_BOT_TOKEN,DAILYOPS_CRON_SECRET,DAILYOPS_APP_URL tests/notifications.test.ts
+deno check --no-lock supabase/functions/notify-manager/index.ts supabase/functions/end-of-day/index.ts
+```
 
 ## Supabase frontend auth setup
 
@@ -187,6 +255,8 @@ The notification lifecycle is submit-gated. Completing the final task shows **Re
 
 From the repository root, after installing/authenticating the Supabase CLI:
 
+For an existing deployment upgrading to photo evidence, use the [phase-4 rollout](#phase-4-rollout-not-performed) instead of replacing existing bot/cron secrets. Current notification code also requires migration 027 and the updated frontend.
+
 ```sh
 supabase login
 supabase link --project-ref zwebxycbrfwtlmqwxwwe
@@ -197,6 +267,7 @@ supabase functions deploy manage-user-access --project-ref zwebxycbrfwtlmqwxwwe
 supabase secrets set \
   TELEGRAM_BOT_TOKEN=replace-with-the-token-from-BotFather \
   DAILYOPS_CRON_SECRET=replace-with-a-long-random-secret \
+  DAILYOPS_APP_URL=https://abhishek-b.github.io/DailyOps/ \
   --project-ref zwebxycbrfwtlmqwxwwe
 ```
 

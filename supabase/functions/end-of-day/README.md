@@ -16,6 +16,21 @@ Required function secrets:
 
 - `TELEGRAM_BOT_TOKEN`
 - `DAILYOPS_CRON_SECRET`
+- `DAILYOPS_APP_URL` — full HTTPS static page URL, including its repository path, without credentials/query/fragment (maximum 500 encoded characters).
+
+Phase 4 adds photo evidence summaries and sign-in-required links for each
+existing shift. Submitted shifts use immutable photo/exemption counts from
+their current submitted revision; unsubmitted shifts use current unexpired
+ready-photo counts. Earlier-submission counts are not substituted for an open
+shift. Both links survive truncation of long task details. Images, Storage URLs
+and tokens are never attached, and Telegram previews are disabled.
+
+This uses the evidence SELECT grants in migration 027 and adds no migration or
+schedule change. Missing app URL configuration or evidence-query failures are
+recorded as failed, retryable reports, not zero-photo summaries. Publish the
+updated static frontend, set the app URL, and redeploy this function and
+`notify-manager` sequentially; see the [phase-4 rollout](../../../README.md#phase-4-rollout-not-performed).
+Phase-4 deployment and hosted smoke checks have not been performed.
 
 This first version processes existing daily operation rows. It does not create
 an operation with no activity merely to send an empty report.

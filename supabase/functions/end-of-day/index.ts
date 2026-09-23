@@ -5,8 +5,11 @@ import {
   json,
 } from "../_shared/supabase.ts";
 import {
+  appendEvidenceSummary,
+  checklistEvidenceSummary,
   claimNotification,
   completeNotification,
+  type EvidenceChecklist,
   failNotification,
   formatDate,
   formatDateTime,
@@ -320,7 +323,7 @@ async function processVenue(
     const checklistResult = await db
       .from("daily_checklists")
       .select(
-        "id,venue_id,work_date,list_type,submitted,submitted_by,submitted_at",
+        "id,venue_id,work_date,list_type,submitted,submitted_by,submitted_at,notification_revision",
       )
       .eq("venue_id", venue.id)
       .eq("work_date", local.date)
@@ -397,6 +400,30 @@ async function processVenue(
     tasksByChecklist,
     profiles,
   );
+  try {
+    const summaries = [];
+    for (const listType of ["open", "close"]) {
+      const checklist = checklists.find((row) => row.list_type === listType);
+      if (checklist) {
+        summaries.push(
+          await checklistEvidenceSummary(db, checklist as EvidenceChecklist),
+        );
+      }
+    }
+    built.text = appendEvidenceSummary(built.text, summaries);
+  } catch (error) {
+    const message = "Could not prepare the photo evidence notification";
+    logDatabaseError("photo evidence summary failed", error);
+    for (const recipient of recipients) {
+      await recordFailure(db, venue, local.date, recipient, message);
+    }
+    return {
+      status: "failed",
+      workDate: local.date,
+      error: message,
+      database_error: true,
+    };
+  }
   const results = [];
   for (const recipient of recipients) {
     results.push(
@@ -419,7 +446,7 @@ async function processVenue(
   };
 }
 
-Deno.serve(async (req) => {
+export async function handleEndOfDayRequest(req: Request) {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
@@ -468,4 +495,6 @@ Deno.serve(async (req) => {
     },
     hasDatabaseFailure ? 500 : 200,
   );
-});
+}
+
+if (import.meta.main) Deno.serve(handleEndOfDayRequest);

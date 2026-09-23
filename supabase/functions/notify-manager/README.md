@@ -18,13 +18,28 @@ while repeated requests remain safe. Incomplete submissions include stored
 task statuses, reasons, and notes and use the recipient's
 `notify_incomplete_submission` preference.
 
-Required function secret:
+Required function secrets/settings:
 
 - `TELEGRAM_BOT_TOKEN`
+- `DAILYOPS_APP_URL` — full HTTPS static page URL including the GitHub Pages repository path, without credentials/query/fragment (maximum 500 encoded characters).
 
 The function also relies on the Supabase-provided service role and the
-service-role SELECT grants recorded in migrations 014 and 015. No new secret
-is required.
+service-role SELECT grants recorded in migrations 014, 015 and 027.
+
+Phase 4 appends photo and exemption counts from the immutable submission
+revision, plus a sign-in-required app link. Reopened shifts use current
+ready/unexpired photo counts and a current-shift link instead. Legacy
+submissions without snapshots are labelled as not recorded. No photos,
+Storage URLs or tokens go to Telegram, and previews are disabled. Long task
+details are truncated before the evidence footer so the link remains intact.
+Missing app URL configuration or an evidence-query failure returns 500 before
+delivery; it does not send a broken link or claim zero photos.
+
+These changes require redeploying this function after publishing the updated
+frontend and setting `DAILYOPS_APP_URL`; they require no new migration beyond
+the existing photo feature. See the [phase-4 rollout](../../../README.md#phase-4-rollout-not-performed).
+The implementation is local; phase-4 deployment/live delivery checks have not
+been performed. The fixed Test and shift-cover messages remain unchanged.
 
 The function is deployed with `verify_jwt = false` because the shared handler
 validates the user bearer token itself. This allows the separate scheduled

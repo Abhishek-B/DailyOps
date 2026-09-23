@@ -412,6 +412,15 @@ button.task-toggle:focus-visible { outline: 2px solid var(--accent); outline-off
 .task-side { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
 .task-meta-action { cursor: pointer; }
 .task-meta-action:hover { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.task-actions { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:4px; max-width:160px; }
+.evidence-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; }
+.evidence-card { padding:12px; border:1px solid var(--line); border-radius:12px; min-width:0; overflow-wrap:anywhere; }
+.evidence-card img { display:block; width:100%; max-height:360px; object-fit:contain; margin:10px 0; border-radius:8px; }
+.evidence-check { display:flex; align-items:flex-start; gap:9px; padding:10px 0; font-size:14px; }
+.evidence-check input { margin-top:4px; flex:none; }
+.organisation-row { flex-wrap:wrap; }
+.organisation-summary { flex:1; min-width:140px; }
+@media(max-width:720px) { .task-actions { max-width:92px; } .evidence-grid { grid-template-columns:1fr; } .organisation-summary { flex-basis:100%; } }
 .task-critical-mark { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--accent); opacity: .8; }
 
 /* ---------- sticky action bar ---------- */
@@ -760,6 +769,9 @@ let SUPABASE_COVER_REQUESTS = { rows: [], loading: false, error: null };
 let SUPABASE_NOTIFICATIONS = { rows: [], loading: false, error: null };
 let SUPABASE_NOTIFICATION_RECIPIENTS = { venueId: null, rows: [], eligibleProfiles: [], loading: false, error: null };
 let SUPABASE_HISTORY = { venueId: null, days: [], profilesById: {}, loading: false, error: null, selectedDate: null };
+let PHOTO_PANEL = null;
+let EVIDENCE_LINK_VIEW = null;
+let EVIDENCE_LINK_HANDLED = '';
 let SUPABASE_REALTIME = {
   channel: null,
   venueId: null,
@@ -1368,7 +1380,7 @@ async function loadOrganisationAccess(session) {
   let organisationRows;
 
   if (platformAdmin) {
-    const organisationResult = await DB.from('organisations').select('id,name').order('name');
+    const organisationResult = await DB.from('organisations').select('id,name,photo_retention_days').order('name');
     if (organisationResult.error) {
       console.error('[supabase] platform admin organisation load failed', {
         organisationError: organisationResult.error
@@ -1396,7 +1408,7 @@ async function loadOrganisationAccess(session) {
 
     const organisationIds = [...new Set(membershipRows.map(row => row.organisation_id))];
     const organisationResult = await DB.from('organisations')
-      .select('id,name')
+      .select('id,name,photo_retention_days')
       .in('id', organisationIds);
     organisationRows = organisationResult.data;
     if (organisationResult.error || (organisationRows || []).length !== organisationIds.length) {
@@ -1458,6 +1470,7 @@ function clearSupabaseManagerState() {
 }
 
 function clearSupabaseAccessRuntime(keepProfile = true) {
+  if (PHOTO_PANEL || EVIDENCE_LINK_VIEW) closeModal();
   SUPABASE_TODAY_LOAD_ID++;
   SUPABASE_TODAY_ERRORS = {};
   AUTH.organisationMemberships = [];
@@ -1992,7 +2005,7 @@ async function loadSupabaseTemplates() {
   let taskRows = [];
   if (templateIds.length) {
     const taskResult = await DB.from('template_tasks')
-      .select('id,template_id,sort_order,title,detail,critical')
+      .select('id,template_id,sort_order,title,detail,critical,requires_photo')
       .in('template_id', templateIds)
       .order('sort_order')
       .order('id');
@@ -2022,7 +2035,8 @@ async function loadSupabaseTemplates() {
       sortOrder: row.sort_order,
       title: row.title,
       detail: row.detail || '',
-      critical: !!row.critical
+      critical: !!row.critical,
+      requiresPhoto: !!row.requires_photo
     });
   });
   Object.values(byVenue).forEach(bucket => {
@@ -2104,6 +2118,7 @@ function selectVenue(id) {
 }
 
 async function selectOrganisation(id) {
+  if (PHOTO_PANEL || EVIDENCE_LINK_VIEW) closeModal();
   if (!isSupabaseMode()) return;
   const accessibleIds = new Set(accessibleOrganisationIds());
   const nextOrganisationId = id || null;
@@ -2253,7 +2268,7 @@ function ensureVenue() {
 
 // Legacy schema adapter: daily_checklists rows are today's shift-operation instances.
 const REMOTE_CHECKLIST_SELECT = 'id,venue_id,work_date,list_type,submitted,submitted_by,submitted_at,complete_notified,notification_revision,reopened_by,reopened_at';
-const REMOTE_TASK_SELECT = 'id,checklist_id,template_task_id,sort_order,title,detail,critical,source,status,added_by,added_at,completed_by,completed_at,note,reason';
+const REMOTE_TASK_SELECT = 'id,checklist_id,template_task_id,sort_order,title,detail,critical,requires_photo,source,status,added_by,added_at,completed_by,completed_at,note,reason';
 
 function supabaseVenueContext(venueId) {
   return venueCatalog().find(v => v.id === venueId || (isSupabaseMode() && v.realId === venueId)) || null;
@@ -2272,6 +2287,7 @@ function applyRemoteTaskRow(task, row) {
   task.title = row.title;
   task.detail = row.detail || '';
   task.critical = !!row.critical;
+  task.requiresPhoto = !!row.requires_photo;
   task.source = row.source;
   task.addedBy = row.added_by;
   task.addedAt = row.added_at;
@@ -2300,6 +2316,7 @@ async function insertRemoteDailyTask(list, fields) {
     title: fields.title,
     detail: fields.detail || null,
     critical: !!fields.critical,
+    requires_photo: !!fields.requiresPhoto,
     source: fields.source,
     status: 'pending',
     added_by: AUTH.profile.id,
@@ -2961,7 +2978,7 @@ async function loadSupabaseTodayForVenue(context, date, options = {}) {
   }
   let tasks = taskResult.data || [];
 
-  if (await backfillLegacyRemoteTemplateTaskIds(context, checklists, tasks)) {
+  if (options.backfill !== false && await backfillLegacyRemoteTemplateTaskIds(context, checklists, tasks)) {
     taskResult = await DB.from('daily_tasks')
       .select(REMOTE_TASK_SELECT)
       .in('checklist_id', checklistIds)
@@ -2974,8 +2991,10 @@ async function loadSupabaseTodayForVenue(context, date, options = {}) {
     tasks = taskResult.data || [];
   }
 
-  const rosterData = await loadSupabaseRosterForVenue(context, date);
-  return mapRemoteDay(context, date, checklists, tasks, rosterData);
+  const [rosterData, evidence] = await Promise.all([
+    loadSupabaseRosterForVenue(context, date), loadPhotoEvidence(checklistIds)
+  ]);
+  return attachPhotoEvidence(mapRemoteDay(context, date, checklists, tasks, rosterData), evidence);
 }
 
 async function loadSupabaseToday() {
@@ -3222,6 +3241,7 @@ function mapSupabaseHistoryDays(checklists, tasks, rosterRows) {
         submitted: !!row.submitted,
         submittedBy: row.submitted_by,
         submittedAt: row.submitted_at,
+        notificationRevision: Number(row.notification_revision || 0),
         completeNotified: !!row.complete_notified
       };
     });
@@ -3304,7 +3324,9 @@ async function loadSupabaseHistory(force = false) {
 
     const profilesById = Object.fromEntries((profileResult.data || []).map(profile => [profile.id, profile]));
     Object.assign(SUPABASE_TEAM.profilesById, profilesById);
-    const days = mapSupabaseHistoryDays(checklists, tasks, rosterRows);
+    const evidence = await loadPhotoEvidence(checklistIds);
+    if (!isCurrentRequest()) return;
+    const days = mapSupabaseHistoryDays(checklists, tasks, rosterRows).map(day => attachPhotoEvidence(day, evidence));
     SUPABASE_HISTORY = {
       venueId,
       days,
@@ -3325,6 +3347,454 @@ async function loadSupabaseHistory(force = false) {
   }
   if (isCurrentRequest()) render();
 }
+
+async function loadPhotoEvidence(checklistIds) {
+  const tables = ['task_evidence', 'task_evidence_exemptions', 'task_evidence_submissions'];
+  const rows = await Promise.all(tables.map(async table => {
+    const all = [];
+    if (!checklistIds.length) return all;
+    for (let offset = 0; ; offset += 500) {
+      let query = DB.from(table).select('*').in('checklist_id', checklistIds);
+      query = table === 'task_evidence_submissions' ? query.order('checklist_id').order('notification_revision').order('task_id') : query.order('id');
+      const result = await query.range(offset, offset + 499);
+      if (result.error) throw new Error('Photo evidence could not be loaded. Refresh before completing required tasks.');
+      all.push(...(result.data || []));
+      if ((result.data || []).length < 500) return all;
+    }
+  }));
+  return { photos: rows[0], exemptions: rows[1], submissions: rows[2] };
+}
+
+function attachPhotoEvidence(day, evidence) {
+  for (const list of Object.values(day.lists)) {
+    list.evidence = evidence.photos.filter(row => row.checklist_id === list.id);
+    list.evidenceSubmissions = evidence.submissions.filter(row => row.checklist_id === list.id);
+    for (const task of list.tasks) {
+      task.evidence = list.evidence.filter(row => row.task_id === task.id);
+      task.exemptions = evidence.exemptions.filter(row => row.task_id === task.id);
+      task.evidenceSubmissions = list.evidenceSubmissions.filter(row => row.task_id === task.id);
+    }
+  }
+  return day;
+}
+
+const validTaskPhotos = task => (task.evidence || []).filter(row => row.state === 'ready' && Date.parse(row.expires_at) > Date.now());
+const activePhotoExemption = (task, list) => (task.exemptions || []).find(row => !row.revoked_at && row.notification_revision === list.notificationRevision);
+const taskPhotoSatisfied = (task, list) => !task.requiresPhoto || validTaskPhotos(task).length > 0 || !!activePhotoExemption(task, list);
+
+function photoPanelCurrent(state) {
+  return PHOTO_PANEL === state && AUTH.profile?.id === state.userId && AUTH.profile?.active
+    && SUPABASE_ACCESS.verified !== false && V()?.realId === state.venueId
+    && (state.readOnly || operatingDayKey() === state.date);
+}
+
+function disposePhotoPanel() {
+  const state = PHOTO_PANEL;
+  PHOTO_PANEL = null;
+  if (!state) return;
+  state.controller?.abort();
+  clearInterval(state.timer);
+  Object.values(state.urls).forEach(URL.revokeObjectURL);
+  state.urls = {};
+  state.retry = null;
+}
+
+function evidenceStateLabel(row) {
+  if (row.deletion_reason === 'expired' || (row.expires_at && Date.parse(row.expires_at) <= Date.now())) return 'Expired — photo unavailable';
+  if (row.state === 'deleted') return 'Deleted — audit retained';
+  if (row.state === 'delete_pending') return 'Removal queued — photo unavailable';
+  if (row.state === 'pending') return 'Upload not verified';
+  return 'Verified photo';
+}
+
+function evidenceSnapshotHtml(rows) {
+  return rows.length ? `<details><summary>Submission audit (${rows.length})</summary>${rows.map(row => `<div class="evidence-card" style="margin-top:8px">
+    <b>${esc(row.task_title)}</b><div class="tiny mut">Revision ${row.notification_revision} · ${esc(fmtDT(row.submitted_at))} · ${esc(uname(row.submitted_by))}</div>
+    <div class="tiny">${esc(row.task_status)} · ${(row.evidence || []).length} photo(s) recorded at submission${row.exemption_id ? `<br>Exemption: ${esc(row.exemption_reason)} · ${esc(uname(row.exemption_approved_by))}` : ''}</div>
+  </div>`).join('')}</details>` : '';
+}
+
+async function refreshPhotoPanel(state) {
+  const context = V();
+  if (!photoPanelCurrent(state)) return;
+  let day;
+  if (state.snapshot) {
+    const evidence = await loadPhotoEvidence([state.list.id]);
+    state.task.evidence = evidence.photos.filter(row => (state.snapshot.evidence || []).some(photo => photo.id === row.id));
+    state.task.evidenceSubmissions = [state.snapshot];
+  } else {
+    day = state.linkRoute ? await loadLinkedEvidenceDay(state.linkRoute)
+      : await loadSupabaseTodayForVenue(context, state.date, { allowBootstrap: false, backfill: false });
+    if (!photoPanelCurrent(state)) return;
+    const list = day.lists[state.lk];
+    const task = list.tasks.find(task => task.id === state.task.id);
+    if (!task || list.id !== state.list.id) throw new Error('This task was removed or reset. Close this panel and refresh the shift.');
+    state.task = task;
+    state.list = list;
+    if (!state.linkRoute) {
+      if (state.date === operatingDayKey()) SUPABASE_TODAY.byVenue[state.venueId] = day;
+      else SUPABASE_HISTORY.days = SUPABASE_HISTORY.days.map(item => item.date === state.date ? day : item);
+    }
+  }
+  const ids = [...new Set([
+    ...(state.task.evidence || []).map(row => row.uploaded_by),
+    ...(state.task.exemptions || []).map(row => row.approved_by),
+    ...(state.task.evidenceSubmissions || []).flatMap(row => [row.submitted_by, row.exemption_approved_by])
+  ].filter(Boolean))];
+  if (ids.length) {
+    const profiles = await DB.from('profiles').select('id,display_name,email,active').in('id', ids);
+    if (photoPanelCurrent(state) && !profiles.error) (profiles.data || []).forEach(row => { SUPABASE_TEAM.profilesById[row.id] = row; });
+  }
+  if (!photoPanelCurrent(state)) return;
+  for (const id of Object.keys(state.urls)) {
+    if (!validTaskPhotos(state.task).some(row => row.id === id)) { URL.revokeObjectURL(state.urls[id]); delete state.urls[id]; }
+  }
+  state.error = '';
+  render();
+}
+
+function renderPhotoPanel(state) {
+  if (!photoPanelCurrent(state)) return;
+  const task = state.task, list = state.list;
+  const editable = !state.readOnly && !list.submitted && !state.error;
+  const exemption = activePhotoExemption(task, list);
+  const live = (task.evidence || []).filter(row => row.state === 'ready' && Date.parse(row.expires_at) > Date.now()
+    || row.state === 'pending' && Date.parse(row.upload_deadline) > Date.now());
+  const disabled = state.busy ? 'disabled' : '';
+  const root = $('#modal-root');
+  root.querySelector('[data-photo-content]').innerHTML = `
+    <div class="banner ${state.error ? 'banner-warn' : 'banner-info'}" role="status">${esc(state.error || state.message || (list.submitted || state.readOnly ? 'Read-only evidence. Submitted records are retained after photos expire.' : task.requiresPhoto ? 'A verified photo or a manager-approved exemption is required before Done. Blocked, N/A and Skipped do not need a photo.' : 'Photos are optional for this task.'))}</div>
+    <div class="row-b wrap"><span class="tiny mut">${validTaskPhotos(task).length} verified · up to 3 photos per task</span><button class="btn btn-sm" data-photo-refresh ${disabled}>Refresh evidence</button></div>
+    ${editable ? `<div class="row wrap">
+      <button class="btn" data-photo-camera ${disabled} ${live.length >= 3 || state.retry ? 'disabled' : ''}>Take photo</button>
+      <button class="btn" data-photo-gallery ${disabled} ${live.length >= 3 || state.retry ? 'disabled' : ''}>Choose photos</button>
+      <input type="file" accept="image/*" capture="environment" data-photo-camera-input hidden>
+      <input type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" multiple data-photo-gallery-input hidden>
+    </div><div class="tiny mut">Photos are resized before upload and stored privately. Location metadata is removed. Each photo shows its expiry below.</div>` : ''}
+    ${state.retry && editable ? `<div class="banner banner-warn"><div>Upload was not confirmed. Retry the same photo safely, or discard its reservation.
+      <div class="row wrap" style="margin-top:8px"><button class="btn btn-sm" data-photo-retry ${disabled}>Retry upload</button><button class="btn btn-sm" data-photo-discard ${disabled}>Discard upload</button></div></div></div>` : ''}
+    <div class="evidence-grid">${(task.evidence || []).map(row => {
+      const valid = validTaskPhotos(task).some(photo => photo.id === row.id);
+      const removable = editable && ['pending','ready'].includes(row.state) && (isMgr() || row.uploaded_by === state.userId);
+      return `<div class="evidence-card"><b>${esc(evidenceStateLabel(row))}</b>
+        <div class="tiny mut">${esc(uname(row.uploaded_by))} · ${esc(fmtDT(row.uploaded_at || row.created_at))}</div>
+        ${row.expires_at ? `<div class="tiny mut">Expires ${esc(fmtDT(row.expires_at))}</div>` : ''}
+        ${state.urls[row.id] ? `<img src="${state.urls[row.id]}" alt="Photo evidence for ${esc(task.title)}">` : ''}
+        <div class="row wrap" style="margin-top:8px">${valid ? `<button class="btn btn-sm" data-photo-view="${row.id}" ${disabled}>${state.urls[row.id] ? 'Hide photo' : 'View photo'}</button>` : ''}
+        ${removable ? `<button class="btn btn-sm btn-danger" data-photo-remove="${row.id}" ${disabled}>${state.removeId === row.id ? 'Confirm removal' : 'Remove'}</button>` : ''}</div>
+        ${state.removeId === row.id ? '<div class="tiny">Removal cannot be undone. If this is the last required photo, the task returns to Pending unless exempted.</div>' : ''}</div>`;
+    }).join('') || '<div class="tiny mut">No photos uploaded yet.</div>'}</div>
+    ${exemption ? `<div class="evidence-card"><b>Manager-approved exemption</b><div>${esc(exemption.reason)}</div><div class="tiny mut">${esc(uname(exemption.approved_by))} · ${esc(fmtDT(exemption.approved_at))}</div>
+      ${editable && isMgr() ? `<button class="btn btn-sm" data-photo-revoke ${disabled}>Revoke exemption</button>` : ''}</div>` : ''}
+    ${editable && isMgr() && task.requiresPhoto && !exemption ? `<div class="field"><label for="photo-exemption-reason" class="label">Manager exemption reason</label>
+      <textarea id="photo-exemption-reason" class="textarea" rows="2" maxlength="1000" placeholder="Explain why this task can be completed without a photo" ${disabled}>${esc(state.reasonDraft || '')}</textarea>
+      <button class="btn" data-photo-approve ${disabled}>Approve exemption</button></div>` : ''}
+    ${evidenceSnapshotHtml(task.evidenceSubmissions || [])}`;
+  const done = root.querySelector('[data-photo-done]');
+  done.hidden = !editable || task.status === 'done';
+  done.disabled = !!state.busy || !!state.retry || !taskPhotoSatisfied(task, list);
+  root.querySelector('[data-photo-close]').textContent = state.busy ? 'Close (upload may still finish)' : 'Close';
+  root.querySelector('[data-photo-refresh]').onclick = () => photoPanelAction(state, () => refreshPhotoPanel(state), false);
+  root.querySelector('#photo-exemption-reason')?.addEventListener('input', e => { state.reasonDraft = e.target.value; });
+  root.querySelector('[data-photo-camera]')?.addEventListener('click', () => root.querySelector('[data-photo-camera-input]').click());
+  root.querySelector('[data-photo-gallery]')?.addEventListener('click', () => root.querySelector('[data-photo-gallery-input]').click());
+  root.querySelectorAll('input[type=file]').forEach(input => { input.onchange = () => uploadTaskPhotos(state, [...input.files]); });
+  root.querySelector('[data-photo-retry]')?.addEventListener('click', () => photoPanelAction(state, () => sendTaskPhoto(state)));
+  root.querySelector('[data-photo-discard]')?.addEventListener('click', () => photoPanelAction(state, async () => {
+    const id = state.retry.id;
+    await refreshPhotoPanel(state);
+    if (!photoPanelCurrent(state)) return;
+    if (state.task.evidence.some(row => row.id === id)) {
+      const result = await DB.rpc('remove_task_evidence', { p_evidence_id: id });
+      if (result.error) throw new Error('The reservation could not be discarded. Refresh and remove it from the photo list if present.');
+    }
+    state.retry = null;
+  }));
+  root.querySelectorAll('[data-photo-remove]').forEach(button => { button.onclick = () => {
+    if (state.removeId !== button.dataset.photoRemove) { state.removeId = button.dataset.photoRemove; renderPhotoPanel(state); return; }
+    photoPanelAction(state, async () => {
+      const result = await DB.rpc('remove_task_evidence', { p_evidence_id: state.removeId });
+      if (result.error) throw result.error;
+      if (state.retry?.id === state.removeId) state.retry = null;
+      state.removeId = null;
+    });
+  }; });
+  root.querySelectorAll('[data-photo-view]').forEach(button => { button.onclick = () => photoPanelAction(state, async () => {
+    const id = button.dataset.photoView;
+    if (state.urls[id]) { URL.revokeObjectURL(state.urls[id]); delete state.urls[id]; return; }
+    const row = validTaskPhotos(state.task).find(row => row.id === id);
+    if (!row) throw new Error('This photo has expired or is no longer available.');
+    const result = await DB.storage.from('task-evidence').download(row.object_path);
+    if (result.error) throw new Error('Photo unavailable. Your access may have changed, or the file may have expired.');
+    if (photoPanelCurrent(state) && Date.parse(row.expires_at) > Date.now()) state.urls[id] = URL.createObjectURL(result.data);
+  }, false); });
+  root.querySelector('[data-photo-approve]')?.addEventListener('click', () => {
+    const reason = root.querySelector('#photo-exemption-reason').value.trim();
+    if (!reason) { toast('An exemption needs a reason.', 'warn'); return; }
+    photoPanelAction(state, async () => {
+      const result = await DB.rpc('approve_task_photo_exemption', { p_task_id: task.id, p_reason: reason });
+      if (result.error) throw result.error;
+      state.reasonDraft = '';
+    });
+  });
+  root.querySelector('[data-photo-revoke]')?.addEventListener('click', () => photoPanelAction(state, async () => {
+    const result = await DB.rpc('revoke_task_photo_exemption', { p_exemption_id: exemption.id });
+    if (result.error) throw result.error;
+  }));
+  done.onclick = () => photoPanelAction(state, async () => {
+    await refreshPhotoPanel(state);
+    if (!photoPanelCurrent(state) || state.list.submitted || !taskPhotoSatisfied(state.task, state.list)) throw new Error('The shift or its photo evidence changed. Review it before marking Done.');
+    const changed = { ...state.task, status: 'done', doneBy: state.userId, doneAt: new Date().toISOString(), reason: '' };
+    await persistRemoteTask(changed, state.task);
+    state.message = 'Task marked Done.';
+  });
+}
+
+async function photoPanelAction(state, action, refresh = true) {
+  if (!photoPanelCurrent(state) || state.busy) return;
+  state.busy = true;
+  renderPhotoPanel(state);
+  try {
+    await action();
+    if (refresh && photoPanelCurrent(state)) await refreshPhotoPanel(state);
+  } catch (error) {
+    if (photoPanelCurrent(state)) {
+      state.message = error.message || 'The change was not confirmed. Refresh evidence and retry.';
+      refreshSupabaseAccessAfterDeniedOperation(error, 'photo-evidence');
+      toast(state.message, 'warn');
+      if (refresh) { try { await refreshPhotoPanel(state); } catch (_) { state.error = 'Could not refresh evidence. Try again before making changes.'; } }
+      else state.error = state.message;
+      if (state.error) {
+        Object.values(state.urls).forEach(URL.revokeObjectURL);
+        state.urls = {};
+      }
+    }
+  } finally {
+    state.busy = false;
+    renderPhotoPanel(state);
+  }
+}
+
+async function prepareTaskPhoto(file) {
+  if (!file.size || file.size > 30 * 1024 * 1024) throw new Error('Choose a photo smaller than 30 MiB.');
+  if (!/^(image\/(jpeg|png|webp|heic|heif))$/i.test(file.type)) throw new Error('Choose JPEG, PNG, WebP or a HEIC photo your browser can open.');
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const text = (start, count) => String.fromCharCode(...bytes.subarray(start, start + count));
+  const view = new DataView(bytes.buffer);
+  if (text(0, 3) === 'GIF' || text(0, 4) === '<svg') throw new Error('Choose a still JPEG, PNG or WebP photo.');
+  if (text(1, 3) === 'PNG') {
+    for (let offset = 8; offset + 12 <= bytes.length;) {
+      if (text(offset + 4, 4) === 'acTL') throw new Error('Animated photos are not supported.');
+      offset += view.getUint32(offset) + 12;
+    }
+  } else if (text(0, 4) === 'RIFF' && text(8, 4) === 'WEBP') {
+    for (let offset = 12; offset + 8 <= bytes.length;) {
+      const type = text(offset, 4), size = view.getUint32(offset + 4, true);
+      if (type === 'ANIM' || type === 'ANMF' || (type === 'VP8X' && (bytes[offset + 8] & 2))) throw new Error('Animated photos are not supported.');
+      offset += 8 + size + size % 2;
+    }
+  }
+  const url = URL.createObjectURL(file);
+  const image = new Image();
+  try {
+    image.src = url;
+    try { await image.decode(); } catch (_) { throw new Error('This photo format cannot be opened here. Convert it to JPEG or choose another photo.'); }
+    const scale = Math.min(1, 1600 / Math.max(image.naturalWidth, image.naturalHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.82));
+    canvas.width = canvas.height = 1;
+    if (!blob || blob.size > 5 * 1024 * 1024) throw new Error('The prepared photo is too large. Choose a smaller photo.');
+    return blob;
+  } finally { URL.revokeObjectURL(url); image.src = ''; }
+}
+
+async function sendTaskPhoto(state) {
+  if (!photoPanelCurrent(state) || !state.retry) return;
+  const { data, error } = await DB.auth.getSession();
+  if (error || !data?.session?.access_token || data.session.user.id !== state.userId) throw new Error('Sign in again before uploading.');
+  if (!photoPanelCurrent(state)) return;
+  state.controller = new AbortController();
+  const response = await fetch(`${SUPABASE_URL}/functions/v1/upload-task-evidence?task_id=${encodeURIComponent(state.task.id)}&evidence_id=${state.retry.id}`, {
+    method: 'POST', headers: { apikey: SUPABASE_PUBLISHABLE_KEY, Authorization: `Bearer ${data.session.access_token}`, 'Content-Type': 'image/jpeg' },
+    body: state.retry.blob, signal: state.controller.signal
+  });
+  const result = await response.json();
+  if (!response.ok || !result.ok || result.evidence?.state !== 'ready') {
+    if (['invalid_photo', 'reservation_expired'].includes(result.code)) state.retry = null;
+    throw new Error(result.error || 'Upload was not confirmed. Retry the same photo.');
+  }
+  state.retry = null;
+  state.message = 'Photo verified and saved privately.';
+}
+
+async function uploadTaskPhotos(state, files) {
+  if (!files.length || state.retry) return;
+  const live = (state.task.evidence || []).filter(row => row.state === 'ready' && Date.parse(row.expires_at) > Date.now()
+    || row.state === 'pending' && Date.parse(row.upload_deadline) > Date.now()).length;
+  if (files.length + live > 3) { toast('Choose no more than three photos per task, including existing uploads.', 'warn'); return; }
+  await photoPanelAction(state, async () => {
+    for (let i = 0; i < files.length; i++) {
+      if (!photoPanelCurrent(state)) return;
+      state.message = `Preparing photo ${i + 1} of ${files.length}…`; renderPhotoPanel(state);
+      const blob = await prepareTaskPhoto(files[i]);
+      if (!photoPanelCurrent(state)) return;
+      state.retry = { id: crypto.randomUUID(), blob };
+      state.message = `Uploading photo ${i + 1} of ${files.length}…`; renderPhotoPanel(state);
+      await sendTaskPhoto(state);
+    }
+  });
+}
+
+function openTaskEvidence(lk, taskId, date, snapshot = null, linkedDay = null, linkRoute = null) {
+  if (!isSupabaseMode() || !AUTH.profile?.active) return;
+  const day = linkedDay || (date ? SUPABASE_HISTORY.days.find(day => day.date === date) : loadedSupabaseDay());
+  const list = day?.lists[lk];
+  const task = snapshot ? { id: snapshot.task_id, title: snapshot.task_title, status: snapshot.task_status, requiresPhoto: snapshot.requires_photo, evidence: [], evidenceSubmissions: [snapshot] } : list?.tasks.find(task => task.id === taskId);
+  if (!task || !list) return;
+  const state = { userId: AUTH.profile.id, venueId: V().realId, date: day.date, lk, task, list, snapshot, linkRoute,
+    readOnly: !!date || !!snapshot, urls: {}, retry: null, busy: false, message: '', error: 'Loading evidence…' };
+  openModal(`<div class="modal-head"><div><div class="modal-title">Photo evidence</div><div class="modal-sub">${esc(task.title)} · ${esc(LIST_META[lk].full)} · ${esc(day.date)}</div></div></div>
+    <div class="modal-body stack" data-photo-content></div><div class="modal-foot">${linkRoute ? '<button class="btn" data-photo-back>Back to shift evidence</button>' : ''}<button class="btn" data-photo-close>Close</button><button class="btn btn-primary" data-photo-done>Mark Done</button></div>`, {
+    wide: true, onClose: disposePhotoPanel,
+    after(root) {
+      root.querySelector('[data-photo-close]').onclick = closeModal;
+      root.querySelector('[data-photo-back]')?.addEventListener('click', () => { closeModal(); EVIDENCE_LINK_HANDLED = ''; openEvidenceLinkFromLocation(); });
+    }
+  });
+  PHOTO_PANEL = state;
+  state.timer = setInterval(() => {
+    if (!photoPanelCurrent(state)) { if (PHOTO_PANEL === state) closeModal(); return; }
+    let expired = false;
+    for (const id of Object.keys(state.urls)) if (!validTaskPhotos(state.task).some(row => row.id === id)) {
+      URL.revokeObjectURL(state.urls[id]); delete state.urls[id]; expired = true;
+    }
+    if (expired) renderPhotoPanel(state);
+    const done = $('#modal-root [data-photo-done]');
+    if (done) done.disabled = !!state.busy || !!state.error || !!state.retry || !taskPhotoSatisfied(state.task, state.list);
+  }, 1000);
+  photoPanelAction(state, () => refreshPhotoPanel(state), false);
+}
+
+function openShiftEvidenceAudit(lk, date) {
+  const day = date ? SUPABASE_HISTORY.days.find(day => day.date === date) : loadedSupabaseDay();
+  const list = day?.lists[lk];
+  if (!isMgr() || !list) return;
+  const rows = (list.evidenceSubmissions || []).filter(row => row.requires_photo || row.exemption_id || row.evidence?.length)
+    .sort((a,b) => b.notification_revision - a.notification_revision);
+  openModal(`<div class="modal-head"><div><div class="modal-title">Evidence audit</div><div class="modal-sub">${esc(day.date)} · ${esc(LIST_META[lk].full)} · includes earlier submissions and reset tasks</div></div></div>
+    <div class="modal-body stack">${rows.map((row,i) => `<div class="evidence-card"><b>${esc(row.task_title)}</b><div class="tiny mut">Revision ${row.notification_revision} · ${esc(fmtDT(row.submitted_at))}</div><div class="tiny">${row.evidence.length} photo(s) at submission${row.exemption_id ? ' · exemption recorded' : ''}</div><button class="btn btn-sm" data-audit-index="${i}">View record</button></div>`).join('') || '<div>No photo evidence recorded in submitted revisions.</div>'}</div>
+    <div class="modal-foot"><button class="btn" data-audit-close>Close</button></div>`, { wide: true, after(root) {
+      root.querySelector('[data-audit-close]').onclick = closeModal;
+      root.querySelectorAll('[data-audit-index]').forEach(button => { button.onclick = () => openTaskEvidence(lk, rows[button.dataset.auditIndex].task_id, date, rows[button.dataset.auditIndex]); });
+    } });
+}
+
+function parseEvidenceLink(hash) {
+  if (!hash.startsWith('#evidence?')) return null;
+  const params = new URLSearchParams(hash.slice(10));
+  const allowed = ['venue', 'date', 'shift', 'checklist', 'revision'];
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const route = Object.fromEntries(params);
+  const date = new Date(`${route.date}T12:00:00Z`);
+  if ([...params.keys()].some(key => !allowed.includes(key) || params.getAll(key).length !== 1)
+    || !uuid.test(route.venue || '') || !uuid.test(route.checklist || '')
+    || !/^\d{4}-\d{2}-\d{2}$/.test(route.date || '') || !Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== route.date
+    || !['open', 'close'].includes(route.shift)
+    || (params.has('revision') && (!/^\d+$/.test(route.revision) || !Number.isSafeInteger(Number(route.revision)) || Number(route.revision) > 2147483647))) {
+    throw new Error('This evidence link is invalid. Open a new link from the notification.');
+  }
+  route.revision = params.has('revision') ? Number(route.revision) : null;
+  return route;
+}
+
+async function loadLinkedEvidenceDay(route) {
+  const result = await DB.from('daily_checklists').select(REMOTE_CHECKLIST_SELECT)
+    .eq('id', route.checklist).eq('venue_id', route.venue).eq('work_date', route.date).eq('list_type', route.shift).maybeSingle();
+  if (result.error) throw new Error('Evidence could not be loaded. Please try the link again.');
+  const evidence = await loadPhotoEvidence([route.checklist]);
+  const snapshots = evidence.submissions.filter(row => row.venue_id === route.venue && row.work_date === route.date
+    && row.list_type === route.shift && row.notification_revision === route.revision);
+  if (route.revision !== null) {
+    if (!snapshots.length && !(result.data?.submitted && Number(result.data.notification_revision || 0) === route.revision)) {
+      throw new Error('This submission is unavailable, or your account does not have access to it.');
+    }
+    return { date: route.date, lists: { [route.shift]: { id: route.checklist, tasks: [], submitted: true,
+      notificationRevision: route.revision, evidenceSubmissions: snapshots } } };
+  }
+  if (!result.data) throw new Error('This shift is unavailable, or your account does not have access to it.');
+  const tasks = [];
+  for (let offset = 0; ; offset += 500) {
+    const page = await DB.from('daily_tasks').select(REMOTE_TASK_SELECT).eq('checklist_id', route.checklist)
+      .order('sort_order').order('id').range(offset, offset + 499);
+    if (page.error) throw new Error('Shift tasks could not be loaded. Please try the link again.');
+    tasks.push(...(page.data || []));
+    if ((page.data || []).length < 500) break;
+  }
+  return attachPhotoEvidence(mapSupabaseHistoryDays([result.data], tasks, [])[0], evidence);
+}
+
+function disposeEvidenceLinkView() {
+  clearInterval(EVIDENCE_LINK_VIEW?.timer);
+  EVIDENCE_LINK_VIEW = null;
+}
+
+function evidenceLinkViewCurrent(view) {
+  return EVIDENCE_LINK_VIEW === view && AUTH.session?.user.id === view.userId && AUTH.profile?.id === view.userId
+    && AUTH.profile.active && SUPABASE_ACCESS.verified !== false && AUTH.selectedVenueId === view.venueId && location.hash === view.hash;
+}
+
+async function openEvidenceLinkFromLocation() {
+  const hash = location.hash;
+  if (!isSupabaseMode() || !AUTH.session || !AUTH.profile?.active || !S || SUPABASE_ACCESS.verified === false
+    || !hash.startsWith('#evidence?') || EVIDENCE_LINK_HANDLED === hash) return;
+  EVIDENCE_LINK_HANDLED = hash;
+  const view = { userId: AUTH.profile.id, venueId: AUTH.selectedVenueId, hash };
+  openModal(`<div class="modal-head"><div class="modal-title">Shift evidence</div></div><div class="modal-body stack" data-linked-evidence role="status">Loading evidence…</div>
+    <div class="modal-foot"><button class="btn" data-linked-close>Close</button></div>`, { wide: true, onClose: disposeEvidenceLinkView,
+    after(root) { root.querySelector('[data-linked-close]').onclick = closeModal; } });
+  EVIDENCE_LINK_VIEW = view;
+  view.timer = setInterval(() => { if (!evidenceLinkViewCurrent(view) && EVIDENCE_LINK_VIEW === view) closeModal(); }, 1000);
+  try {
+    const route = parseEvidenceLink(hash);
+    const context = AUTH.venueContexts.find(context => context.realId === route.venue);
+    if (!context) throw new Error('This venue is unavailable to your account. Sign in with an account that has access.');
+    const day = await loadLinkedEvidenceDay(route);
+    if (!evidenceLinkViewCurrent(view)) return;
+    AUTH.selectedOrganisationId = context.organisationId;
+    selectVenue(context.realId);
+    view.venueId = context.realId;
+    try { localStorage.setItem(`dailyops.supabase.organisation-selection.${view.userId}`, context.organisationId); } catch (_) {}
+    R.tab = 'today'; R.list = route.shift;
+    render();
+    syncSupabaseRealtimeForCurrentView();
+    const list = day.lists[route.shift];
+    const snapshots = route.revision !== null;
+    const rows = snapshots ? list.evidenceSubmissions.filter(row => row.requires_photo || row.exemption_id || row.evidence?.length)
+      : list.tasks.filter(task => task.requiresPhoto || task.evidence?.length || task.exemptions?.length);
+    $('#modal-root [data-linked-evidence]').innerHTML = `<div><b>${esc(context.name)}</b><div class="tiny mut">${esc(route.date)} · ${esc(LIST_META[route.shift].full)} · ${snapshots ? 'submission revision ' + route.revision : 'current evidence (may change)'}</div></div>
+      <div class="tiny mut">Read-only. Photos are private and may no longer be available after expiry or removal; submission records are retained.</div>
+      ${rows.map((row, i) => `<div class="evidence-card"><b>${esc(snapshots ? row.task_title : row.title)}</b><div class="tiny">${snapshots ? row.evidence.length + ' photo(s) recorded at submission' : validTaskPhotos(row).length + ' photo(s) available'}${row.exemption_id ? ' · manager exemption recorded' : ''}</div><button class="btn btn-sm" data-linked-task="${i}">View evidence</button></div>`).join('') || '<div>No photo evidence recorded for this shift revision.</div>'}`;
+    $('#modal-root').querySelectorAll('[data-linked-task]').forEach(button => { button.onclick = () => {
+      if (!evidenceLinkViewCurrent(view)) { closeModal(); return; }
+      const row = rows[button.dataset.linkedTask];
+      openTaskEvidence(route.shift, snapshots ? row.task_id : row.id, route.date, snapshots ? row : null, day, route);
+    }; });
+  } catch (error) {
+    if (!evidenceLinkViewCurrent(view)) return;
+    $('#modal-root [data-linked-evidence]').textContent = error.message || 'Evidence could not be loaded.';
+  }
+}
+
+window.addEventListener('hashchange', () => {
+  EVIDENCE_LINK_HANDLED = '';
+  if (PHOTO_PANEL || EVIDENCE_LINK_VIEW) closeModal();
+  openEvidenceLinkFromLocation();
+});
 
 async function persistRemoteTask(task, previous) {
   let payload = {
@@ -3679,6 +4149,8 @@ function toast(msg, tone) {
 let modalOnClose = null;
 let modalOnRequestClose = null;
 function openModal(html, opts) {
+  if (PHOTO_PANEL) disposePhotoPanel();
+  if (EVIDENCE_LINK_VIEW) disposeEvidenceLinkView();
   const o = opts || {};
   const root = $('#modal-root');
   root.innerHTML = `<div class="scrim" data-close="1"></div>
@@ -3854,6 +4326,7 @@ function taskRowHtml(t, o) {
   if (done && t.doneBy) meta.push(`<span class="row" style="gap:5px">${avatarHtml(t.doneBy, 'sm')}${esc(uname(t.doneBy).split(' ')[0])} · ${esc(fmtTime(t.doneAt))}</span>`);
   if (flag) meta.push(`<span class="chip ${REASONS[t.status].chip}">${esc(REASONS[t.status].label)}</span>`);
   if (t.critical) meta.push(`<span class="chip chip-accent">Critical</span>`);
+  if (isSupabaseMode() && t.requiresPhoto) meta.push(`<span class="chip ${validTaskPhotos(t).length ? 'chip-accent' : ''}">Photo required</span>`);
   if (t.source === 'adhoc') meta.push(`<span class="chip">${opt.historical ? 'One-off' : 'Added today'}${t.addedBy ? ' · ' + esc(uname(t.addedBy).split(' ')[0]) : ''}</span>`);
   else if (opt.historical) meta.push('<span class="chip">Routine</span>');
 
@@ -3862,7 +4335,8 @@ function taskRowHtml(t, o) {
   const metaAction = canEditMeta
     ? `<button type="button" class="btn btn-sm btn-ghost task-meta-action" data-act="task-meta" data-list="${opt.listKey}" data-id="${t.id}" title="${hasMeta ? 'Edit note or reason' : 'Add note or reason'}" aria-label="${hasMeta ? 'Edit note or reason' : 'Add note or reason'} for ${esc(t.title)}">${ic('note', 14)}<span>${hasMeta ? 'Edit note' : 'Note'}</span></button>`
     : '';
-  const side = [metaAction, opt.side || ''].filter(Boolean).join('');
+  const photoAction = isSupabaseMode() ? `<button type="button" class="btn btn-sm btn-ghost" data-act="task-evidence" data-list="${opt.listKey}" data-id="${t.id}" data-date="${opt.date || ''}" aria-label="Photo evidence for ${esc(t.title)}">Photos${validTaskPhotos(t).length ? ' · ' + validTaskPhotos(t).length : ''}</button>` : '';
+  const side = `<span class="task-actions">${[photoAction, metaAction, opt.side || ''].filter(Boolean).join('')}</span>`;
 
   return `<div class="${cls}"><${tag} class="task-toggle" ${opt.locked ? '' : `data-task="${t.id}" data-list="${opt.listKey}" type="button" aria-pressed="${done}"`}>
     ${t.critical ? '<span class="task-critical-mark"></span>' : ''}
@@ -3987,6 +4461,8 @@ function renderChrome() {
 }
 
 function render() {
+  if (PHOTO_PANEL && !photoPanelCurrent(PHOTO_PANEL)) closeModal();
+  if (EVIDENCE_LINK_VIEW && !evidenceLinkViewCurrent(EVIDENCE_LINK_VIEW)) closeModal();
   ensureCurrentTabAllowed();
   const content = $('#content');
   const previousScrollTop = content ? content.scrollTop : null;
@@ -4262,6 +4738,7 @@ function pageManagerToday() {
       <div class="tasklist">${rows || `<div class="empty">No tasks on this shift.</div>`}</div>
         <div class="card-foot row wrap" style="gap:8px">
           <button class="btn btn-sm" data-act="review" data-list="${lk}">${ic('note', 15)} Review notes &amp; reasons</button>
+          ${isSupabaseMode() ? `<button class="btn btn-sm" data-act="evidence-audit" data-list="${lk}">Evidence audit</button>` : ''}
           <button class="btn btn-sm" data-act="add-task" data-list="${lk}" ${L.submitted ? 'disabled' : ''}>${ic('plus', 15)} Add a one-off task</button>
           <button class="btn btn-sm btn-ghost" data-act="sync-tpl" data-list="${lk}" ${L.submitted ? 'disabled' : ''}>${ic('plus', 15)} Add new routine tasks to today</button>
           ${L.submitted ? `<button class="btn btn-sm btn-ghost" data-act="reopen" data-list="${lk}">Reopen</button>` : ''}
@@ -4319,6 +4796,7 @@ function pageTemplates() {
               ${x.detail ? `<span class="task-detail" style="display:block">${esc(x.detail)}</span>` : ''}
               <span class="task-meta">
                 <button class="chip ${x.critical ? 'chip-accent' : ''}" data-act="tpl-crit" data-list="${k}" data-id="${x.id}" style="cursor:pointer">${x.critical ? 'Critical' : 'Mark critical'}</button>
+                ${isSupabaseMode() && x.requiresPhoto ? '<span class="chip chip-accent">Photo required</span>' : ''}
               </span>
             </span>
             <span class="task-side">
@@ -5210,6 +5688,37 @@ function pageAlerts() {
 /* ==========================================================================
    MANAGER · SETTINGS
    ========================================================================== */
+function openPhotoRetention(organisationId) {
+  const org = managedOrganisations().find(org => org.id === organisationId);
+  if (!isSupabaseMode() || !org) return;
+  let saving = false;
+  openModal(`<div class="modal-head"><div><div class="modal-title">Photo retention</div><div class="modal-sub">${esc(org.name)} · applies to every venue in this organisation</div></div></div>
+    <div class="modal-body stack"><div class="field"><label class="label" for="photo-retention-days">Keep new photos for (days)</label><input class="input" id="photo-retention-days" type="number" min="1" max="365" step="1" value="${Number(org.photo_retention_days || 30)}"></div>
+    <div class="tiny mut">Default: 30 days. Allowed: 1–365 days. Changes apply to new verified uploads only; existing expiry dates are unchanged. Expired photos become unavailable and scheduled cleanup removes the files. Audit records remain.</div></div>
+    <div class="modal-foot"><button class="btn" data-retention-close>Cancel</button><button class="btn btn-primary" data-retention-save>Save retention</button></div>`, {
+    onRequestClose() { if (!saving) closeModal(); }, after(root) {
+      root.querySelector('[data-retention-close]').onclick = requestModalClose;
+      root.querySelector('[data-retention-save]').onclick = async () => {
+        if (saving) return;
+        const days = Number(root.querySelector('#photo-retention-days').value);
+        if (!Number.isInteger(days) || days < 1 || days > 365) { toast('Enter a whole number from 1 to 365.', 'warn'); return; }
+        saving = true;
+        root.querySelectorAll('button,input').forEach(el => { el.disabled = true; });
+        try {
+          const result = await DB.from('organisations').update({ photo_retention_days: days }).eq('id', org.id).select('id,photo_retention_days').single();
+          if (result.error || !result.data) throw result.error || new Error('Retention was not saved.');
+          Object.assign(org, result.data);
+          closeModal(); render(); toast('Retention saved for new uploads.', 'ok');
+        } catch (error) {
+          refreshSupabaseAccessAfterDeniedOperation(error, 'photo-retention');
+          toast('Could not save retention. Check your organisation access and retry.', 'warn');
+          root.querySelectorAll('button,input').forEach(el => { el.disabled = false; });
+        } finally { saving = false; }
+      };
+    }
+  });
+}
+
 function organisationCardsHtml() {
   const organisations = managedOrganisations();
   return `<div class="card">
@@ -5217,7 +5726,8 @@ function organisationCardsHtml() {
       ${isPlatformAdmin() ? '<button class="btn btn-sm btn-primary" style="margin-left:auto" data-act="add-organisation">Add organisation</button>' : ''}</div>
     <div class="card-body">${organisations.map(org => {
       const venues = AUTH.venueContexts.filter(context => context.organisationId === org.id);
-      return `<div class="venue-row"><div style="flex:1"><b>${esc(org.name)}</b><div class="tiny mut">${plural(venues.length, 'venue')}</div></div>
+      return `<div class="venue-row organisation-row"><div class="organisation-summary"><b>${esc(org.name)}</b><div class="tiny mut">${plural(venues.length, 'venue')} · photos kept ${Number(org.photo_retention_days || 30)} days</div></div>
+        <button class="btn btn-sm" data-act="photo-retention" data-organisation="${org.id}">Photo retention</button>
         <button class="btn btn-sm" data-act="add-venue" data-organisation="${org.id}">${venues.length ? 'Add venue' : 'Add first venue'}</button>
         <button class="btn btn-sm btn-ghost" data-act="organisation-team" data-organisation="${org.id}">Team</button></div>`;
     }).join('') || '<div class="empty">Create your first organisation to start setting up venues.</div>'}</div></div>`;
@@ -5498,6 +6008,13 @@ function openReview(lk) {
   const st = listStats(L);
   const pending = L.tasks.filter(t => t.status !== 'done');
   const done = L.tasks.filter(t => t.status === 'done');
+  const exemptTasks = isSupabaseMode() ? done.filter(task => task.requiresPhoto && !validTaskPhotos(task).length && activePhotoExemption(task, L)) : [];
+  const missingPhotos = isSupabaseMode() ? done.filter(task => !taskPhotoSatisfied(task, L)) : [];
+  const evidenceHtml = isSupabaseMode() ? `${missingPhotos.length ? `<div class="banner banner-warn">${missingPhotos.length} completed task(s) need a valid photo or current manager exemption. Keep working and open Photos to resolve this before submitting.</div>` : ''}
+    ${exemptTasks.length ? `<div class="evidence-card"><b>Acknowledge manager exemptions</b><div class="tiny mut">Select each exemption being used for this submission. Reopening a shift requires a new approval.</div>${exemptTasks.map(task => {
+      const exemption = activePhotoExemption(task, L);
+      return `<label class="evidence-check"><input type="checkbox" data-exemption-ack="${exemption.id}"><span><b>${esc(task.title)}</b><br>${esc(exemption.reason)}<br><span class="tiny mut">Approved by ${esc(uname(exemption.approved_by))} · ${esc(fmtDT(exemption.approved_at))}</span></span></label>`;
+    }).join('')}</div>` : ''}` : '';
   const draft = {};
   pending.forEach(t => { draft[t.id] = { status: t.status === 'pending' ? '' : t.status, reason: t.reason || '' }; });
 
@@ -5542,7 +6059,7 @@ function openReview(lk) {
       <div class="modal-sub">${st.done} of ${st.total} ticked off · ${esc(fmtDate(day.date))}</div>
     </div>
     <button class="iconbtn" data-x="close" aria-label="Close">${ic('x', 18)}</button></div>
-    <div class="modal-body">${pendingHtml}${notesHtml}</div>
+    <div class="modal-body">${evidenceHtml}${pendingHtml}${notesHtml}</div>
     <div class="modal-foot">
       <button class="btn" data-x="close">Keep working</button>
       <button class="btn btn-primary" data-x="submit">${ic('send', 16)} ${isMgr() ? (L.submitted ? 'Save changes' : 'Submit shift') : 'Send to manager'}</button>
@@ -5571,6 +6088,11 @@ function openReview(lk) {
           if (REASONS[d.status].needsDetail && !d.reason.trim()) { toast('A blocked task needs a short explanation', 'warn'); root.querySelector(`[data-detail="${t.id}"]`).focus(); return; }
         }
         if (isSupabaseMode()) {
+          if (done.some(task => !taskPhotoSatisfied(task, L))) { toast('A completed task needs a photo or current manager exemption. Keep working to resolve it.', 'warn'); return; }
+          const exemptionIds = done.filter(task => task.requiresPhoto && !validTaskPhotos(task).length).map(task => activePhotoExemption(task, L)?.id);
+          if (exemptionIds.some(id => !root.querySelector(`[data-exemption-ack="${id}"]`)?.checked)) {
+            toast('Acknowledge each manager exemption before submitting.', 'warn'); return;
+          }
           const changes = L.tasks.flatMap(task => {
             const original = originalTasks.get(task.id);
             const values = task.status === 'done'
@@ -5584,7 +6106,7 @@ function openReview(lk) {
           root.querySelectorAll('button,input,textarea').forEach(el => { el.disabled = true; });
           try {
             const result = await DB.rpc('submit_daily_checklist', {
-              p_checklist_id: L.id, p_notification_revision: revision, p_changes: changes
+              p_checklist_id: L.id, p_notification_revision: revision, p_changes: changes, p_exemption_ids: exemptionIds
             });
             if (result.error) throw result.error;
             await loadSupabaseToday();
@@ -5596,7 +6118,7 @@ function openReview(lk) {
             refreshSupabaseAccessAfterDeniedOperation(error, 'shift-submit');
             await loadSupabaseToday();
             render();
-            toast('Submission was not confirmed. Your draft is still open. If a teammate changed tasks, close and review again. Check migration 026 is applied.', 'warn');
+            toast('Submission was not confirmed. Your draft is still open. Tasks, photo evidence or exemptions may have changed; close and review again.', 'warn');
           } finally {
             submitting = false;
             root.querySelectorAll('button,input,textarea').forEach(el => { el.disabled = false; });
@@ -5638,11 +6160,14 @@ function openAddTask(lk) {
         <div><div style="font-weight:600;font-size:14px">Critical</div><div class="tiny mut">Flagged in the report if it's missed</div></div>
         <button class="switch" id="nt-crit"></button>
       </div>
+      ${isSupabaseMode() ? '<div class="row-b"><div><div class="label">Photo required</div><div class="tiny mut">Required before Done, unless a manager approves an exemption.</div></div><button class="switch" id="nt-photo" aria-label="Photo required"></button></div>' : ''}
     </div>
     <div class="modal-foot"><button class="btn" data-x="close">Cancel</button>
       <button class="btn btn-primary" data-x="save">Add task</button></div>`, {
     after(root) {
       let list = lk, crit = false;
+      let requiresPhoto = false;
+      root.querySelector('#nt-photo')?.addEventListener('click', e => { requiresPhoto = !requiresPhoto; e.currentTarget.classList.toggle('is-on', requiresPhoto); });
       root.querySelectorAll('[data-x=close]').forEach(b => b.onclick = closeModal);
       root.querySelectorAll('#nt-list button').forEach(b => b.onclick = () => {
         list = b.dataset.k;
@@ -5666,7 +6191,7 @@ function openAddTask(lk) {
         try {
           if (isSupabaseMode()) {
             const task = await insertRemoteDailyTask(target, {
-              sortOrder: nextRemoteSortOrder(target), title, detail, critical: crit, source: 'adhoc'
+              sortOrder: nextRemoteSortOrder(target), title, detail, critical: crit, source: 'adhoc', requiresPhoto
             });
             target.tasks.push(task);
           } else {
@@ -5708,7 +6233,8 @@ async function insertRemoteTemplateTask(listType, fields, venueId) {
     sort_order: fields.sortOrder,
     title: fields.title,
     detail: fields.detail || null,
-    critical: !!fields.critical
+    critical: !!fields.critical,
+    requires_photo: !!fields.requiresPhoto
   });
   if (error) throw error;
 }
@@ -5753,6 +6279,7 @@ function mutateRemoteTemplate(lockKey, details, action, successMessage) {
 }
 
 function openTemplateEditor(lk, id) {
+  if (!isMgr()) return;
   const tpl = TPL()[lk];
   const t = id ? tpl.find(x => x.id === id) : null;
   openModal(`
@@ -5769,11 +6296,14 @@ function openTemplateEditor(lk, id) {
         <div><div style="font-weight:600;font-size:14px">Critical</div><div class="tiny mut">Called out separately when it's missed</div></div>
         <button class="switch ${t && t.critical ? 'is-on' : ''}" id="tt-crit"></button>
       </div>
+      ${isSupabaseMode() ? `<div class="row-b"><div><div class="label">Photo required</div><div class="tiny mut">Applies to new daily tasks only. Existing tasks keep their requirement.</div></div><button class="switch ${t?.requiresPhoto ? 'is-on' : ''}" id="tt-photo" aria-label="Photo required"></button></div>` : ''}
     </div>
     <div class="modal-foot"><button class="btn" data-x="close">Cancel</button>
       <button class="btn btn-primary" data-x="save">${t ? 'Save changes' : 'Add to template'}</button></div>`, {
     after(root) {
       let crit = !!(t && t.critical);
+      let requiresPhoto = !!t?.requiresPhoto;
+      root.querySelector('#tt-photo')?.addEventListener('click', e => { requiresPhoto = !requiresPhoto; e.currentTarget.classList.toggle('is-on', requiresPhoto); });
       root.querySelectorAll('[data-x=close]').forEach(b => b.onclick = closeModal);
       const sw = root.querySelector('#tt-crit');
       sw.onclick = () => { crit = !crit; sw.classList.toggle('is-on', crit); };
@@ -5787,13 +6317,13 @@ function openTemplateEditor(lk, id) {
           saveButton.disabled = true;
           try {
             if (t) {
-              await updateRemoteTemplateTask(t.id, { title, detail: detail || null, critical: crit });
+              await updateRemoteTemplateTask(t.id, { title, detail: detail || null, critical: crit, requires_photo: requiresPhoto });
             } else {
               await insertRemoteTemplateTask(lk, {
                 sortOrder: tpl.length,
                 title,
                 detail,
-                critical: crit
+                critical: crit, requiresPhoto
               });
             }
             await refreshRemoteTemplates();
@@ -6686,7 +7216,7 @@ function openCopyTemplate() {
                   sortOrder: nextOrder++,
                   title: task.title,
                   detail: task.detail,
-                  critical: task.critical
+                  critical: task.critical, requiresPhoto: task.requiresPhoto
                 }, V().id);
                 have.add(key);
                 copied++;
@@ -6801,7 +7331,8 @@ function openSupabaseHistoryDay(key) {
         <div style="flex:1"><div class="h3">${LIST_META[lk].full}</div>
           <div class="tiny mut">${L.submitted ? `Submitted by ${esc(uname(L.submittedBy))} · ${esc(fmtDT(L.submittedAt))}` : 'Not submitted'}</div>
           <div style="margin-top:6px">${avatarStack(day.roster[lk] || [])}</div></div></div>
-      <div class="tasklist">${L.tasks.length ? L.tasks.map(t => taskRowHtml(t, { locked: true, historical: true, listKey: lk })).join('') : '<div class="empty" style="padding:18px">No tasks recorded for this shift.</div>'}</div></div>`;
+      <div class="tasklist">${L.tasks.length ? L.tasks.map(t => taskRowHtml(t, { locked: true, historical: true, listKey: lk, date: key })).join('') : '<div class="empty" style="padding:18px">No tasks recorded for this shift.</div>'}</div>
+      <div class="card-foot"><button class="btn btn-sm" data-act="evidence-audit" data-list="${lk}" data-date="${key}">Evidence audit</button></div></div>`;
   };
   openModal(`
     <div class="modal-head"><div style="flex:1">
@@ -6859,6 +7390,7 @@ function toggleTask(lk, id) {
   if (!me().active) { toast('This account is disabled', 'warn'); return; }
   const t = L.tasks.find(x => x.id === id); if (!t) return;
   if (isSupabaseMode()) {
+    if (t.status !== 'done' && !taskPhotoSatisfied(t, L)) { openTaskEvidence(lk, id); return; }
     if (REMOTE_MUTATIONS.has(t.id)) return;
     REMOTE_MUTATIONS.add(t.id);
     const previous = { status: t.status, doneBy: t.doneBy, doneAt: t.doneAt, reason: t.reason };
@@ -7265,6 +7797,8 @@ async function tickAll(lk) {
   if (L.submitted) { toast('Reopen the shift first', 'warn'); return; }
   const changed = L.tasks.filter(t => t.status !== 'done');
   if (isSupabaseMode()) {
+    const missing = changed.filter(task => !taskPhotoSatisfied(task, L));
+    if (missing.length) { toast(`${missing.length} task(s) need a photo or manager exemption before marking all Done.`, 'warn'); openTaskEvidence(lk, missing[0].id); return; }
     const previous = changed.map(t => ({ task: t, status: t.status, doneBy: t.doneBy, doneAt: t.doneAt, reason: t.reason }));
     changed.forEach(t => { t.status = 'done'; t.doneBy = me().id; t.doneAt = new Date().toISOString(); t.reason = ''; });
     try {
@@ -7294,6 +7828,9 @@ async function handleAct(act, ds) {
   const day = isSupabaseMode() ? loadedSupabaseDay() : today();
   switch (act) {
     case 'today-reload': await refreshOperatingDays(true); break;
+    case 'task-evidence': openTaskEvidence(ds.list, ds.id, ds.date); break;
+    case 'evidence-audit': openShiftEvidenceAudit(ds.list, ds.date); break;
+    case 'photo-retention': openPhotoRetention(ds.organisation); break;
     case 'add-organisation': openOrganisationEditor(); break;
     case 'organisation-team':
       await selectOrganisation(ds.organisation);
@@ -7724,6 +8261,11 @@ function openSupabaseResetConfirmation() {
   });
 }
 
+$('#modal-root').addEventListener('click', e => {
+  const button = e.target.closest('[data-act="task-evidence"],[data-act="evidence-audit"]');
+  if (button) { e.preventDefault(); handleAct(button.dataset.act, button.dataset); }
+});
+
 $('#app').addEventListener('click', async e => {
   const a = e.target.closest('[data-act]');
   if (a && $('#app').contains(a) && !e.target.closest('#modal-root')) { e.preventDefault(); handleAct(a.dataset.act, a.dataset); return; }
@@ -7768,6 +8310,7 @@ $('#user-switch').addEventListener('change', e => {
 });
 
 async function switchVenue(id) {
+  if (PHOTO_PANEL || EVIDENCE_LINK_VIEW) closeModal();
   if (!selectVenue(id)) return;
   R.list = 'open';
   R.rosterEditor = null;
@@ -7890,6 +8433,8 @@ function showAuthLoading() {
 }
 
 function showLogin(message, allowLogout = false) {
+  if (PHOTO_PANEL || EVIDENCE_LINK_VIEW) closeModal();
+  EVIDENCE_LINK_HANDLED = '';
   $('#app').hidden = true;
   $('#auth-screen').hidden = false;
   $('#auth-loading').hidden = true;
@@ -7922,6 +8467,8 @@ function showApp() {
 }
 
 async function restoreAuthenticatedApp(session) {
+  if (PHOTO_PANEL && (!session || session.user.id !== PHOTO_PANEL.userId)) closeModal();
+  if (EVIDENCE_LINK_VIEW && (!session || session.user.id !== EVIDENCE_LINK_VIEW.userId)) closeModal();
   const restoreId = ++AUTH_RESTORE_ID;
   AUTH.session = session;
   if (!session) {
@@ -7987,6 +8534,7 @@ async function restoreAuthenticatedApp(session) {
     if (R.tab === 'history') loadSupabaseHistory();
   }
   else loadSupabaseMyRosterWeek(rosterWeekStartKey(operatingDayKey()), true);
+  await openEvidenceLinkFromLocation();
 }
 
 async function signIn(event) {

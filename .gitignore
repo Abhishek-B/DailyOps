@@ -7,3 +7,4 @@ Thumbs.db
 node_modules/
 .supabase/
 .vscode/
+supabase/functions/_shared/photo-decoder/

@@ -491,4 +491,62 @@ test('migrations, venue permissions and shared-shift submission', async t => {
     assert.equal(await scalar('select status from daily_tasks where id=$1', [taskId]), 'done');
     assert.deepEqual((await db.query('select * from task_evidence_submissions where checklist_id=$1 and notification_revision=$2', [photoChecklist, revision])).rows, before);
   });
+
+  const cleanupChecklist = await scalar("select id from daily_checklists where venue_id=$1 and work_date=$2 and list_type='close'", [id(300), photoDate]);
+  await addPhotoTask(id(360), true, cleanupChecklist);
+  await reserve(id(360), id(361));
+  await upload(id(360), id(362));
+
+  await t.test('upload rejection is service-only, owner-bound and never removes verified evidence', async () => {
+    for (const userId of [id(1), id(2), id(3)]) {
+      await assert.rejects(asUser(userId, () => db.query('select reject_task_evidence_upload($1,$2)', [id(361), id(3)])), /permission denied/);
+      await assert.rejects(asUser(userId, () => db.query('select record_task_evidence_cleanup_failure($1,$2)', [id(361), 'fake'])), /permission denied/);
+      await assert.rejects(asUser(userId, () => db.query('select requeue_late_task_evidence_objects()')), /permission denied/);
+    }
+    await assert.rejects(asService(() => db.query('select reject_task_evidence_upload($1,$2)', [id(361), id(4)])), /owner does not match/);
+    await asService(() => db.query('select reject_task_evidence_upload($1,$2)', [id(361), id(3)]));
+    assert.equal(await scalar('select state from task_evidence where id=$1', [id(361)]), 'delete_pending');
+    assert.equal(await scalar('select deletion_reason from task_evidence where id=$1', [id(361)]), 'abandoned');
+    await asService(() => db.query('select reject_task_evidence_upload($1,$2)', [id(362), id(3)]));
+    assert.equal(await scalar('select state from task_evidence where id=$1', [id(362)]), 'ready');
+  });
+
+  await t.test('cleanup failures back off, preserve queued objects and clear errors only after deletion', async () => {
+    await asService(() => db.query('select record_task_evidence_cleanup_failure($1,$2)', [id(361), 'storage_remove_failed']));
+    const first = (await db.query('select * from task_evidence where id=$1', [id(361)])).rows[0];
+    assert.equal(first.cleanup_attempts, 1);
+    assert.equal(first.cleanup_last_error, 'storage_remove_failed');
+    assert.equal(first.state, 'delete_pending');
+    assert.equal(first.deleted_at, null);
+    assert.equal(await scalar('select cleanup_next_attempt_at > clock_timestamp() from task_evidence where id=$1', [id(361)]), true);
+    await asService(() => db.query('select record_task_evidence_cleanup_failure($1,$2)', [id(361), 'x'.repeat(500)]));
+    assert.equal(await scalar('select length(cleanup_last_error) from task_evidence where id=$1', [id(361)]), 200);
+    assert.equal(await scalar('select extract(epoch from cleanup_next_attempt_at-cleanup_last_attempt_at)::int from task_evidence where id=$1', [id(361)]), 60);
+    await asService(() => db.query('select confirm_task_evidence_deleted($1)', [id(361)]));
+    assert.equal(await scalar('select state from task_evidence where id=$1', [id(361)]), 'deleted');
+    assert.equal(await scalar('select cleanup_last_error from task_evidence where id=$1', [id(361)]), null);
+    const count = await scalar('select cleanup_attempts from task_evidence where id=$1', [id(361)]);
+    await asService(() => db.query('select confirm_task_evidence_deleted($1)', [id(361)]));
+    await asService(() => db.query('select record_task_evidence_cleanup_failure($1,$2)', [id(361), 'late failure']));
+    assert.equal(await scalar('select cleanup_attempts from task_evidence where id=$1', [id(361)]), count);
+    assert.equal(await scalar('select cleanup_last_error from task_evidence where id=$1', [id(361)]), null);
+  });
+
+  await t.test('late Storage arrivals requeue only known deleted paths without reviving evidence', async () => {
+    const path = await scalar('select object_path from task_evidence where id=$1', [id(361)]);
+    await db.query("insert into storage.objects(bucket_id,name,metadata) values ('task-evidence',$1,$2)", [path, { size: 1024, mimetype: 'image/jpeg' }]);
+    await db.exec("insert into storage.objects(bucket_id,name) values ('task-evidence','unrelated-admin-file')");
+    const snapshots = await scalar('select count(*)::int from task_evidence_submissions');
+    assert.equal(await asService(() => scalar('select requeue_late_task_evidence_objects()')), 1);
+    assert.equal(await scalar('select state from task_evidence where id=$1', [id(361)]), 'delete_pending');
+    assert.equal(await scalar('select deleted_at from task_evidence where id=$1', [id(361)]), null);
+    assert.equal(await scalar('select cleanup_last_error from task_evidence where id=$1', [id(361)]), 'late_upload_requeued');
+    assert.equal(await asUser(id(3), () => scalar('select can_read_task_evidence($1)', [path])), false);
+    assert.equal(await scalar('select state from task_evidence where id=$1', [id(362)]), 'ready');
+    assert.equal(await scalar('select count(*)::int from task_evidence_submissions'), snapshots);
+    assert.equal(await asService(() => scalar('select requeue_late_task_evidence_objects()')), 0);
+    await assert.rejects(asService(() => db.query('select requeue_late_task_evidence_objects($1)', [501])), /between 1 and 500/);
+    await assert.rejects(asService(() => db.query('select confirm_task_evidence_deleted($1)', [id(361)])), /Storage API/);
+    assert.equal(await scalar("select count(*)::int from storage.objects where name='unrelated-admin-file'"), 1);
+  });
 });
